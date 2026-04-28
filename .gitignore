@@ -4,6 +4,7 @@ dist/
 .env
 .env.*
 !.env.example
+!.env.feiniu.example
 target/
 *.log
 .idea/
