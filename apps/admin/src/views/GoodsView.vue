@@ -676,13 +676,49 @@ onMounted(() => {
     </article>
   </section>
 
-  <el-dialog v-model="goodsEditorVisible" :title="formTitle" width="980px" class="goods-editor-dialog">
-    <p class="dialog-hint">{{ formSubtitle }}</p>
-    <div class="editor-steps">
-      <button type="button" :class="{ active: editorStep === 'base' }" @click="editorStep = 'base'">1 商品基本信息</button>
-      <button type="button" :class="{ active: editorStep === 'detail' }" @click="editorStep = 'detail'">2 商品详情</button>
-    </div>
-    <el-form :model="form" label-position="top" class="goods-form dialog-goods-form">
+  <el-dialog v-model="goodsEditorVisible" width="1120px" class="goods-editor-dialog" :show-close="false">
+    <template #header>
+      <div class="editor-header">
+        <div>
+          <span class="editor-kicker">商品配置</span>
+          <h2>{{ formTitle }}</h2>
+          <p>{{ formSubtitle }}</p>
+        </div>
+        <button type="button" class="editor-close" aria-label="关闭商品弹窗" @click="goodsEditorVisible = false">
+          <X :size="18" />
+        </button>
+      </div>
+    </template>
+
+    <div class="editor-shell">
+      <aside class="editor-rail">
+        <button type="button" :class="{ active: editorStep === 'base' }" @click="editorStep = 'base'">
+          <strong>01</strong>
+          <span>商品基本信息</span>
+          <em>类型、分类、价格、库存、平台与上游对接</em>
+        </button>
+        <button type="button" :class="{ active: editorStep === 'detail' }" @click="editorStep = 'detail'">
+          <strong>02</strong>
+          <span>商品详情</span>
+          <em>长图、多图、文案与使用说明编排</em>
+        </button>
+        <div class="editor-summary">
+          <span>当前类型</span>
+          <strong>{{ deliveryLabel(form.deliveryType) }}</strong>
+          <span>权益时间</span>
+          <strong>{{ form.benefitDurations?.length ? form.benefitDurations.join(' / ') : '未设置' }}</strong>
+          <span>对接商品</span>
+          <strong>{{ form.integrations?.length || 0 }} 个</strong>
+        </div>
+      </aside>
+
+      <div class="editor-main">
+        <div class="editor-steps">
+          <button type="button" :class="{ active: editorStep === 'base' }" @click="editorStep = 'base'">商品基本信息</button>
+          <button type="button" :class="{ active: editorStep === 'detail' }" @click="editorStep = 'detail'">商品详情</button>
+        </div>
+
+        <el-form :model="form" label-position="top" class="goods-form dialog-goods-form">
       <template v-if="editorStep === 'base'">
       <section class="form-section">
         <h3>基础资料</h3>
@@ -883,12 +919,23 @@ onMounted(() => {
         </el-form-item>
       </section>
       </template>
-    </el-form>
+        </el-form>
+      </div>
+    </div>
     <template #footer>
-      <el-button :icon="X" @click="goodsEditorVisible = false">取消</el-button>
-      <el-button type="primary" :icon="editingGoodsId ? Edit3 : Plus" :loading="saving" @click="submitGoods">
-        {{ editingGoodsId ? '保存修改' : '创建商品' }}
-      </el-button>
+      <div class="editor-footer">
+        <div class="footer-status">
+          <span>{{ editorStep === 'base' ? '正在编辑商品基本信息' : '正在编辑商品详情' }}</span>
+        </div>
+        <div>
+          <el-button :icon="X" @click="goodsEditorVisible = false">取消</el-button>
+          <el-button v-if="editorStep === 'base'" type="primary" @click="editorStep = 'detail'">下一步：商品详情</el-button>
+          <el-button v-else @click="editorStep = 'base'">返回基本信息</el-button>
+          <el-button type="primary" :icon="editingGoodsId ? Edit3 : Plus" :loading="saving" @click="submitGoods">
+            {{ editingGoodsId ? '保存修改' : '创建商品' }}
+          </el-button>
+        </div>
+      </div>
     </template>
   </el-dialog>
 
@@ -1046,25 +1093,184 @@ onMounted(() => {
 .dialog-goods-form {
   display: grid;
   gap: 14px;
-  max-height: 68vh;
+  max-height: 66vh;
   overflow: auto;
-  padding-right: 8px;
+  padding: 2px 8px 2px 2px;
+}
+
+:global(.goods-editor-dialog) {
+  --el-dialog-bg-color: rgba(8, 17, 31, 0.88);
+  --el-dialog-padding-primary: 0;
+  overflow: hidden;
+  border-radius: 24px;
+  color: rgba(255, 255, 255, 0.84);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(0, 255, 195, 0.14), transparent 34%),
+    radial-gradient(circle at 94% 10%, rgba(88, 166, 255, 0.18), transparent 28%),
+    rgba(8, 17, 31, 0.9) !important;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(34px) saturate(180%);
+  -webkit-backdrop-filter: blur(34px) saturate(180%);
+}
+
+:global(.goods-editor-dialog .el-dialog__header),
+:global(.goods-editor-dialog .el-dialog__body),
+:global(.goods-editor-dialog .el-dialog__footer) {
+  padding: 0;
+  margin: 0;
+}
+
+:global(.goods-editor-dialog .el-dialog__body) {
+  color: rgba(255, 255, 255, 0.84);
+}
+
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.editor-kicker {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: #071410;
+  font-size: 12px;
+  font-weight: 700;
+  background: #00ffc3;
+}
+
+.editor-header h2 {
+  margin: 10px 0 4px;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 22px;
+}
+
+.editor-header p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.52);
+}
+
+.editor-close {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+
+.editor-shell {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: 560px;
+}
+
+.editor-rail {
+  padding: 18px;
+  border-right: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(2, 8, 16, 0.28);
+}
+
+.editor-rail button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 4px 10px;
+  padding: 14px;
+  margin-bottom: 10px;
+  text-align: left;
+  border-radius: 16px;
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.editor-rail button:active {
+  transform: scale(0.99);
+}
+
+.editor-rail button.active {
+  color: rgba(255, 255, 255, 0.94);
+  border-color: rgba(0, 255, 195, 0.32);
+  background: rgba(0, 255, 195, 0.09);
+}
+
+.editor-rail strong {
+  grid-row: 1 / 3;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: #04100d;
+  background: rgba(0, 255, 195, 0.88);
+}
+
+.editor-rail span {
+  font-weight: 700;
+}
+
+.editor-rail em {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.editor-summary {
+  display: grid;
+  gap: 6px;
+  margin-top: 18px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.editor-summary span {
+  color: rgba(255, 255, 255, 0.44);
+  font-size: 12px;
+}
+
+.editor-summary strong {
+  margin-bottom: 8px;
+  color: rgba(255, 255, 255, 0.82);
+  font-weight: 650;
+}
+
+.editor-main {
+  min-width: 0;
+  padding: 18px;
 }
 
 .editor-steps {
-  display: inline-flex;
+  display: flex;
   gap: 6px;
   padding: 4px;
-  margin-bottom: 12px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  margin-bottom: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
 }
 
 .editor-steps button {
-  height: 34px;
+  flex: 1;
+  height: 38px;
   padding: 0 16px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 12px;
   color: rgba(255, 255, 255, 0.64);
   background: transparent;
   cursor: pointer;
@@ -1076,14 +1282,15 @@ onMounted(() => {
 }
 
 .form-section {
-  padding: 14px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.038);
+  border: 0.5px solid rgba(255, 255, 255, 0.095);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .form-section h3 {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   font-size: 15px;
   font-weight: 650;
   color: rgba(255, 255, 255, 0.86);
@@ -1092,7 +1299,7 @@ onMounted(() => {
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 12px;
 }
 
 .form-grid.three {
@@ -1268,11 +1475,11 @@ onMounted(() => {
 }
 
 .integration-card {
-  padding: 12px;
+  padding: 14px;
   margin-top: 10px;
   border-radius: 16px;
-  background: rgba(4, 13, 22, 0.32);
-  border: 0.5px solid rgba(255, 255, 255, 0.09);
+  background: rgba(4, 13, 22, 0.42);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
 }
 
 .upstream-snapshot {
@@ -1282,6 +1489,26 @@ onMounted(() => {
   padding-top: 8px;
   color: rgba(255, 255, 255, 0.56);
   font-size: 12px;
+}
+
+.editor-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 18px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.09);
+  background: rgba(2, 8, 16, 0.34);
+}
+
+.editor-footer > div:last-child {
+  display: flex;
+  gap: 10px;
+}
+
+.footer-status {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 13px;
 }
 
 .form-actions,
