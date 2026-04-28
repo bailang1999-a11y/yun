@@ -784,7 +784,7 @@ onMounted(() => {
               </el-form-item>
               <el-form-item label="权益时间">
                 <el-checkbox-group v-model="form.benefitDurations" class="benefit-options">
-                  <el-checkbox v-for="item in benefitDurationOptions" :key="item" :label="item">{{ item }}</el-checkbox>
+                  <el-checkbox v-for="item in benefitDurationOptions" :key="item" :value="item">{{ item }}</el-checkbox>
                 </el-checkbox-group>
               </el-form-item>
             </section>
@@ -841,14 +841,14 @@ onMounted(() => {
               </div>
               <el-form-item label="可售平台">
                 <el-checkbox-group v-model="form.availablePlatforms" class="platform-checks">
-                  <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.value">
+                  <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value">
                     {{ item.label }}
                   </el-checkbox>
                 </el-checkbox-group>
               </el-form-item>
               <el-form-item label="不支持平台说明">
                 <el-checkbox-group v-model="form.forbiddenPlatforms" class="platform-checks">
-                  <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.value">
+                  <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value">
                     {{ item.label }}
                   </el-checkbox>
                 </el-checkbox-group>
@@ -904,7 +904,7 @@ onMounted(() => {
               <el-form-item v-if="form.deliveryType !== 'CARD'" label="充值账号要求">
                 <el-checkbox v-model="form.requireRechargeAccount">要求用户填写充值账号</el-checkbox>
                 <el-checkbox-group v-if="form.requireRechargeAccount" v-model="form.accountTypes" class="platform-checks account-checks">
-                  <el-checkbox v-for="item in accountTypeOptions" :key="item.value" :label="item.value">
+                  <el-checkbox v-for="item in accountTypeOptions" :key="item.value" :label="item.label" :value="item.value">
                     {{ item.label }}
                   </el-checkbox>
                 </el-checkbox-group>
