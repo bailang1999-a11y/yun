@@ -244,6 +244,25 @@ public class InMemoryShopRepository {
             .toList();
     }
 
+    public synchronized UserGroupItem createUserGroup(CreateUserGroupRequest request) {
+        String name = request == null ? "" : defaultText(request.name(), "").trim();
+        if (!StringUtils.hasText(name)) {
+            throw new IllegalArgumentException("group name is required");
+        }
+        Long id = userGroups.keySet().stream().max(Long::compareTo).orElse(0L) + 1;
+        UserGroupItem item = new UserGroupItem(
+            id,
+            name,
+            defaultText(request.description(), "自定义会员等级"),
+            Boolean.TRUE.equals(request.defaultGroup()),
+            0,
+            defaultText(request.status(), "ENABLED"),
+            List.of()
+        );
+        userGroups.put(id, item);
+        return item;
+    }
+
     public synchronized List<GroupRuleItem> updateGroupRules(Long groupId, UpdateGroupRulesRequest request) {
         if (!userGroups.containsKey(groupId)) {
             throw new IllegalArgumentException("user group not found");
@@ -691,9 +710,13 @@ public class InMemoryShopRepository {
             firstText(request.name(), request.goodsName(), "新商品 " + id),
             defaultText(request.subTitle(), "MVP 内存商品"),
             defaultText(request.description(), "这是一个用于前端联调的内存商品。"),
+            normalizeTextList(request.benefitDurations()),
             defaultText(request.coverUrl(), "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80"),
             normalizeImages(request.detailImages()),
             normalizeDetailBlocks(request.detailBlocks()),
+            normalizeIntegrations(request.integrations()),
+            Boolean.TRUE.equals(request.pollingEnabled()),
+            Boolean.TRUE.equals(request.monitoringEnabled()),
             type,
             defaultText(request.platform(), "GENERAL"),
             request.price() == null ? BigDecimal.valueOf(9.90) : request.price(),
@@ -734,9 +757,13 @@ public class InMemoryShopRepository {
             firstText(request.name(), request.goodsName(), current.name()),
             defaultText(request.subTitle(), current.subTitle()),
             defaultText(request.description(), current.description()),
+            request.benefitDurations() == null ? current.benefitDurations() : normalizeTextList(request.benefitDurations()),
             defaultText(request.coverUrl(), current.coverUrl()),
             request.detailImages() == null ? current.detailImages() : normalizeImages(request.detailImages()),
             request.detailBlocks() == null ? current.detailBlocks() : normalizeDetailBlocks(request.detailBlocks()),
+            request.integrations() == null ? current.integrations() : normalizeIntegrations(request.integrations()),
+            request.pollingEnabled() == null ? current.pollingEnabled() : request.pollingEnabled(),
+            request.monitoringEnabled() == null ? current.monitoringEnabled() : request.monitoringEnabled(),
             type,
             defaultText(request.platform(), current.platform()),
             request.price() == null ? current.price() : request.price(),
@@ -1431,6 +1458,28 @@ public class InMemoryShopRepository {
             .toList();
     }
 
+    private List<GoodsIntegrationItem> normalizeIntegrations(List<GoodsIntegrationItem> integrations) {
+        if (integrations == null || integrations.isEmpty()) {
+            return List.of();
+        }
+        return integrations.stream()
+            .filter(Objects::nonNull)
+            .map(item -> new GoodsIntegrationItem(
+                defaultText(item.id(), UUID.randomUUID().toString()),
+                normalize(item.platformCode()),
+                defaultText(item.supplierGoodsId(), ""),
+                defaultText(item.supplierGoodsName(), ""),
+                item.supplierPrice() == null ? BigDecimal.ZERO : item.supplierPrice(),
+                defaultText(item.upstreamStatus(), "正常"),
+                item.upstreamStock() == null ? 0 : item.upstreamStock(),
+                defaultText(item.upstreamTitle(), item.supplierGoodsName()),
+                defaultText(item.lastSyncAt(), OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)),
+                item.enabled() == null || item.enabled()
+            ))
+            .filter(item -> StringUtils.hasText(item.platformCode()) || StringUtils.hasText(item.supplierGoodsId()))
+            .toList();
+    }
+
     private List<String> normalizeTextList(List<String> values) {
         if (values == null || values.isEmpty()) {
             return List.of();
@@ -1738,9 +1787,13 @@ public class InMemoryShopRepository {
             "视频会员周卡",
             "自动发卡，模拟支付后立即展示卡密",
             "适合前端联调自动发货链路的 CARD 商品。",
+            List.of("周卡"),
             "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=800&q=80",
             List.of("https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80"),
             List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "下单完成后自动出卡，订单详情页可查看卡密与使用说明。")),
+            List.of(new GoodsIntegrationItem("link-10001-1", "douyin", "DY-VIP-WEEK", "抖音视频会员周卡", BigDecimal.valueOf(5.80), "正常", 120, "视频会员周卡", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true)),
+            false,
+            true,
             GoodsType.CARD,
             "VIDEO",
             BigDecimal.valueOf(6.90),
@@ -1769,9 +1822,16 @@ public class InMemoryShopRepository {
             "游戏点券 60 枚",
             "直充商品，创建后进入采购中",
             "用于验证 DIRECT 商品的下单、采购中状态和充值账号字段。",
+            List.of("一天", "三天"),
             "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=800&q=80",
             List.of("https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80"),
             List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "直充商品会按渠道优先级自动采购，失败后自动切换备用渠道。")),
+            List.of(
+                new GoodsIntegrationItem("link-10002-1", "taobao", "TB-GAME-60", "淘宝游戏点券 60 枚", BigDecimal.valueOf(5.20), "正常", 999, "游戏点券 60 枚", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true),
+                new GoodsIntegrationItem("link-10002-2", "pdd", "PDD-GAME-60", "拼多多点券 60 枚", BigDecimal.valueOf(5.10), "正常", 860, "游戏点券 60 枚", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true)
+            ),
+            true,
+            true,
             GoodsType.DIRECT,
             "GAME",
             BigDecimal.valueOf(5.80),
@@ -1800,9 +1860,13 @@ public class InMemoryShopRepository {
             "资料人工代办服务",
             "人工处理商品，创建后等待客服处理",
             "用于验证 MANUAL 商品的待人工状态。",
+            List.of("月卡"),
             "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=800&q=80",
             List.of("https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80"),
             List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "代充订单由后台人工确认完成，适合需要客服处理的服务商品。")),
+            List.of(new GoodsIntegrationItem("link-10003-1", "private", "PR-MANUAL-001", "私域人工代办", BigDecimal.valueOf(16.00), "正常", 50, "资料人工代办服务", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true)),
+            false,
+            false,
             GoodsType.MANUAL,
             "SERVICE",
             BigDecimal.valueOf(19.90),

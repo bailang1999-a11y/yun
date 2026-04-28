@@ -74,6 +74,15 @@ public class AdminMvpController {
         return ApiResponse.ok(repository.listUserGroups());
     }
 
+    @PostMapping("/user-groups")
+    public ApiResponse<UserGroupItem> createUserGroup(@RequestBody CreateUserGroupRequest request) {
+        try {
+            return ApiResponse.ok(repository.createUserGroup(request));
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @GetMapping("/users")
     public ApiResponse<List<UserItem>> users() {
         return ApiResponse.ok(repository.listUsers());

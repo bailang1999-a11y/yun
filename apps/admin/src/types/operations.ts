@@ -13,6 +13,10 @@ export interface Goods {
   coverUrl?: string
   detailImages?: string[]
   detailBlocks?: GoodsDetailBlock[]
+  benefitDurations?: string[]
+  integrations?: GoodsIntegration[]
+  pollingEnabled?: boolean
+  monitoringEnabled?: boolean
   maxBuy?: number
   requireRechargeAccount?: boolean
   accountTypes?: string[]
@@ -24,6 +28,19 @@ export interface Goods {
   forbiddenPlatforms?: string[]
   description?: string
   createdAt?: string
+}
+
+export interface GoodsIntegration {
+  id?: string
+  platformCode?: string
+  supplierGoodsId?: string
+  supplierGoodsName?: string
+  supplierPrice?: number
+  upstreamStatus?: string
+  upstreamStock?: number
+  upstreamTitle?: string
+  lastSyncAt?: string
+  enabled?: boolean
 }
 
 export interface GoodsDetailBlock {
@@ -44,6 +61,10 @@ export interface GoodsCreatePayload {
   coverUrl?: string
   detailImages?: string[]
   detailBlocks?: GoodsDetailBlock[]
+  benefitDurations?: string[]
+  integrations?: GoodsIntegration[]
+  pollingEnabled?: boolean
+  monitoringEnabled?: boolean
   stock?: number
   maxBuy?: number
   requireRechargeAccount?: boolean
@@ -194,6 +215,13 @@ export interface UserGroup {
   userCount?: number
   status?: string
   rules: GroupRule[]
+}
+
+export interface UserGroupCreatePayload {
+  name: string
+  description?: string
+  defaultGroup?: boolean
+  status?: string
 }
 
 export interface UserAccount {

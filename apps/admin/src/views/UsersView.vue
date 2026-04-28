@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { RefreshCw, Save } from 'lucide-vue-next'
+import { Plus, RefreshCw, Save } from 'lucide-vue-next'
 import {
+  createUserGroup,
   fetchCategories,
   fetchUserGroups,
   fetchUsers,
   updateGroupRules,
   updateUserGroup
 } from '../api/admin'
-import type { Category, RulePermission, RuleType, UserAccount, UserGroup } from '../types/operations'
+import type { Category, RulePermission, RuleType, UserAccount, UserGroup, UserGroupCreatePayload } from '../types/operations'
 
 const platformOptions = [
   { label: '移动 H5', value: 'h5' },
@@ -22,9 +23,16 @@ const users = ref<UserAccount[]>([])
 const categories = ref<Category[]>([])
 const selectedGroupId = ref<string>('')
 const loading = ref(false)
+const groupDialogVisible = ref(false)
 const savingType = ref<RuleType | ''>('')
 const categoryRules = reactive<Record<string, RulePermission>>({})
 const platformRules = reactive<Record<string, RulePermission>>({})
+const groupForm = reactive<UserGroupCreatePayload>({
+  name: '',
+  description: '',
+  defaultGroup: false,
+  status: 'ENABLED'
+})
 
 const selectedGroup = computed(() => groups.value.find((item) => String(item.id) === selectedGroupId.value))
 const categoryOptions = computed(() => flattenCategoryTree(buildCategoryTree(categories.value)))
@@ -135,6 +143,31 @@ async function changeUserGroup(row: UserAccount) {
     ElMessage.error('用户分组更新失败')
   }
 }
+
+async function submitGroup() {
+  if (!groupForm.name.trim()) {
+    ElMessage.warning('请填写会员等级名称')
+    return
+  }
+  try {
+    const next = await createUserGroup({
+      ...groupForm,
+      name: groupForm.name.trim(),
+      description: groupForm.description?.trim()
+    })
+    groups.value.push(next)
+    selectedGroupId.value = String(next.id)
+    hydrateRules()
+    groupDialogVisible.value = false
+    groupForm.name = ''
+    groupForm.description = ''
+    groupForm.defaultGroup = false
+    groupForm.status = 'ENABLED'
+    ElMessage.success('会员等级已新增')
+  } catch {
+    ElMessage.error('新增会员等级失败')
+  }
+}
 </script>
 
 <template>
@@ -145,7 +178,10 @@ async function changeUserGroup(row: UserAccount) {
           <h2>用户组</h2>
           <span>分类与平台可见性</span>
         </div>
-        <el-button :icon="RefreshCw" :loading="loading" aria-label="刷新权限数据" @click="loadAll" />
+        <div class="group-actions">
+          <el-button type="primary" :icon="Plus" @click="groupDialogVisible = true">新增会员等级</el-button>
+          <el-button :icon="RefreshCw" :loading="loading" aria-label="刷新权限数据" @click="loadAll" />
+        </div>
       </div>
 
       <button
@@ -232,6 +268,27 @@ async function changeUserGroup(row: UserAccount) {
       </el-table>
     </article>
   </section>
+
+  <el-dialog v-model="groupDialogVisible" title="新增会员等级" width="520px">
+    <el-form :model="groupForm" label-position="top">
+      <el-form-item label="会员等级名称">
+        <el-input v-model="groupForm.name" placeholder="例如：高级会员" />
+      </el-form-item>
+      <el-form-item label="等级说明">
+        <el-input v-model="groupForm.description" type="textarea" :rows="3" placeholder="可自定义该等级说明" />
+      </el-form-item>
+      <el-form-item label="启用状态">
+        <el-select v-model="groupForm.status">
+          <el-option label="启用" value="ENABLED" />
+          <el-option label="停用" value="DISABLED" />
+        </el-select>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="groupDialogVisible = false">取消</el-button>
+      <el-button type="primary" :icon="Plus" @click="submitGroup">新增等级</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -279,6 +336,11 @@ h3 {
 .panel-head span {
   color: rgba(255, 255, 255, 0.48);
   font-size: 13px;
+}
+
+.group-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .group-row {

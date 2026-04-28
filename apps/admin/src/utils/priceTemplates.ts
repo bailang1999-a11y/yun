@@ -1,18 +1,35 @@
 export interface PriceTemplate {
   id: string
   name: string
-  groupName: string
-  markupPercent: number
+  adjustMode: 'fixed' | 'percent'
+  referencePrice: number
+  groupRates: PriceGroupRate[]
   enabled: boolean
+}
+
+export interface PriceGroupRate {
+  groupName: string
+  color: string
+  value: number
 }
 
 const STORAGE_KEY = 'xiyiyun_price_templates'
 
 export const defaultPriceTemplates: PriceTemplate[] = [
-  { id: 'retail-default', name: '默认零售模板', groupName: '普通会员', markupPercent: 0, enabled: true },
-  { id: 'member-standard', name: '会员标准加价', groupName: '标准会员', markupPercent: 8, enabled: true },
-  { id: 'vip-channel', name: 'VIP 渠道加价', groupName: 'VIP 会员', markupPercent: 5, enabled: true },
-  { id: 'manual-service', name: '人工服务加价', groupName: '代充会员', markupPercent: 12, enabled: true }
+  {
+    id: 'retail-default',
+    name: '默认加价模板',
+    adjustMode: 'percent',
+    referencePrice: 100,
+    enabled: true,
+    groupRates: [
+      { groupName: '零售会员', color: '#ffb300', value: 110 },
+      { groupName: '私密会员', color: '#24364d', value: 108 },
+      { groupName: '高级会员', color: '#12a594', value: 106 },
+      { groupName: '合作伙伴', color: '#0d9488', value: 105 },
+      { groupName: '店铺会员', color: '#009688', value: 103 }
+    ]
+  }
 ]
 
 export function loadPriceTemplates() {
@@ -20,7 +37,17 @@ export function loadPriceTemplates() {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return [...defaultPriceTemplates]
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) && parsed.length ? parsed : [...defaultPriceTemplates]
+    if (!Array.isArray(parsed) || !parsed.length) return [...defaultPriceTemplates]
+    return parsed.map((item) => ({
+      id: item.id,
+      name: item.name,
+      adjustMode: item.adjustMode || 'percent',
+      referencePrice: Number(item.referencePrice) || 100,
+      enabled: item.enabled !== false,
+      groupRates: Array.isArray(item.groupRates) && item.groupRates.length
+        ? item.groupRates
+        : [{ groupName: item.groupName || '默认会员', color: '#12a594', value: 100 + (Number(item.markupPercent) || 0) }]
+    }))
   } catch {
     return [...defaultPriceTemplates]
   }

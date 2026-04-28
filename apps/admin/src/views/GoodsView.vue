@@ -48,6 +48,7 @@ const cardText = ref('')
 const editingGoodsId = ref<Goods['id']>()
 const detailBlocks = ref<GoodsDetailBlock[]>([])
 const priceTemplates = ref(loadPriceTemplates())
+const editorStep = ref<'base' | 'detail'>('base')
 const goodsFilters = reactive({
   categoryId: '',
   platform: '',
@@ -75,6 +76,8 @@ const deliveryOptions = [
   { label: '直充', value: 'DIRECT' }
 ]
 
+const benefitDurationOptions = ['一天', '三天', '周卡', '半月', '月卡', '季卡', '半年', '一年']
+
 const accountTypeOptions = [
   { label: '手机号', value: 'mobile' },
   { label: 'QQ号', value: 'qq' },
@@ -97,6 +100,10 @@ const form = reactive<GoodsCreatePayload>({
   platform: 'GENERAL',
   availablePlatforms: ['douyin', 'taobao', 'private'],
   forbiddenPlatforms: [],
+  benefitDurations: [],
+  integrations: [],
+  pollingEnabled: false,
+  monitoringEnabled: false,
   maxBuy: 1,
   requireRechargeAccount: false,
   accountTypes: [],
@@ -205,9 +212,42 @@ function applyPriceTemplate(templateId?: string) {
   const template = enabledPriceTemplates.value.find((item) => item.id === templateId)
   if (!template) return
   form.priceTemplateId = template.id
-  form.priceMode = template.markupPercent > 0 ? 'DYNAMIC' : 'FIXED'
-  form.priceCoefficient = Number((1 + template.markupPercent / 100).toFixed(2))
+  const firstRate = template.groupRates?.[0]?.value || 100
+  form.priceMode = 'DYNAMIC'
+  form.priceCoefficient = Number((firstRate / 100).toFixed(2))
   form.priceFixedAdd = 0
+}
+
+function addIntegration() {
+  form.integrations = [
+    ...(form.integrations || []),
+    {
+      id: `link-${Date.now()}`,
+      platformCode: 'taobao',
+      supplierGoodsId: '',
+      supplierGoodsName: '',
+      supplierPrice: 0,
+      upstreamStatus: '待刷新',
+      upstreamStock: 0,
+      upstreamTitle: '',
+      lastSyncAt: '',
+      enabled: true
+    }
+  ]
+}
+
+function removeIntegration(index: number) {
+  form.integrations = (form.integrations || []).filter((_, itemIndex) => itemIndex !== index)
+}
+
+function refreshIntegration(index: number) {
+  const item = form.integrations?.[index]
+  if (!item) return
+  item.upstreamStatus = item.enabled === false ? '已禁用' : '正常'
+  item.upstreamTitle = item.supplierGoodsName || item.upstreamTitle || '上游商品'
+  item.upstreamStock = Number(item.upstreamStock || 0) + 1
+  item.lastSyncAt = new Date().toLocaleString('zh-CN')
+  ElMessage.success('已刷新对接信息')
 }
 
 function buildCategoryTree(items: Category[]) {
@@ -288,6 +328,10 @@ function resetForm() {
   form.platform = 'GENERAL'
   form.availablePlatforms = ['douyin', 'taobao', 'private']
   form.forbiddenPlatforms = []
+  form.benefitDurations = []
+  form.integrations = []
+  form.pollingEnabled = false
+  form.monitoringEnabled = false
   form.maxBuy = 1
   form.requireRechargeAccount = false
   form.accountTypes = []
@@ -296,6 +340,7 @@ function resetForm() {
   form.priceCoefficient = 1
   form.priceFixedAdd = 0
   form.description = ''
+  editorStep.value = 'base'
 }
 
 function fillForm(row: Goods) {
@@ -319,6 +364,10 @@ function fillForm(row: Goods) {
   form.platform = row.platform || 'GENERAL'
   form.availablePlatforms = row.availablePlatforms?.length ? [...row.availablePlatforms] : ['private']
   form.forbiddenPlatforms = row.forbiddenPlatforms?.length ? [...row.forbiddenPlatforms] : []
+  form.benefitDurations = [...(row.benefitDurations || [])]
+  form.integrations = row.integrations?.length ? row.integrations.map((item) => ({ ...item })) : []
+  form.pollingEnabled = Boolean(row.pollingEnabled)
+  form.monitoringEnabled = Boolean(row.monitoringEnabled)
   form.maxBuy = row.maxBuy || 1
   form.requireRechargeAccount = Boolean(row.requireRechargeAccount)
   form.accountTypes = [...(row.accountTypes || [])]
@@ -327,6 +376,7 @@ function fillForm(row: Goods) {
   form.priceCoefficient = row.priceCoefficient || 1
   form.priceFixedAdd = row.priceFixedAdd || 0
   form.description = row.description || ''
+  editorStep.value = 'base'
 }
 
 function openCreate() {
@@ -409,6 +459,8 @@ async function submitGoods() {
       coverUrl: form.coverUrl?.trim(),
       detailImages: normalizedBlocks.map((item) => item.imageUrl).filter(Boolean),
       detailBlocks: normalizedBlocks,
+      integrations: form.integrations || [],
+      benefitDurations: form.benefitDurations || [],
       description: form.description?.trim()
     }
     if (editingGoodsId.value) {
@@ -578,6 +630,14 @@ onMounted(() => {
         <el-table-column label="分类" min-width="160" show-overflow-tooltip>
           <template #default="{ row }">{{ categoryLabel(row) }}</template>
         </el-table-column>
+        <el-table-column label="权益时间" min-width="180">
+          <template #default="{ row }">
+            <div class="benefit-cards">
+              <span v-for="item in row.benefitDurations || []" :key="item">{{ item }}</span>
+              <em v-if="!row.benefitDurations?.length">未设置</em>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="售价" width="120">
           <template #default="{ row }">{{ formatMoney(row.price) }}</template>
         </el-table-column>
@@ -618,7 +678,12 @@ onMounted(() => {
 
   <el-dialog v-model="goodsEditorVisible" :title="formTitle" width="980px" class="goods-editor-dialog">
     <p class="dialog-hint">{{ formSubtitle }}</p>
+    <div class="editor-steps">
+      <button type="button" :class="{ active: editorStep === 'base' }" @click="editorStep = 'base'">1 商品基本信息</button>
+      <button type="button" :class="{ active: editorStep === 'detail' }" @click="editorStep = 'detail'">2 商品详情</button>
+    </div>
     <el-form :model="form" label-position="top" class="goods-form dialog-goods-form">
+      <template v-if="editorStep === 'base'">
       <section class="form-section">
         <h3>基础资料</h3>
         <div class="form-grid">
@@ -645,10 +710,48 @@ onMounted(() => {
         <el-form-item label="商品副标题">
           <el-input v-model="form.subTitle" placeholder="例如：自动发卡，秒级到账" />
         </el-form-item>
+        <el-form-item label="权益时间">
+          <el-checkbox-group v-model="form.benefitDurations" class="benefit-options">
+            <el-checkbox v-for="item in benefitDurationOptions" :key="item" :label="item">{{ item }}</el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
       </section>
 
       <section class="form-section">
-        <h3>图片与详情编排</h3>
+        <h3>价格与库存</h3>
+        <div class="form-grid three">
+          <el-form-item label="价格模板">
+            <el-select v-model="form.priceTemplateId" placeholder="选择价格模板" @change="applyPriceTemplate">
+              <el-option
+                v-for="item in enabledPriceTemplates"
+                :key="item.id"
+                :label="`${item.name} · ${item.groupRates?.length || 0} 个会员等级`"
+                :value="item.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="售价">
+            <el-input-number v-model="form.price" :min="0" :precision="2" :step="1" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="库存">
+            <el-input-number v-model="form.stock" :min="0" :step="1" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="状态">
+            <el-select v-model="form.status">
+              <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="最大购买数量">
+            <el-input-number v-model="form.maxBuy" :min="1" :step="1" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="划线原价">
+            <el-input-number v-model="form.originalPrice" :min="0" :precision="2" :step="1" controls-position="right" placeholder="选填" />
+          </el-form-item>
+        </div>
+      </section>
+
+      <section class="form-section">
+        <h3>商品主图与销售平台</h3>
         <div class="cover-uploader">
           <el-upload :before-upload="handleCoverUpload" :show-file-list="false" accept="image/*">
             <div class="upload-tile">
@@ -664,7 +767,84 @@ onMounted(() => {
             <span>支持本地图片上传，保存为当前商品主图。建议 800x800 或 1:1。</span>
           </div>
         </div>
+        <el-form-item label="可售平台">
+          <el-checkbox-group v-model="form.availablePlatforms" class="platform-checks">
+            <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.value">
+              {{ item.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+        <el-form-item label="不支持平台说明">
+          <el-checkbox-group v-model="form.forbiddenPlatforms" class="platform-checks">
+            <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.value">
+              {{ item.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+      </section>
 
+      <section class="form-section">
+        <div class="builder-head">
+          <h3>商品对接信息设置</h3>
+          <el-button size="small" :icon="Plus" @click="addIntegration">添加对接商品</el-button>
+        </div>
+        <div class="switch-row">
+          <el-switch v-model="form.pollingEnabled" active-text="开启轮询" inactive-text="默认首个对接" />
+          <el-switch v-model="form.monitoringEnabled" active-text="监控上游商品" inactive-text="关闭监控" />
+        </div>
+        <div v-for="(item, index) in form.integrations || []" :key="item.id || index" class="integration-card">
+          <div class="form-grid three">
+            <el-form-item label="对接平台">
+              <el-select v-model="item.platformCode">
+                <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="对接平台商品 ID">
+              <el-input v-model="item.supplierGoodsId" placeholder="上游商品 ID" />
+            </el-form-item>
+            <el-form-item label="对接平台商品名称">
+              <el-input v-model="item.supplierGoodsName" placeholder="上游商品名称" />
+            </el-form-item>
+            <el-form-item label="对接平台售价">
+              <el-input-number v-model="item.supplierPrice" :min="0" :precision="2" controls-position="right" />
+            </el-form-item>
+            <el-form-item label="允许渠道">
+              <el-switch v-model="item.enabled" active-text="允许" inactive-text="禁用" />
+            </el-form-item>
+            <el-form-item label="操作">
+              <div class="inline-actions">
+                <el-button size="small" :icon="RefreshCw" @click="refreshIntegration(index)">刷新对接信息</el-button>
+                <el-button size="small" type="danger" :icon="Trash2" @click="removeIntegration(index)">删除</el-button>
+              </div>
+            </el-form-item>
+          </div>
+          <div class="upstream-snapshot">
+            <span>商品ID：{{ item.supplierGoodsId || '-' }}</span>
+            <span>标题：{{ item.upstreamTitle || item.supplierGoodsName || '-' }}</span>
+            <span>售价：{{ item.supplierPrice || 0 }}</span>
+            <span>库存：{{ item.upstreamStock || 0 }}</span>
+            <span>状态：{{ item.upstreamStatus || '待刷新' }}</span>
+            <span>同步：{{ item.lastSyncAt || '未同步' }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="form-section">
+        <h3>账号与补充规则</h3>
+        <el-form-item v-if="form.deliveryType !== 'CARD'" label="充值账号要求">
+          <el-checkbox v-model="form.requireRechargeAccount">要求用户填写充值账号</el-checkbox>
+          <el-checkbox-group v-if="form.requireRechargeAccount" v-model="form.accountTypes" class="platform-checks account-checks">
+            <el-checkbox v-for="item in accountTypeOptions" :key="item.value" :label="item.value">
+              {{ item.label }}
+            </el-checkbox>
+          </el-checkbox-group>
+        </el-form-item>
+      </section>
+      </template>
+
+      <template v-else>
+      <section class="form-section">
+        <h3>图片与详情编排</h3>
         <div class="detail-builder">
           <div class="builder-head">
             <span>详情内容</span>
@@ -696,76 +876,13 @@ onMounted(() => {
           </div>
         </div>
       </section>
-
       <section class="form-section">
-        <h3>价格与销售规则</h3>
-        <div class="form-grid three">
-          <el-form-item label="价格模板">
-            <el-select v-model="form.priceTemplateId" placeholder="选择价格模板" @change="applyPriceTemplate">
-              <el-option
-                v-for="item in enabledPriceTemplates"
-                :key="item.id"
-                :label="`${item.name} · ${item.groupName} +${item.markupPercent}%`"
-                :value="item.id"
-              />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="售价">
-            <el-input-number v-model="form.price" :min="0" :precision="2" :step="1" controls-position="right" />
-          </el-form-item>
-          <el-form-item label="划线原价">
-            <el-input-number v-model="form.originalPrice" :min="0" :precision="2" :step="1" controls-position="right" placeholder="选填" />
-          </el-form-item>
-          <el-form-item label="库存">
-            <el-input-number v-model="form.stock" :min="0" :step="1" controls-position="right" />
-          </el-form-item>
-          <el-form-item label="状态">
-            <el-select v-model="form.status">
-              <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="最大购买数量">
-            <el-input-number v-model="form.maxBuy" :min="1" :step="1" controls-position="right" />
-          </el-form-item>
-        </div>
-        <div class="inline-grid">
-          <el-form-item label="成本系数">
-            <el-input-number v-model="form.priceCoefficient" :min="0" :precision="2" :step="0.1" controls-position="right" />
-          </el-form-item>
-          <el-form-item label="固定加价">
-            <el-input-number v-model="form.priceFixedAdd" :min="0" :precision="2" :step="1" controls-position="right" />
-          </el-form-item>
-        </div>
-      </section>
-
-      <section class="form-section">
-        <h3>平台与账号</h3>
-        <el-form-item v-if="form.deliveryType !== 'CARD'" label="充值账号要求">
-          <el-checkbox v-model="form.requireRechargeAccount">要求用户填写充值账号</el-checkbox>
-          <el-checkbox-group v-if="form.requireRechargeAccount" v-model="form.accountTypes" class="platform-checks account-checks">
-            <el-checkbox v-for="item in accountTypeOptions" :key="item.value" :label="item.value">
-              {{ item.label }}
-            </el-checkbox>
-          </el-checkbox-group>
-        </el-form-item>
-        <el-form-item label="可售平台">
-          <el-checkbox-group v-model="form.availablePlatforms" class="platform-checks">
-            <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.value">
-              {{ item.label }}
-            </el-checkbox>
-          </el-checkbox-group>
-        </el-form-item>
-        <el-form-item label="不支持平台说明">
-          <el-checkbox-group v-model="form.forbiddenPlatforms" class="platform-checks">
-            <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.value">
-              {{ item.label }}
-            </el-checkbox>
-          </el-checkbox-group>
-        </el-form-item>
+        <h3>详情文案</h3>
         <el-form-item label="说明">
           <el-input v-model="form.description" type="textarea" :rows="4" placeholder="商品描述、使用教程、兑换链接、注意事项" />
         </el-form-item>
       </section>
+      </template>
     </el-form>
     <template #footer>
       <el-button :icon="X" @click="goodsEditorVisible = false">取消</el-button>
@@ -934,6 +1051,30 @@ onMounted(() => {
   padding-right: 8px;
 }
 
+.editor-steps {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.editor-steps button {
+  height: 34px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.64);
+  background: transparent;
+  cursor: pointer;
+}
+
+.editor-steps button.active {
+  color: #06110f;
+  background: #00ffc3;
+}
+
 .form-section {
   padding: 14px;
   border-radius: 16px;
@@ -1069,10 +1210,28 @@ onMounted(() => {
 }
 
 .platform-checks,
-.platform-tags {
+.platform-tags,
+.benefit-options,
+.benefit-cards {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.benefit-cards span,
+.benefit-cards em {
+  padding: 5px 10px;
+  border-radius: 10px;
+  font-style: normal;
+  color: #dffdf7;
+  background: rgba(0, 255, 195, 0.1);
+  border: 0.5px solid rgba(0, 255, 195, 0.18);
+}
+
+.benefit-cards em {
+  color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .account-checks {
@@ -1086,6 +1245,43 @@ onMounted(() => {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.045);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.benefit-options :deep(.el-checkbox) {
+  margin-right: 0;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.switch-row,
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.switch-row {
+  margin-bottom: 12px;
+}
+
+.integration-card {
+  padding: 12px;
+  margin-top: 10px;
+  border-radius: 16px;
+  background: rgba(4, 13, 22, 0.32);
+  border: 0.5px solid rgba(255, 255, 255, 0.09);
+}
+
+.upstream-snapshot {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 8px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 12px;
 }
 
 .form-actions,

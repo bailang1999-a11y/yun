@@ -22,6 +22,7 @@ import type {
   SmsLog,
   UserAccount,
   UserGroup,
+  UserGroupCreatePayload,
   Supplier,
   SupplierCreatePayload,
   SystemSetting
@@ -167,6 +168,12 @@ export async function fetchUserGroups() {
   return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeUserGroup)
 }
 
+export async function createUserGroup(payload: UserGroupCreatePayload) {
+  const { data } = await apiClient.post<unknown>('/api/admin/user-groups', payload)
+
+  return normalizeUserGroup(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
 export async function fetchUsers() {
   const { data } = await apiClient.get<unknown>('/api/admin/users')
 
@@ -241,6 +248,10 @@ export async function createGoods(payload: GoodsCreatePayload) {
     coverUrl: payload.coverUrl,
     detailImages: payload.detailImages || [],
     detailBlocks: payload.detailBlocks || [],
+    benefitDurations: payload.benefitDurations || [],
+    integrations: payload.integrations || [],
+    pollingEnabled: payload.pollingEnabled,
+    monitoringEnabled: payload.monitoringEnabled,
     stock: payload.stock,
     maxBuy: payload.maxBuy,
     requireRechargeAccount: payload.requireRechargeAccount,
@@ -271,6 +282,10 @@ export async function updateGoods(goodsId: Goods['id'], payload: GoodsCreatePayl
     coverUrl: payload.coverUrl,
     detailImages: payload.detailImages || [],
     detailBlocks: payload.detailBlocks || [],
+    benefitDurations: payload.benefitDurations || [],
+    integrations: payload.integrations || [],
+    pollingEnabled: payload.pollingEnabled,
+    monitoringEnabled: payload.monitoringEnabled,
     stock: payload.stock,
     maxBuy: payload.maxBuy,
     requireRechargeAccount: payload.requireRechargeAccount,
@@ -411,6 +426,10 @@ function normalizeGoods(item: Record<string, unknown>): Goods {
     coverUrl: text(item.coverUrl),
     detailImages: stringArray(item.detailImages),
     detailBlocks: normalizeDetailBlocks(item.detailBlocks),
+    benefitDurations: stringArray(item.benefitDurations),
+    integrations: normalizeIntegrations(item.integrations),
+    pollingEnabled: Boolean(item.pollingEnabled),
+    monitoringEnabled: Boolean(item.monitoringEnabled),
     maxBuy: numberValue(item.maxBuy, 1),
     requireRechargeAccount: Boolean(item.requireRechargeAccount),
     accountTypes: stringArray(item.accountTypes),
@@ -423,6 +442,25 @@ function normalizeGoods(item: Record<string, unknown>): Goods {
     description: text(item.description),
     createdAt: text(item.createdAt)
   }
+}
+
+function normalizeIntegrations(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    const record = (item || {}) as Record<string, unknown>
+    return {
+      id: text(record.id),
+      platformCode: text(record.platformCode),
+      supplierGoodsId: text(record.supplierGoodsId),
+      supplierGoodsName: text(record.supplierGoodsName),
+      supplierPrice: numberValue(record.supplierPrice),
+      upstreamStatus: text(record.upstreamStatus, '正常'),
+      upstreamStock: numberValue(record.upstreamStock),
+      upstreamTitle: text(record.upstreamTitle),
+      lastSyncAt: text(record.lastSyncAt),
+      enabled: record.enabled === undefined ? true : Boolean(record.enabled)
+    }
+  })
 }
 
 function normalizeDetailBlocks(value: unknown) {
