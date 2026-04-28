@@ -1,27 +1,30 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Save, Trash2 } from 'lucide-vue-next'
+import { fetchUserGroups } from '../api/admin'
+import type { UserGroup } from '../types/operations'
 import { loadPriceTemplates, savePriceTemplates, type PriceGroupRate, type PriceTemplate } from '../utils/priceTemplates'
 
-const defaultRates: PriceGroupRate[] = [
-  { groupName: '零售加/减价', color: '#ffb300', value: 110 },
-  { groupName: '私密加/减价', color: '#24364d', value: 108 },
-  { groupName: '高级会员加/减价', color: '#12a594', value: 106 },
-  { groupName: '合作伙伴加价/减价', color: '#0d9488', value: 105 },
-  { groupName: '店铺加/减价', color: '#009688', value: 103 }
+const rateColors = ['#ffb300', '#3aa5ff', '#12a594', '#0d9488', '#8b5cf6', '#f97316', '#22c55e']
+const fallbackGroups: UserGroup[] = [
+  { id: 'retail', name: '默认会员', rules: [] },
+  { id: 'vip', name: '渠道 VIP', rules: [] },
+  { id: 'limited', name: '受限会员', rules: [] }
 ]
 
 const templates = ref<PriceTemplate[]>(loadPriceTemplates())
+const userGroups = ref<UserGroup[]>([])
 const form = reactive<PriceTemplate>({
   id: '',
   name: '',
   adjustMode: 'percent',
   referencePrice: 100,
-  groupRates: defaultRates.map((item) => ({ ...item })),
+  groupRates: [],
   enabled: true
 })
 
+const activeGroups = computed(() => (userGroups.value.length ? userGroups.value : fallbackGroups))
 const preview = computed(() =>
   form.groupRates.map((rate) => ({
     ...rate,
@@ -31,12 +34,38 @@ const preview = computed(() =>
   }))
 )
 
+onMounted(async () => {
+  try {
+    userGroups.value = await fetchUserGroups()
+  } catch {
+    userGroups.value = fallbackGroups
+  }
+  form.groupRates = ratesFromGroups(activeGroups.value, form.groupRates)
+  templates.value = templates.value.map((item) => ({ ...item, groupRates: ratesFromGroups(activeGroups.value, item.groupRates) }))
+  savePriceTemplates(templates.value)
+})
+
+function defaultRate(index: number) {
+  return index === 0 ? 100 : 100 + Math.max(2, 8 - index)
+}
+
+function ratesFromGroups(groups: UserGroup[], existing: PriceGroupRate[] = []) {
+  return groups.map((group, index) => {
+    const matched = existing.find((item) => item.groupName === group.name)
+    return {
+      groupName: group.name,
+      color: matched?.color || rateColors[index % rateColors.length],
+      value: matched?.value ?? defaultRate(index)
+    }
+  })
+}
+
 function resetForm() {
   form.id = ''
   form.name = ''
   form.adjustMode = 'percent'
   form.referencePrice = 100
-  form.groupRates = defaultRates.map((item) => ({ ...item }))
+  form.groupRates = ratesFromGroups(activeGroups.value)
   form.enabled = true
 }
 
@@ -66,7 +95,7 @@ function editTemplate(row: PriceTemplate) {
   form.name = row.name
   form.adjustMode = row.adjustMode
   form.referencePrice = row.referencePrice
-  form.groupRates = row.groupRates.map((item) => ({ ...item }))
+  form.groupRates = ratesFromGroups(activeGroups.value, row.groupRates)
   form.enabled = row.enabled
 }
 
@@ -97,12 +126,12 @@ function removeTemplate(row: PriceTemplate) {
         <label>参考价</label>
         <div>
           <el-input-number v-model="form.referencePrice" :min="0" :precision="2" controls-position="right" />
-          <p>参考价仅用于预览，例如成本价 100 元，会员组数值 105，前台看到的价格为 105.00 元。</p>
+          <p>参考价仅用于预览，例如成本价 100 元，会员分组数值 105，前台看到的价格为 105.00 元。</p>
         </div>
       </div>
 
       <div v-for="(rate, index) in form.groupRates" :key="rate.groupName" class="template-form-line rate-line">
-        <label><i :style="{ background: rate.color }"></i>{{ rate.groupName }}</label>
+        <label><i :style="{ background: rate.color }"></i>{{ rate.groupName }}倍率</label>
         <el-input-number v-model="rate.value" :min="0" :precision="2" controls-position="right" />
         <span>预览：<strong>{{ preview[index].price.toFixed(2) }} 元</strong></span>
       </div>

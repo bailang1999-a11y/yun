@@ -94,7 +94,7 @@ const form = reactive<GoodsCreatePayload>({
   detailImages: [],
   price: 0,
   originalPrice: undefined,
-  stock: 0,
+  stock: 5000,
   status: 'ON_SALE',
   deliveryType: 'CARD',
   platform: 'GENERAL',
@@ -103,7 +103,7 @@ const form = reactive<GoodsCreatePayload>({
   benefitDurations: [],
   integrations: [],
   pollingEnabled: false,
-  monitoringEnabled: false,
+  monitoringEnabled: true,
   maxBuy: 1,
   requireRechargeAccount: false,
   accountTypes: [],
@@ -162,6 +162,12 @@ const filteredGoods = computed(() =>
 const formTitle = computed(() => (editingGoodsId.value ? '编辑商品' : '新增商品'))
 const formSubtitle = computed(() => (editingGoodsId.value ? '更新商品资料与销售配置' : '卡密/直充/代充商品资料'))
 const enabledPriceTemplates = computed(() => priceTemplates.value.filter((item) => item.enabled))
+const monitoringItems = ['价格', '库存', '商品状态', '上游标题']
+const editorSummaryItems = computed(() => [
+  { label: '当前类型', value: deliveryLabel(form.deliveryType) },
+  { label: '权益时间', value: form.benefitDurations?.length ? form.benefitDurations.join(' / ') : '未设置' },
+  { label: '对接商品', value: `${form.integrations?.length || 0} 个` }
+])
 
 function fileToDataUrl(file: UploadRawFile) {
   return new Promise<string>((resolve, reject) => {
@@ -243,9 +249,14 @@ function removeIntegration(index: number) {
 function refreshIntegration(index: number) {
   const item = form.integrations?.[index]
   if (!item) return
-  item.upstreamStatus = item.enabled === false ? '已禁用' : '正常'
-  item.upstreamTitle = item.supplierGoodsName || item.upstreamTitle || '上游商品'
-  item.upstreamStock = Number(item.upstreamStock || 0) + 1
+  const platformName = platformLabel(item.platformCode || 'private')
+  const suffix = item.supplierGoodsId ? item.supplierGoodsId.slice(-6) : String(index + 1).padStart(3, '0')
+  item.enabled = true
+  item.upstreamStatus = '正常'
+  item.supplierGoodsName = `${platformName}权益商品 ${suffix}`
+  item.upstreamTitle = item.supplierGoodsName
+  item.supplierPrice = Number((4.9 + index * 0.35 + suffix.length * 0.08).toFixed(2))
+  item.upstreamStock = 4800 + index * 60 + suffix.length
   item.lastSyncAt = new Date().toLocaleString('zh-CN')
   ElMessage.success('已刷新对接信息')
 }
@@ -322,7 +333,7 @@ function resetForm() {
   detailBlocks.value = [{ type: 'text', imageUrl: '', text: '' }]
   form.price = 0
   form.originalPrice = undefined
-  form.stock = 0
+  form.stock = 5000
   form.status = 'ON_SALE'
   form.deliveryType = 'CARD'
   form.platform = 'GENERAL'
@@ -331,7 +342,7 @@ function resetForm() {
   form.benefitDurations = []
   form.integrations = []
   form.pollingEnabled = false
-  form.monitoringEnabled = false
+  form.monitoringEnabled = true
   form.maxBuy = 1
   form.requireRechargeAccount = false
   form.accountTypes = []
@@ -676,7 +687,7 @@ onMounted(() => {
     </article>
   </section>
 
-  <el-dialog v-model="goodsEditorVisible" width="1120px" class="goods-editor-dialog" :show-close="false">
+  <el-dialog v-model="goodsEditorVisible" width="min(1480px, calc(100vw - 56px))" class="goods-editor-dialog" :show-close="false">
     <template #header>
       <div class="editor-header">
         <div>
@@ -703,12 +714,10 @@ onMounted(() => {
           <em>长图、多图、文案与使用说明编排</em>
         </button>
         <div class="editor-summary">
-          <span>当前类型</span>
-          <strong>{{ deliveryLabel(form.deliveryType) }}</strong>
-          <span>权益时间</span>
-          <strong>{{ form.benefitDurations?.length ? form.benefitDurations.join(' / ') : '未设置' }}</strong>
-          <span>对接商品</span>
-          <strong>{{ form.integrations?.length || 0 }} 个</strong>
+          <div v-for="item in editorSummaryItems" :key="item.label" class="summary-chip">
+            <strong>{{ item.value }}</strong>
+            <span>{{ item.label }}</span>
+          </div>
         </div>
       </aside>
 
@@ -720,7 +729,8 @@ onMounted(() => {
 
         <el-form :model="form" label-position="top" class="goods-form dialog-goods-form">
       <template v-if="editorStep === 'base'">
-      <section class="form-section">
+      <div class="base-workbench">
+      <section class="form-section base-info-section">
         <h3>基础资料</h3>
         <div class="form-grid">
           <el-form-item label="商品分类">
@@ -826,26 +836,22 @@ onMounted(() => {
         </div>
         <div class="switch-row">
           <el-switch v-model="form.pollingEnabled" active-text="开启轮询" inactive-text="默认首个对接" />
-          <el-switch v-model="form.monitoringEnabled" active-text="监控上游商品" inactive-text="关闭监控" />
+          <el-switch v-model="form.monitoringEnabled" active-text="已开启监控" inactive-text="关闭监控" />
+          <div class="monitor-scope">
+            <span>监听信息</span>
+            <em v-for="item in monitoringItems" :key="item">{{ item }}</em>
+          </div>
         </div>
+        <div class="integration-list">
         <div v-for="(item, index) in form.integrations || []" :key="item.id || index" class="integration-card">
-          <div class="form-grid three">
+          <div class="integration-edit-row">
             <el-form-item label="对接平台">
               <el-select v-model="item.platformCode">
                 <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
               </el-select>
             </el-form-item>
             <el-form-item label="对接平台商品 ID">
-              <el-input v-model="item.supplierGoodsId" placeholder="上游商品 ID" />
-            </el-form-item>
-            <el-form-item label="对接平台商品名称">
-              <el-input v-model="item.supplierGoodsName" placeholder="上游商品名称" />
-            </el-form-item>
-            <el-form-item label="对接平台售价">
-              <el-input-number v-model="item.supplierPrice" :min="0" :precision="2" controls-position="right" />
-            </el-form-item>
-            <el-form-item label="允许渠道">
-              <el-switch v-model="item.enabled" active-text="允许" inactive-text="禁用" />
+              <el-input v-model="item.supplierGoodsId" placeholder="填入后自动刷新" @blur="refreshIntegration(index)" @keyup.enter="refreshIntegration(index)" />
             </el-form-item>
             <el-form-item label="操作">
               <div class="inline-actions">
@@ -856,12 +862,14 @@ onMounted(() => {
           </div>
           <div class="upstream-snapshot">
             <span>商品ID：{{ item.supplierGoodsId || '-' }}</span>
-            <span>标题：{{ item.upstreamTitle || item.supplierGoodsName || '-' }}</span>
+            <span>名称：{{ item.supplierGoodsName || item.upstreamTitle || '填入 ID 后自动获取' }}</span>
             <span>售价：{{ item.supplierPrice || 0 }}</span>
             <span>库存：{{ item.upstreamStock || 0 }}</span>
             <span>状态：{{ item.upstreamStatus || '待刷新' }}</span>
             <span>同步：{{ item.lastSyncAt || '未同步' }}</span>
           </div>
+        </div>
+        <div v-if="!form.integrations?.length" class="empty-integration">暂无对接商品，点击右上角添加后只需填写平台和商品 ID。</div>
         </div>
       </section>
 
@@ -876,6 +884,7 @@ onMounted(() => {
           </el-checkbox-group>
         </el-form-item>
       </section>
+      </div>
       </template>
 
       <template v-else>
@@ -1092,10 +1101,11 @@ onMounted(() => {
 
 .dialog-goods-form {
   display: grid;
-  gap: 14px;
-  max-height: 66vh;
-  overflow: auto;
-  padding: 2px 8px 2px 2px;
+  gap: 10px;
+  height: 100%;
+  max-height: none;
+  overflow: visible;
+  padding: 0;
 }
 
 :global(.goods-editor-dialog) {
@@ -1114,6 +1124,11 @@ onMounted(() => {
   -webkit-backdrop-filter: blur(34px) saturate(180%);
 }
 
+:global(.goods-editor-dialog.el-dialog) {
+  margin-top: 28px !important;
+  max-height: calc(100vh - 56px);
+}
+
 :global(.goods-editor-dialog .el-dialog__header),
 :global(.goods-editor-dialog .el-dialog__body),
 :global(.goods-editor-dialog .el-dialog__footer) {
@@ -1129,7 +1144,7 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  padding: 20px 22px 16px;
+  padding: 16px 20px 14px;
   border-bottom: 0.5px solid rgba(255, 255, 255, 0.09);
   background: rgba(255, 255, 255, 0.035);
 }
@@ -1147,7 +1162,7 @@ onMounted(() => {
 }
 
 .editor-header h2 {
-  margin: 10px 0 4px;
+  margin: 8px 0 3px;
   color: rgba(255, 255, 255, 0.94);
   font-size: 22px;
 }
@@ -1171,12 +1186,14 @@ onMounted(() => {
 
 .editor-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
+  height: calc(100vh - 198px);
   min-height: 560px;
+  overflow: hidden;
 }
 
 .editor-rail {
-  padding: 18px;
+  padding: 14px;
   border-right: 0.5px solid rgba(255, 255, 255, 0.08);
   background: rgba(2, 8, 16, 0.28);
 }
@@ -1186,8 +1203,8 @@ onMounted(() => {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
   gap: 4px 10px;
-  padding: 14px;
-  margin-bottom: 10px;
+  padding: 12px;
+  margin-bottom: 9px;
   text-align: left;
   border-radius: 16px;
   border: 0.5px solid rgba(255, 255, 255, 0.08);
@@ -1231,35 +1248,49 @@ onMounted(() => {
 
 .editor-summary {
   display: grid;
-  gap: 6px;
-  margin-top: 18px;
-  padding: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.summary-chip {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 10px 8px;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.04);
   border: 0.5px solid rgba(255, 255, 255, 0.08);
 }
 
-.editor-summary span {
+.summary-chip span {
   color: rgba(255, 255, 255, 0.44);
   font-size: 12px;
 }
 
-.editor-summary strong {
-  margin-bottom: 8px;
+.summary-chip strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: rgba(255, 255, 255, 0.82);
   font-weight: 650;
+  font-size: 13px;
 }
 
 .editor-main {
   min-width: 0;
-  padding: 18px;
+  padding: 14px;
+  overflow: hidden;
 }
 
 .editor-steps {
   display: flex;
   gap: 6px;
   padding: 4px;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.045);
   border: 0.5px solid rgba(255, 255, 255, 0.08);
@@ -1267,7 +1298,7 @@ onMounted(() => {
 
 .editor-steps button {
   flex: 1;
-  height: 38px;
+  height: 34px;
   padding: 0 16px;
   border: 0;
   border-radius: 12px;
@@ -1282,15 +1313,15 @@ onMounted(() => {
 }
 
 .form-section {
-  padding: 16px;
-  border-radius: 18px;
+  padding: 12px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.038);
   border: 0.5px solid rgba(255, 255, 255, 0.095);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .form-section h3 {
-  margin: 0 0 14px;
+  margin: 0 0 10px;
   font-size: 15px;
   font-weight: 650;
   color: rgba(255, 255, 255, 0.86);
@@ -1306,12 +1337,55 @@ onMounted(() => {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.base-workbench {
+  height: calc(100vh - 260px);
+  min-height: 500px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  overflow: hidden;
+}
+
+.base-workbench .form-section {
+  min-width: 0;
+}
+
+.base-workbench .form-section:nth-of-type(4) {
+  grid-column: 1 / -1;
+  min-height: 0;
+}
+
+.base-workbench .form-section:nth-of-type(5) {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.base-info-section {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.base-workbench .form-section:nth-of-type(2) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.base-workbench .form-section:nth-of-type(3) {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.base-workbench :deep(.el-form-item) {
+  margin-bottom: 10px;
+}
+
 .cover-uploader {
   display: grid;
-  grid-template-columns: 156px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
   align-items: center;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .upload-tile,
@@ -1327,8 +1401,8 @@ onMounted(() => {
 }
 
 .upload-tile {
-  width: 156px;
-  height: 156px;
+  width: 96px;
+  height: 96px;
 }
 
 .upload-tile div {
@@ -1471,15 +1545,28 @@ onMounted(() => {
 }
 
 .switch-row {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .integration-card {
-  padding: 14px;
-  margin-top: 10px;
+  padding: 10px;
+  margin-top: 8px;
   border-radius: 16px;
   background: rgba(4, 13, 22, 0.42);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.integration-list {
+  max-height: 210px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.integration-edit-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(180px, 1.2fr) auto;
+  gap: 10px;
+  align-items: end;
 }
 
 .upstream-snapshot {
@@ -1491,12 +1578,40 @@ onMounted(() => {
   font-size: 12px;
 }
 
+.monitor-scope {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: rgba(255, 255, 255, 0.44);
+  font-size: 12px;
+}
+
+.monitor-scope em {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #bffdf2;
+  font-style: normal;
+  background: rgba(0, 255, 195, 0.08);
+  border: 0.5px solid rgba(0, 255, 195, 0.16);
+}
+
+.empty-integration {
+  padding: 18px;
+  border-radius: 14px;
+  color: rgba(255, 255, 255, 0.48);
+  text-align: center;
+  background: rgba(255, 255, 255, 0.035);
+  border: 0.5px dashed rgba(255, 255, 255, 0.14);
+}
+
 .editor-footer {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  padding: 14px 18px;
+  padding: 12px 18px;
   border-top: 0.5px solid rgba(255, 255, 255, 0.09);
   background: rgba(2, 8, 16, 0.34);
 }

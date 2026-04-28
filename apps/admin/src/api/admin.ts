@@ -386,7 +386,7 @@ export async function refundOrder(orderNo: string) {
 }
 
 function normalizeGoodsType(value: string) {
-  if (value === 'AUTO') return 'DIRECT'
+  if (value === 'AUTO' || value === 'DIRECT') return 'DIRECT'
   if (value === 'MANUAL') return 'MANUAL'
   return 'CARD'
 }

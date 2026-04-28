@@ -146,7 +146,7 @@ async function changeUserGroup(row: UserAccount) {
 
 async function submitGroup() {
   if (!groupForm.name.trim()) {
-    ElMessage.warning('请填写会员等级名称')
+    ElMessage.warning('请填写会员分组名称')
     return
   }
   try {
@@ -163,9 +163,9 @@ async function submitGroup() {
     groupForm.description = ''
     groupForm.defaultGroup = false
     groupForm.status = 'ENABLED'
-    ElMessage.success('会员等级已新增')
+    ElMessage.success('会员分组已新增')
   } catch {
-    ElMessage.error('新增会员等级失败')
+    ElMessage.error('新增会员分组失败')
   }
 }
 </script>
@@ -179,7 +179,7 @@ async function submitGroup() {
           <span>分类与平台可见性</span>
         </div>
         <div class="group-actions">
-          <el-button type="primary" :icon="Plus" @click="groupDialogVisible = true">新增会员等级</el-button>
+          <el-button type="primary" :icon="Plus" @click="groupDialogVisible = true">新增会员分组</el-button>
           <el-button :icon="RefreshCw" :loading="loading" aria-label="刷新权限数据" @click="loadAll" />
         </div>
       </div>
@@ -269,9 +269,9 @@ async function submitGroup() {
     </article>
   </section>
 
-  <el-dialog v-model="groupDialogVisible" title="新增会员等级" width="520px">
+  <el-dialog v-model="groupDialogVisible" title="新增会员分组" width="520px">
     <el-form :model="groupForm" label-position="top">
-      <el-form-item label="会员等级名称">
+      <el-form-item label="会员分组名称">
         <el-input v-model="groupForm.name" placeholder="例如：高级会员" />
       </el-form-item>
       <el-form-item label="等级说明">
@@ -286,7 +286,7 @@ async function submitGroup() {
     </el-form>
     <template #footer>
       <el-button @click="groupDialogVisible = false">取消</el-button>
-      <el-button type="primary" :icon="Plus" @click="submitGroup">新增等级</el-button>
+      <el-button type="primary" :icon="Plus" @click="submitGroup">新增分组</el-button>
     </template>
   </el-dialog>
 </template>

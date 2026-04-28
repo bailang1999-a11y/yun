@@ -92,6 +92,7 @@ public class InMemoryShopRepository {
             "VIP-7D-CHARLIE--3M7N",
             "VIP-7D-DELTA----1K5T"
         ), null));
+        seedOrders();
     }
 
     public List<CategoryItem> listCategories() {
@@ -716,7 +717,7 @@ public class InMemoryShopRepository {
             normalizeDetailBlocks(request.detailBlocks()),
             normalizeIntegrations(request.integrations()),
             Boolean.TRUE.equals(request.pollingEnabled()),
-            Boolean.TRUE.equals(request.monitoringEnabled()),
+            request.monitoringEnabled() == null || request.monitoringEnabled(),
             type,
             defaultText(request.platform(), "GENERAL"),
             request.price() == null ? BigDecimal.valueOf(9.90) : request.price(),
@@ -728,7 +729,7 @@ public class InMemoryShopRepository {
             defaultText(request.priceMode(), "FIXED"),
             request.priceCoefficient() == null ? BigDecimal.ONE : request.priceCoefficient(),
             request.priceFixedAdd() == null ? BigDecimal.ZERO : request.priceFixedAdd(),
-            request.stock() == null ? 0 : request.stock(),
+            request.stock() == null ? 5000 : request.stock(),
             0,
             defaultText(request.status(), "ON_SALE"),
             request.tags() == null ? List.of("new") : List.copyOf(request.tags()),
@@ -1886,6 +1887,91 @@ public class InMemoryShopRepository {
             now,
             List.of("xiaohongshu", "private"),
             List.of("douyin")
+        ));
+    }
+
+    private void seedOrders() {
+        OffsetDateTime now = OffsetDateTime.now();
+        orders.put("DEMO-CARD-001", new OrderItem(
+            "DEMO-CARD-001",
+            90001L,
+            "13800000001",
+            10001L,
+            "视频会员周卡",
+            GoodsType.CARD,
+            "douyin",
+            1,
+            BigDecimal.valueOf(6.90),
+            BigDecimal.valueOf(6.90),
+            OrderStatus.DELIVERED,
+            "",
+            "演示卡密订单",
+            "seed-card",
+            "PAY-DEMO-CARD",
+            "alipay",
+            List.of("VIP-7D-DEMO----A1B2"),
+            List.of(),
+            "卡密已自动发放，可在订单详情查看。",
+            now.minusMinutes(36),
+            now.minusMinutes(35),
+            now.minusMinutes(35)
+        ));
+        orders.put("DEMO-DIRECT-001", new OrderItem(
+            "DEMO-DIRECT-001",
+            90002L,
+            "13800000002",
+            10002L,
+            "游戏点券 60 枚",
+            GoodsType.DIRECT,
+            "taobao",
+            1,
+            BigDecimal.valueOf(5.80),
+            BigDecimal.valueOf(5.80),
+            OrderStatus.PROCURING,
+            "13800000002",
+            "演示直充订单",
+            "seed-direct",
+            "PAY-DEMO-DIRECT",
+            "wechat",
+            List.of(),
+            List.of(new ChannelAttemptItem(
+                30001L,
+                20001L,
+                "星河直充",
+                "STAR-GAME-60",
+                10,
+                "SUBMITTED",
+                "已提交上游，等待回调",
+                now.minusMinutes(18)
+            )),
+            "直充采购中，正在等待上游返回充值结果。",
+            now.minusMinutes(20),
+            now.minusMinutes(19),
+            null
+        ));
+        orders.put("DEMO-MANUAL-001", new OrderItem(
+            "DEMO-MANUAL-001",
+            90003L,
+            "13800000003",
+            10003L,
+            "资料人工代办服务",
+            GoodsType.MANUAL,
+            "private",
+            1,
+            BigDecimal.valueOf(19.90),
+            BigDecimal.valueOf(19.90),
+            OrderStatus.WAITING_MANUAL,
+            "wechat_demo_001",
+            "演示代充订单",
+            "seed-manual",
+            "PAY-DEMO-MANUAL",
+            "alipay",
+            List.of(),
+            List.of(),
+            "等待管理员人工处理。",
+            now.minusMinutes(12),
+            now.minusMinutes(11),
+            null
         ));
     }
 }
