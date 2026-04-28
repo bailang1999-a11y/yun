@@ -1,7 +1,10 @@
 import axios, { AxiosError } from 'axios'
 
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL
+const sameOriginBaseUrl = import.meta.env.PROD ? '' : 'http://localhost:8080'
+
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080',
+  baseURL: configuredBaseUrl && configuredBaseUrl !== '/api' ? configuredBaseUrl : sameOriginBaseUrl,
   timeout: 8000
 })
 

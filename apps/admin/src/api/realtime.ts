@@ -41,7 +41,10 @@ export function subscribeOrderEvents(onEvent: (event: OrderRealtimeEvent) => voi
 }
 
 function realtimeUrl() {
-  const base = import.meta.env.VITE_ADMIN_API_BASE_URL || 'http://localhost:8080'
+  const configuredBaseUrl = import.meta.env.VITE_ADMIN_API_BASE_URL
+  const base = configuredBaseUrl && configuredBaseUrl !== '/api'
+    ? configuredBaseUrl
+    : (import.meta.env.PROD ? window.location.origin : 'http://localhost:8080')
   const url = new URL('/ws/orders', base)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
