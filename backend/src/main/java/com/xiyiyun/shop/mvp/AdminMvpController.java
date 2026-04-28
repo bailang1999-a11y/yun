@@ -139,6 +139,15 @@ public class AdminMvpController {
         }
     }
 
+    @PostMapping("/goods/{id}")
+    public ApiResponse<GoodsItem> updateGoods(@PathVariable Long id, @RequestBody CreateGoodsRequest request) {
+        try {
+            return ApiResponse.ok(repository.updateGoods(id, request));
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @GetMapping("/suppliers")
     public ApiResponse<List<SupplierItem>> suppliers() {
         return ApiResponse.ok(repository.listSuppliers());

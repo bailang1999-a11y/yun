@@ -350,9 +350,12 @@ INSERT IGNORE INTO categories (id, parent_id, name, sort_no, status) VALUES
   (1201, 1002, 'Steam 钱包', 21, 'ON_SALE');
 
 INSERT IGNORE INTO sales_platforms (id, platform_code, platform_name, platform_type, status, sort_no, config) VALUES
-  (2001, 'h5', '移动 H5', 'SELF', 'NORMAL', 10, JSON_OBJECT('entry', 'h5')),
-  (2002, 'pc', 'PC 网页', 'SELF', 'NORMAL', 20, JSON_OBJECT('entry', 'pc')),
-  (2003, 'miniapp', '微信小程序', 'SELF', 'NORMAL', 30, JSON_OBJECT('entry', 'miniapp'));
+  (2001, 'douyin', '抖音', 'MARKETPLACE', 'NORMAL', 10, JSON_OBJECT('entry', 'douyin')),
+  (2002, 'taobao', '淘宝', 'MARKETPLACE', 'NORMAL', 20, JSON_OBJECT('entry', 'taobao')),
+  (2003, 'pdd', '拼多多', 'MARKETPLACE', 'NORMAL', 30, JSON_OBJECT('entry', 'pdd')),
+  (2004, 'xianyu', '咸鱼', 'MARKETPLACE', 'NORMAL', 40, JSON_OBJECT('entry', 'xianyu')),
+  (2005, 'xiaohongshu', '小红书', 'MARKETPLACE', 'NORMAL', 50, JSON_OBJECT('entry', 'xiaohongshu')),
+  (2006, 'private', '私域', 'SELF', 'NORMAL', 60, JSON_OBJECT('entry', 'private'));
 
 INSERT IGNORE INTO user_groups (id, name, description, is_default, status) VALUES
   (7001, '默认会员', '注册后自动归入的基础用户组', 1, 'ENABLED'),

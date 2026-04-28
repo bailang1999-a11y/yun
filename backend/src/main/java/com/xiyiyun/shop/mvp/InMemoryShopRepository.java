@@ -692,10 +692,17 @@ public class InMemoryShopRepository {
             defaultText(request.subTitle(), "MVP 内存商品"),
             defaultText(request.description(), "这是一个用于前端联调的内存商品。"),
             defaultText(request.coverUrl(), "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80"),
+            normalizeImages(request.detailImages()),
             type,
             defaultText(request.platform(), "GENERAL"),
             request.price() == null ? BigDecimal.valueOf(9.90) : request.price(),
             request.originalPrice() == null ? BigDecimal.valueOf(19.90) : request.originalPrice(),
+            request.maxBuy() == null ? 1 : Math.max(1, request.maxBuy()),
+            Boolean.TRUE.equals(request.requireRechargeAccount()),
+            normalizeTextList(request.accountTypes()),
+            defaultText(request.priceMode(), "FIXED"),
+            request.priceCoefficient() == null ? BigDecimal.ONE : request.priceCoefficient(),
+            request.priceFixedAdd() == null ? BigDecimal.ZERO : request.priceFixedAdd(),
             request.stock() == null ? 0 : request.stock(),
             0,
             defaultText(request.status(), "ON_SALE"),
@@ -707,6 +714,47 @@ public class InMemoryShopRepository {
         );
         goods.put(id, item);
         return refreshStock(item);
+    }
+
+    public synchronized GoodsItem updateGoods(Long id, CreateGoodsRequest request) {
+        GoodsItem current = goods.get(id);
+        if (current == null) {
+            throw new IllegalArgumentException("goods not found");
+        }
+        Long categoryId = request.categoryId() == null ? current.categoryId() : request.categoryId();
+        CategoryItem category = categories.get(categoryId);
+        GoodsType type = request.type() == null ? current.type() : request.type();
+        GoodsItem next = new GoodsItem(
+            current.id(),
+            categoryId,
+            category == null ? current.categoryName() : category.name(),
+            firstText(request.goodsName(), request.name(), current.goodsName()),
+            firstText(request.name(), request.goodsName(), current.name()),
+            defaultText(request.subTitle(), current.subTitle()),
+            defaultText(request.description(), current.description()),
+            defaultText(request.coverUrl(), current.coverUrl()),
+            request.detailImages() == null ? current.detailImages() : normalizeImages(request.detailImages()),
+            type,
+            defaultText(request.platform(), current.platform()),
+            request.price() == null ? current.price() : request.price(),
+            request.originalPrice() == null ? current.originalPrice() : request.originalPrice(),
+            request.maxBuy() == null ? current.maxBuy() : Math.max(1, request.maxBuy()),
+            request.requireRechargeAccount() == null ? current.requireRechargeAccount() : request.requireRechargeAccount(),
+            request.accountTypes() == null ? current.accountTypes() : normalizeTextList(request.accountTypes()),
+            defaultText(request.priceMode(), current.priceMode()),
+            request.priceCoefficient() == null ? current.priceCoefficient() : request.priceCoefficient(),
+            request.priceFixedAdd() == null ? current.priceFixedAdd() : request.priceFixedAdd(),
+            request.stock() == null ? current.stock() : request.stock(),
+            current.sales(),
+            defaultText(request.status(), current.status()),
+            request.tags() == null ? current.tags() : List.copyOf(request.tags()),
+            current.createdAt(),
+            OffsetDateTime.now(),
+            request.availablePlatforms() == null ? current.availablePlatforms() : normalizePlatforms(request.availablePlatforms()),
+            request.forbiddenPlatforms() == null ? current.forbiddenPlatforms() : normalizePlatforms(request.forbiddenPlatforms())
+        );
+        goods.put(id, next);
+        return refreshStock(next);
     }
 
     public synchronized OrderItem createOrder(CreateOrderRequest request) {
@@ -1342,14 +1390,36 @@ public class InMemoryShopRepository {
 
     private List<String> normalizePlatforms(List<String> platforms) {
         if (platforms == null || platforms.isEmpty()) {
-            return List.of("h5", "pc");
+            return List.of("private");
         }
         List<String> normalized = platforms.stream()
             .map(this::normalize)
             .filter(StringUtils::hasText)
             .distinct()
             .toList();
-        return normalized.isEmpty() ? List.of("h5", "pc") : normalized;
+        return normalized.isEmpty() ? List.of("private") : normalized;
+    }
+
+    private List<String> normalizeImages(List<String> images) {
+        if (images == null || images.isEmpty()) {
+            return List.of();
+        }
+        return images.stream()
+            .map(value -> value == null ? "" : value.trim())
+            .filter(StringUtils::hasText)
+            .distinct()
+            .toList();
+    }
+
+    private List<String> normalizeTextList(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        return values.stream()
+            .map(value -> value == null ? "" : value.trim())
+            .filter(StringUtils::hasText)
+            .distinct()
+            .toList();
     }
 
     private String normalizeRuleType(String value) {
@@ -1649,18 +1719,25 @@ public class InMemoryShopRepository {
             "自动发卡，模拟支付后立即展示卡密",
             "适合前端联调自动发货链路的 CARD 商品。",
             "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=800&q=80",
+            List.of("https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80"),
             GoodsType.CARD,
             "VIDEO",
             BigDecimal.valueOf(6.90),
             BigDecimal.valueOf(12.00),
+            5,
+            false,
+            List.of(),
+            "FIXED",
+            BigDecimal.ONE,
+            BigDecimal.ZERO,
             0,
             128,
             "ON_SALE",
             List.of("auto-delivery", "card"),
             now,
             now,
-            List.of("h5", "pc"),
-            List.of("miniapp")
+            List.of("douyin", "taobao", "private"),
+            List.of("pdd")
         ));
         goods.put(10002L, new GoodsItem(
             10002L,
@@ -1671,17 +1748,24 @@ public class InMemoryShopRepository {
             "直充商品，创建后进入采购中",
             "用于验证 DIRECT 商品的下单、采购中状态和充值账号字段。",
             "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=800&q=80",
+            List.of("https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80"),
             GoodsType.DIRECT,
             "GAME",
             BigDecimal.valueOf(5.80),
             BigDecimal.valueOf(6.00),
+            1,
+            true,
+            List.of("mobile", "game_uid"),
+            "DYNAMIC",
+            BigDecimal.valueOf(1.08),
+            BigDecimal.valueOf(0.20),
             999,
             245,
             "ON_SALE",
             List.of("direct", "recharge"),
             now,
             now,
-            List.of("h5", "pc"),
+            List.of("taobao", "pdd", "xianyu"),
             List.of()
         ));
         goods.put(10003L, new GoodsItem(
@@ -1693,18 +1777,25 @@ public class InMemoryShopRepository {
             "人工处理商品，创建后等待客服处理",
             "用于验证 MANUAL 商品的待人工状态。",
             "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=800&q=80",
+            List.of("https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80"),
             GoodsType.MANUAL,
             "SERVICE",
             BigDecimal.valueOf(19.90),
             BigDecimal.valueOf(29.90),
+            1,
+            true,
+            List.of("mobile", "wechat"),
+            "FIXED",
+            BigDecimal.ONE,
+            BigDecimal.ZERO,
             50,
             32,
             "ON_SALE",
             List.of("manual", "service"),
             now,
             now,
-            List.of("h5", "pc"),
-            List.of("miniapp")
+            List.of("xiaohongshu", "private"),
+            List.of("douyin")
         ));
     }
 }

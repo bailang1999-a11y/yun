@@ -9,6 +9,15 @@ export interface Goods {
   stock?: number
   deliveryType?: string
   platform?: string
+  subTitle?: string
+  coverUrl?: string
+  detailImages?: string[]
+  maxBuy?: number
+  requireRechargeAccount?: boolean
+  accountTypes?: string[]
+  priceMode?: string
+  priceCoefficient?: number
+  priceFixedAdd?: number
   availablePlatforms?: string[]
   forbiddenPlatforms?: string[]
   description?: string
@@ -23,6 +32,16 @@ export interface GoodsCreatePayload {
   status: string
   deliveryType: string
   platform?: string
+  subTitle?: string
+  coverUrl?: string
+  detailImages?: string[]
+  stock?: number
+  maxBuy?: number
+  requireRechargeAccount?: boolean
+  accountTypes?: string[]
+  priceMode?: string
+  priceCoefficient?: number
+  priceFixedAdd?: number
   availablePlatforms?: string[]
   forbiddenPlatforms?: string[]
   description?: string

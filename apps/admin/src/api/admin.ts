@@ -89,8 +89,10 @@ function unwrapResponse<T>(payload: T | ApiEnvelope<T>): T {
   return payload as T
 }
 
-export async function fetchGoods() {
-  const { data } = await apiClient.get<unknown>('/api/admin/goods')
+export async function fetchGoods(query: { categoryId?: string | number; platform?: string; search?: string } = {}) {
+  const { data } = await apiClient.get<unknown>('/api/admin/goods', {
+    params: cleanParams(query)
+  })
 
   return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeGoods)
 }
@@ -235,10 +237,48 @@ export async function createGoods(payload: GoodsCreatePayload) {
     originalPrice: payload.originalPrice,
     status: payload.status,
     type: normalizeGoodsType(payload.deliveryType),
+    subTitle: payload.subTitle,
+    coverUrl: payload.coverUrl,
+    detailImages: payload.detailImages || [],
+    stock: payload.stock,
+    maxBuy: payload.maxBuy,
+    requireRechargeAccount: payload.requireRechargeAccount,
+    accountTypes: payload.accountTypes || [],
+    priceMode: payload.priceMode,
+    priceCoefficient: payload.priceCoefficient,
+    priceFixedAdd: payload.priceFixedAdd,
     description: payload.description,
     categoryId: payload.categoryId,
     platform: payload.platform || 'GENERAL',
-    availablePlatforms: payload.availablePlatforms?.length ? payload.availablePlatforms : ['h5', 'pc'],
+    availablePlatforms: payload.availablePlatforms?.length ? payload.availablePlatforms : ['private'],
+    forbiddenPlatforms: payload.forbiddenPlatforms || []
+  })
+
+  return normalizeGoods(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function updateGoods(goodsId: Goods['id'], payload: GoodsCreatePayload) {
+  const { data } = await apiClient.post<unknown>(`/api/admin/goods/${goodsId}`, {
+    name: payload.name,
+    goodsName: payload.name,
+    price: payload.price,
+    originalPrice: payload.originalPrice,
+    status: payload.status,
+    type: normalizeGoodsType(payload.deliveryType),
+    subTitle: payload.subTitle,
+    coverUrl: payload.coverUrl,
+    detailImages: payload.detailImages || [],
+    stock: payload.stock,
+    maxBuy: payload.maxBuy,
+    requireRechargeAccount: payload.requireRechargeAccount,
+    accountTypes: payload.accountTypes || [],
+    priceMode: payload.priceMode,
+    priceCoefficient: payload.priceCoefficient,
+    priceFixedAdd: payload.priceFixedAdd,
+    description: payload.description,
+    categoryId: payload.categoryId,
+    platform: payload.platform || 'GENERAL',
+    availablePlatforms: payload.availablePlatforms?.length ? payload.availablePlatforms : ['private'],
     forbiddenPlatforms: payload.forbiddenPlatforms || []
   })
 
@@ -363,6 +403,15 @@ function normalizeGoods(item: Record<string, unknown>): Goods {
     stock: numberValue(item.stock, 0),
     deliveryType: text(item.deliveryType ?? item.type ?? item.goodsType, 'CARD'),
     platform: text(item.platform),
+    subTitle: text(item.subTitle),
+    coverUrl: text(item.coverUrl),
+    detailImages: stringArray(item.detailImages),
+    maxBuy: numberValue(item.maxBuy, 1),
+    requireRechargeAccount: Boolean(item.requireRechargeAccount),
+    accountTypes: stringArray(item.accountTypes),
+    priceMode: text(item.priceMode, 'FIXED'),
+    priceCoefficient: numberValue(item.priceCoefficient, 1),
+    priceFixedAdd: numberValue(item.priceFixedAdd, 0),
     availablePlatforms: stringArray(item.availablePlatforms ?? item.available_platforms),
     forbiddenPlatforms: stringArray(item.forbiddenPlatforms ?? item.forbidden_platforms),
     description: text(item.description),

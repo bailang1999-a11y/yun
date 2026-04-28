@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Eye, PlugZap, Plus, RefreshCw, Trash2, Upload } from 'lucide-vue-next'
+import { Edit3, Eye, PlugZap, Plus, RefreshCw, Trash2, Upload, X } from 'lucide-vue-next'
 import {
   createGoods,
   createGoodsChannel,
@@ -11,7 +11,8 @@ import {
   fetchGoodsCards,
   fetchGoodsChannels,
   fetchSuppliers,
-  importGoodsCards
+  importGoodsCards,
+  updateGoods
 } from '../api/admin'
 import type {
   CardImportItem,
@@ -40,23 +41,64 @@ const cardsVisible = ref(false)
 const channelsVisible = ref(false)
 const selectedGoods = ref<Goods>()
 const cardText = ref('')
+const editingGoodsId = ref<Goods['id']>()
+const detailImageText = ref('')
+const goodsFilters = reactive({
+  categoryId: '',
+  platform: '',
+  search: ''
+})
 
 const platformOptions = [
-  { label: '移动 H5', value: 'h5' },
-  { label: 'PC 网页', value: 'pc' },
-  { label: '微信小程序', value: 'miniapp' }
+  { label: '抖音', value: 'douyin' },
+  { label: '淘宝', value: 'taobao' },
+  { label: '拼多多', value: 'pdd' },
+  { label: '咸鱼', value: 'xianyu' },
+  { label: '小红书', value: 'xiaohongshu' },
+  { label: '私域', value: 'private' }
+]
+
+const statusOptions = [
+  { label: '上架', value: 'ON_SALE', type: 'success' },
+  { label: '下架', value: 'OFF_SALE', type: 'info' },
+  { label: '售罄', value: 'SOLD_OUT', type: 'warning' }
+]
+
+const deliveryOptions = [
+  { label: '卡密', value: 'CARD' },
+  { label: '自动直充', value: 'AUTO' },
+  { label: '自动直充', value: 'DIRECT' },
+  { label: '人工代充', value: 'MANUAL' }
+]
+
+const accountTypeOptions = [
+  { label: '手机号', value: 'mobile' },
+  { label: 'QQ号', value: 'qq' },
+  { label: '微信号', value: 'wechat' },
+  { label: '邮箱', value: 'email' },
+  { label: '游戏 UID', value: 'game_uid' }
 ]
 
 const form = reactive<GoodsCreatePayload>({
   categoryId: undefined,
   name: '',
+  subTitle: '',
+  coverUrl: '',
+  detailImages: [],
   price: 0,
   originalPrice: undefined,
+  stock: 0,
   status: 'ON_SALE',
   deliveryType: 'CARD',
   platform: 'GENERAL',
-  availablePlatforms: ['h5', 'pc'],
+  availablePlatforms: ['douyin', 'taobao', 'private'],
   forbiddenPlatforms: [],
+  maxBuy: 1,
+  requireRechargeAccount: false,
+  accountTypes: [],
+  priceMode: 'FIXED',
+  priceCoefficient: 1,
+  priceFixedAdd: 0,
   description: ''
 })
 
@@ -88,6 +130,25 @@ const parsedCards = computed<CardImportItem[]>(() =>
     })
     .filter((item) => item.cardNo && item.password)
 )
+
+const filteredGoods = computed(() =>
+  goods.value.filter((item) => {
+    const keyword = goodsFilters.search.trim().toLowerCase()
+    const categoryMatched = !goodsFilters.categoryId || String(item.categoryId) === String(goodsFilters.categoryId)
+    const platformMatched =
+      !goodsFilters.platform || (item.availablePlatforms || []).includes(goodsFilters.platform)
+    const keywordMatched =
+      !keyword ||
+      item.name.toLowerCase().includes(keyword) ||
+      String(item.id).includes(keyword) ||
+      (item.categoryName || '').toLowerCase().includes(keyword)
+
+    return categoryMatched && platformMatched && keywordMatched
+  })
+)
+
+const formTitle = computed(() => (editingGoodsId.value ? '编辑商品' : '新增商品'))
+const formSubtitle = computed(() => (editingGoodsId.value ? '更新商品资料与销售配置' : '卡密/直充/代充商品资料'))
 
 function buildCategoryTree(items: Category[]) {
   const map = new Map<string, Category>()
@@ -141,6 +202,64 @@ function categoryLabel(row: Goods) {
 
 function platformLabel(value: string) {
   return platformOptions.find((item) => item.value === value)?.label || value
+}
+
+function statusMeta(value = '') {
+  return statusOptions.find((item) => item.value === value) || { label: value || '-', type: 'info' }
+}
+
+function deliveryLabel(value = '') {
+  return deliveryOptions.find((item) => item.value === value)?.label || value || '-'
+}
+
+function resetForm() {
+  editingGoodsId.value = undefined
+  form.name = ''
+  form.subTitle = ''
+  form.coverUrl = ''
+  form.detailImages = []
+  detailImageText.value = ''
+  form.price = 0
+  form.originalPrice = undefined
+  form.stock = 0
+  form.status = 'ON_SALE'
+  form.deliveryType = 'CARD'
+  form.platform = 'GENERAL'
+  form.availablePlatforms = ['douyin', 'taobao', 'private']
+  form.forbiddenPlatforms = []
+  form.maxBuy = 1
+  form.requireRechargeAccount = false
+  form.accountTypes = []
+  form.priceMode = 'FIXED'
+  form.priceCoefficient = 1
+  form.priceFixedAdd = 0
+  form.description = ''
+}
+
+function fillForm(row: Goods) {
+  editingGoodsId.value = row.id
+  form.categoryId = row.categoryId
+  form.name = row.name
+  form.subTitle = row.subTitle || ''
+  form.coverUrl = row.coverUrl || ''
+  form.detailImages = [...(row.detailImages || [])]
+  detailImageText.value = form.detailImages.join('\n')
+  form.price = Number(row.price) || 0
+  form.originalPrice = row.originalPrice === undefined ? undefined : Number(row.originalPrice)
+  form.stock = Number(row.stock) || 0
+  form.status = row.status || 'ON_SALE'
+  form.deliveryType = row.deliveryType === 'DIRECT' ? 'AUTO' : row.deliveryType || 'CARD'
+  form.platform = row.platform || 'GENERAL'
+  form.availablePlatforms = row.availablePlatforms?.length ? [...row.availablePlatforms] : ['private']
+  form.forbiddenPlatforms = row.forbiddenPlatforms?.length ? [...row.forbiddenPlatforms] : []
+  form.maxBuy = row.maxBuy || 1
+  form.requireRechargeAccount = Boolean(row.requireRechargeAccount)
+  form.accountTypes = [...(row.accountTypes || [])]
+  form.priceMode = row.priceMode || 'FIXED'
+  form.priceCoefficient = row.priceCoefficient || 1
+  form.priceFixedAdd = row.priceFixedAdd || 0
+  form.description = row.description || ''
+  window.scrollTo({ top: 0, behavior: 'smooth' })
 }
 
 function isDirectGoods(row: Goods) {
@@ -199,24 +318,28 @@ async function submitGoods() {
   saving.value = true
 
   try {
-    await createGoods({
+    const payload = {
       ...form,
       name: form.name.trim(),
+      subTitle: form.subTitle?.trim(),
+      coverUrl: form.coverUrl?.trim(),
+      detailImages: detailImageText.value
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean),
       description: form.description?.trim()
-    })
-    ElMessage.success('商品已新增')
-    form.name = ''
-    form.price = 0
-    form.originalPrice = undefined
-    form.status = 'ON_SALE'
-    form.deliveryType = 'CARD'
-    form.platform = 'GENERAL'
-    form.availablePlatforms = ['h5', 'pc']
-    form.forbiddenPlatforms = []
-    form.description = ''
+    }
+    if (editingGoodsId.value) {
+      await updateGoods(editingGoodsId.value, payload)
+      ElMessage.success('商品已更新')
+    } else {
+      await createGoods(payload)
+      ElMessage.success('商品已新增')
+    }
+    resetForm()
     await loadGoods()
   } catch {
-    ElMessage.error('新增商品失败')
+    ElMessage.error(editingGoodsId.value ? '更新商品失败' : '新增商品失败')
   } finally {
     saving.value = false
   }
@@ -343,8 +466,8 @@ onMounted(() => {
   <section class="ops-grid">
     <article class="panel create-panel">
       <div class="panel-head">
-        <h2>新增商品</h2>
-        <span>卡密/自动发货商品资料</span>
+        <h2>{{ formTitle }}</h2>
+        <span>{{ formSubtitle }}</span>
       </div>
 
       <el-form :model="form" label-position="top" class="goods-form">
@@ -362,6 +485,25 @@ onMounted(() => {
         <el-form-item label="商品名称">
           <el-input v-model="form.name" placeholder="例如：视频会员月卡" />
         </el-form-item>
+        <el-form-item label="商品副标题">
+          <el-input v-model="form.subTitle" placeholder="例如：自动发卡，秒级到账" />
+        </el-form-item>
+        <div class="media-grid">
+          <el-form-item label="商品主图">
+            <el-input v-model="form.coverUrl" placeholder="主图 URL，建议 800x800" />
+          </el-form-item>
+          <div v-if="form.coverUrl" class="image-preview">
+            <img :src="form.coverUrl" alt="商品主图预览" />
+          </div>
+        </div>
+        <el-form-item label="详情图">
+          <el-input
+            v-model="detailImageText"
+            type="textarea"
+            :rows="3"
+            placeholder="每行一个详情图 URL，可用于商品详情页轮播/说明"
+          />
+        </el-form-item>
         <el-form-item label="售价">
           <el-input-number v-model="form.price" :min="0" :precision="2" :step="1" controls-position="right" />
         </el-form-item>
@@ -375,18 +517,46 @@ onMounted(() => {
             placeholder="选填"
           />
         </el-form-item>
+        <el-form-item label="库存">
+          <el-input-number v-model="form.stock" :min="0" :step="1" controls-position="right" />
+        </el-form-item>
         <el-form-item label="状态">
           <el-select v-model="form.status">
-            <el-option label="上架" value="ON_SALE" />
-            <el-option label="下架" value="OFF_SALE" />
+            <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </el-form-item>
         <el-form-item label="发货类型">
           <el-select v-model="form.deliveryType">
-            <el-option label="卡密" value="CARD" />
-            <el-option label="自动发货" value="AUTO" />
-            <el-option label="人工处理" value="MANUAL" />
+            <el-option v-for="item in deliveryOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="最大购买数量">
+          <el-input-number v-model="form.maxBuy" :min="1" :step="1" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="售价模式">
+          <el-segmented
+            v-model="form.priceMode"
+            :options="[
+              { label: '固定售价', value: 'FIXED' },
+              { label: '动态加价', value: 'DYNAMIC' }
+            ]"
+          />
+        </el-form-item>
+        <div v-if="form.priceMode === 'DYNAMIC'" class="inline-grid">
+          <el-form-item label="成本系数">
+            <el-input-number v-model="form.priceCoefficient" :min="0" :precision="2" :step="0.1" controls-position="right" />
+          </el-form-item>
+          <el-form-item label="固定加价">
+            <el-input-number v-model="form.priceFixedAdd" :min="0" :precision="2" :step="1" controls-position="right" />
+          </el-form-item>
+        </div>
+        <el-form-item v-if="form.deliveryType !== 'CARD'" label="充值账号要求">
+          <el-checkbox v-model="form.requireRechargeAccount">要求用户填写充值账号</el-checkbox>
+          <el-checkbox-group v-if="form.requireRechargeAccount" v-model="form.accountTypes" class="platform-checks account-checks">
+            <el-checkbox v-for="item in accountTypeOptions" :key="item.value" :label="item.value">
+              {{ item.label }}
+            </el-checkbox>
+          </el-checkbox-group>
         </el-form-item>
         <el-form-item label="可售平台">
           <el-checkbox-group v-model="form.availablePlatforms" class="platform-checks">
@@ -403,9 +573,14 @@ onMounted(() => {
           </el-checkbox-group>
         </el-form-item>
         <el-form-item label="说明">
-          <el-input v-model="form.description" type="textarea" :rows="3" />
+          <el-input v-model="form.description" type="textarea" :rows="4" placeholder="商品描述、使用教程、兑换链接、注意事项" />
         </el-form-item>
-        <el-button type="primary" :icon="Plus" :loading="saving" @click="submitGoods">新增商品</el-button>
+        <div class="form-actions">
+          <el-button v-if="editingGoodsId" :icon="X" @click="resetForm">取消编辑</el-button>
+          <el-button type="primary" :icon="editingGoodsId ? Edit3 : Plus" :loading="saving" @click="submitGoods">
+            {{ editingGoodsId ? '保存修改' : '新增商品' }}
+          </el-button>
+        </div>
       </el-form>
     </article>
 
@@ -415,7 +590,23 @@ onMounted(() => {
         <el-button :icon="RefreshCw" :loading="loading" @click="loadGoods">刷新</el-button>
       </div>
 
-      <el-table v-loading="loading" :data="goods" height="640" style="width: 100%">
+      <div class="table-filters">
+        <el-input v-model="goodsFilters.search" clearable placeholder="搜索商品名称 / ID" />
+        <el-select v-model="goodsFilters.categoryId" clearable filterable placeholder="按商品分类查看">
+          <el-option
+            v-for="item in categoryOptions"
+            :key="item.id"
+            :disabled="item.enabled === false"
+            :label="`${'· '.repeat(Math.max((item.level || 1) - 1, 0))}${item.name}`"
+            :value="String(item.id)"
+          />
+        </el-select>
+        <el-select v-model="goodsFilters.platform" clearable placeholder="按销售平台选择">
+          <el-option v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value" />
+        </el-select>
+      </div>
+
+      <el-table v-loading="loading" :data="filteredGoods" height="640" style="width: 100%">
         <el-table-column prop="id" label="ID" width="90" />
         <el-table-column prop="name" label="商品" min-width="220" show-overflow-tooltip />
         <el-table-column label="分类" min-width="160" show-overflow-tooltip>
@@ -427,7 +618,9 @@ onMounted(() => {
         <el-table-column label="库存" width="90">
           <template #default="{ row }">{{ stockText(row) }}</template>
         </el-table-column>
-        <el-table-column prop="deliveryType" label="发货类型" width="120" />
+        <el-table-column label="发货类型" width="120">
+          <template #default="{ row }">{{ deliveryLabel(row.deliveryType) }}</template>
+        </el-table-column>
         <el-table-column label="可售平台" min-width="180">
           <template #default="{ row }">
             <div class="platform-tags">
@@ -438,10 +631,15 @@ onMounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="110" />
-        <el-table-column label="库存/渠道" width="250" fixed="right">
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag :type="statusMeta(row.status).type" effect="plain">{{ statusMeta(row.status).label }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="库存/渠道" width="320" fixed="right">
           <template #default="{ row }">
             <el-button-group>
+              <el-button size="small" :icon="Edit3" @click="fillForm(row)">编辑</el-button>
               <el-button v-if="isDirectGoods(row)" size="small" :icon="PlugZap" @click="openChannels(row)">渠道</el-button>
               <el-button v-else size="small" :icon="Upload" @click="openImport(row)">导入</el-button>
               <el-button v-if="!isDirectGoods(row)" size="small" :icon="Eye" @click="openCards(row)">查看</el-button>
@@ -582,9 +780,39 @@ onMounted(() => {
 
 .goods-form :deep(.el-input-number),
 .goods-form :deep(.el-select),
+.goods-form :deep(.el-segmented),
 .channel-form :deep(.el-input-number),
 .channel-form :deep(.el-select) {
   width: 100%;
+}
+
+.media-grid,
+.inline-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 10px;
+  align-items: end;
+}
+
+.inline-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.image-preview {
+  width: 88px;
+  height: 88px;
+  overflow: hidden;
+  border-radius: 12px;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.image-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .platform-checks,
@@ -594,6 +822,10 @@ onMounted(() => {
   gap: 8px;
 }
 
+.account-checks {
+  margin-top: 8px;
+}
+
 .platform-checks :deep(.el-checkbox) {
   height: 30px;
   margin-right: 0;
@@ -601,6 +833,29 @@ onMounted(() => {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.045);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+
+.form-actions,
+.table-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.form-actions {
+  justify-content: flex-end;
+}
+
+.table-filters {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 14px;
+}
+
+.table-filters :deep(.el-input),
+.table-filters :deep(.el-select) {
+  width: min(240px, 100%);
 }
 
 .channel-form {
