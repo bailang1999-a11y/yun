@@ -21,3 +21,10 @@ npm run dev:admin
 ```
 
 后端需要安装 JDK 21 和 Maven，或使用 Docker 运行数据库依赖后再启动 Spring Boot。
+
+## 飞牛 FnOS 部署
+
+飞牛 Docker 部署说明见 [docs/FNOS_DEPLOYMENT.md](docs/FNOS_DEPLOYMENT.md)。默认端口：
+
+- 前台 H5：`18080`
+- 管理后台：`18088`
