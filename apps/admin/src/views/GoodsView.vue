@@ -687,7 +687,7 @@ onMounted(() => {
     </article>
   </section>
 
-  <el-dialog v-model="goodsEditorVisible" width="min(1480px, calc(100vw - 56px))" class="goods-editor-dialog" :show-close="false">
+  <el-dialog v-model="goodsEditorVisible" width="min(1180px, calc(100vw - 96px))" class="goods-editor-dialog" :show-close="false">
     <template #header>
       <div class="editor-header">
         <div>
@@ -1125,8 +1125,8 @@ onMounted(() => {
 }
 
 :global(.goods-editor-dialog.el-dialog) {
-  margin-top: 28px !important;
-  max-height: calc(100vh - 56px);
+  margin-top: 32px !important;
+  max-height: calc(100vh - 64px);
 }
 
 :global(.goods-editor-dialog .el-dialog__header),
@@ -1144,27 +1144,27 @@ onMounted(() => {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 20px 14px;
+  padding: 14px 18px 12px;
   border-bottom: 0.5px solid rgba(255, 255, 255, 0.09);
   background: rgba(255, 255, 255, 0.035);
 }
 
 .editor-kicker {
   display: inline-flex;
-  height: 24px;
+  height: 20px;
   align-items: center;
   padding: 0 10px;
   border-radius: 999px;
   color: #071410;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   background: #00ffc3;
 }
 
 .editor-header h2 {
-  margin: 8px 0 3px;
+  margin: 6px 0 2px;
   color: rgba(255, 255, 255, 0.94);
-  font-size: 22px;
+  font-size: 20px;
 }
 
 .editor-header p {
@@ -1186,14 +1186,14 @@ onMounted(() => {
 
 .editor-shell {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  height: calc(100vh - 198px);
+  grid-template-columns: 164px minmax(0, 1fr);
+  height: min(720px, calc(100vh - 190px));
   min-height: 560px;
   overflow: hidden;
 }
 
 .editor-rail {
-  padding: 14px;
+  padding: 12px;
   border-right: 0.5px solid rgba(255, 255, 255, 0.08);
   background: rgba(2, 8, 16, 0.28);
 }
@@ -1201,10 +1201,10 @@ onMounted(() => {
 .editor-rail button {
   width: 100%;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 4px 10px;
-  padding: 12px;
-  margin-bottom: 9px;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 3px 8px;
+  padding: 10px;
+  margin-bottom: 8px;
   text-align: left;
   border-radius: 16px;
   border: 0.5px solid rgba(255, 255, 255, 0.08);
@@ -1226,8 +1226,8 @@ onMounted(() => {
 
 .editor-rail strong {
   grid-row: 1 / 3;
-  width: 34px;
-  height: 34px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
   border-radius: 12px;
@@ -1237,6 +1237,7 @@ onMounted(() => {
 
 .editor-rail span {
   font-weight: 700;
+  font-size: 13px;
 }
 
 .editor-rail em {
@@ -1248,20 +1249,22 @@ onMounted(() => {
 
 .editor-summary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 14px;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 10px;
   padding: 0;
   background: transparent;
   border: 0;
 }
 
 .summary-chip {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
-  padding: 10px 8px;
-  border-radius: 16px;
+  padding: 8px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
   border: 0.5px solid rgba(255, 255, 255, 0.08);
 }
@@ -1277,12 +1280,12 @@ onMounted(() => {
   white-space: nowrap;
   color: rgba(255, 255, 255, 0.82);
   font-weight: 650;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .editor-main {
   min-width: 0;
-  padding: 14px;
+  padding: 10px;
   overflow: hidden;
 }
 
@@ -1290,7 +1293,7 @@ onMounted(() => {
   display: flex;
   gap: 6px;
   padding: 4px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.045);
   border: 0.5px solid rgba(255, 255, 255, 0.08);
@@ -1298,7 +1301,7 @@ onMounted(() => {
 
 .editor-steps button {
   flex: 1;
-  height: 34px;
+  height: 30px;
   padding: 0 16px;
   border: 0;
   border-radius: 12px;
@@ -1313,16 +1316,16 @@ onMounted(() => {
 }
 
 .form-section {
-  padding: 12px;
-  border-radius: 16px;
+  padding: 10px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.038);
   border: 0.5px solid rgba(255, 255, 255, 0.095);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .form-section h3 {
-  margin: 0 0 10px;
-  font-size: 15px;
+  margin: 0 0 8px;
+  font-size: 14px;
   font-weight: 650;
   color: rgba(255, 255, 255, 0.86);
 }
@@ -1330,20 +1333,20 @@ onMounted(() => {
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .form-grid.three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .base-workbench {
-  height: calc(100vh - 260px);
-  min-height: 500px;
+  height: 100%;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.88fr) minmax(260px, 0.86fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
   overflow: hidden;
 }
 
@@ -1352,13 +1355,16 @@ onMounted(() => {
 }
 
 .base-workbench .form-section:nth-of-type(4) {
-  grid-column: 1 / -1;
+  grid-column: 3;
+  grid-row: 1 / 3;
   min-height: 0;
+  overflow: hidden;
 }
 
 .base-workbench .form-section:nth-of-type(5) {
   grid-column: 2;
   grid-row: 2;
+  min-height: 0;
 }
 
 .base-info-section {
@@ -1374,18 +1380,34 @@ onMounted(() => {
 .base-workbench .form-section:nth-of-type(3) {
   grid-column: 1;
   grid-row: 2;
+  min-height: 0;
 }
 
 .base-workbench :deep(.el-form-item) {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+}
+
+.base-workbench :deep(.el-form-item__label) {
+  margin-bottom: 4px;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.base-workbench :deep(.el-input__wrapper),
+.base-workbench :deep(.el-select__wrapper) {
+  min-height: 30px;
+}
+
+.base-workbench :deep(.el-input-number) {
+  height: 30px;
 }
 
 .cover-uploader {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
   align-items: center;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .upload-tile,
@@ -1401,8 +1423,8 @@ onMounted(() => {
 }
 
 .upload-tile {
-  width: 96px;
-  height: 96px;
+  width: 72px;
+  height: 72px;
 }
 
 .upload-tile div {
@@ -1421,9 +1443,10 @@ onMounted(() => {
 
 .upload-copy {
   display: grid;
-  gap: 6px;
+  gap: 4px;
   color: rgba(255, 255, 255, 0.52);
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .upload-copy strong {
@@ -1439,7 +1462,7 @@ onMounted(() => {
 }
 
 .builder-head {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   color: rgba(255, 255, 255, 0.72);
 }
 
@@ -1496,7 +1519,7 @@ onMounted(() => {
 .benefit-cards {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
 .benefit-cards span,
@@ -1520,9 +1543,9 @@ onMounted(() => {
 }
 
 .platform-checks :deep(.el-checkbox) {
-  height: 30px;
+  height: 26px;
   margin-right: 0;
-  padding: 0 10px;
+  padding: 0 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.045);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
@@ -1530,7 +1553,8 @@ onMounted(() => {
 
 .benefit-options :deep(.el-checkbox) {
   margin-right: 0;
-  padding: 0 12px;
+  height: 26px;
+  padding: 0 9px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.045);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
@@ -1540,16 +1564,16 @@ onMounted(() => {
 .inline-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
 }
 
 .switch-row {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 }
 
 .integration-card {
-  padding: 10px;
+  padding: 8px;
   margin-top: 8px;
   border-radius: 16px;
   background: rgba(4, 13, 22, 0.42);
@@ -1557,29 +1581,30 @@ onMounted(() => {
 }
 
 .integration-list {
-  max-height: 210px;
+  height: calc(100% - 68px);
+  max-height: none;
   overflow: auto;
   padding-right: 4px;
 }
 
 .integration-edit-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.8fr) minmax(180px, 1.2fr) auto;
-  gap: 10px;
+  grid-template-columns: 1fr;
+  gap: 4px;
   align-items: end;
 }
 
 .upstream-snapshot {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
   padding-top: 8px;
   color: rgba(255, 255, 255, 0.56);
   font-size: 12px;
 }
 
 .monitor-scope {
-  min-height: 30px;
+  min-height: 26px;
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1589,7 +1614,7 @@ onMounted(() => {
 }
 
 .monitor-scope em {
-  padding: 4px 8px;
+  padding: 3px 7px;
   border-radius: 999px;
   color: #bffdf2;
   font-style: normal;
@@ -1598,7 +1623,7 @@ onMounted(() => {
 }
 
 .empty-integration {
-  padding: 18px;
+  padding: 14px;
   border-radius: 14px;
   color: rgba(255, 255, 255, 0.48);
   text-align: center;
@@ -1611,14 +1636,14 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   align-items: center;
-  padding: 12px 18px;
+  padding: 10px 14px;
   border-top: 0.5px solid rgba(255, 255, 255, 0.09);
   background: rgba(2, 8, 16, 0.34);
 }
 
 .editor-footer > div:last-child {
   display: flex;
-  gap: 10px;
+  gap: 8px;
 }
 
 .footer-status {
