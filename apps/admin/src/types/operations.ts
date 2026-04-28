@@ -12,9 +12,11 @@ export interface Goods {
   subTitle?: string
   coverUrl?: string
   detailImages?: string[]
+  detailBlocks?: GoodsDetailBlock[]
   maxBuy?: number
   requireRechargeAccount?: boolean
   accountTypes?: string[]
+  priceTemplateId?: string
   priceMode?: string
   priceCoefficient?: number
   priceFixedAdd?: number
@@ -22,6 +24,12 @@ export interface Goods {
   forbiddenPlatforms?: string[]
   description?: string
   createdAt?: string
+}
+
+export interface GoodsDetailBlock {
+  type: 'image' | 'text'
+  imageUrl?: string
+  text?: string
 }
 
 export interface GoodsCreatePayload {
@@ -35,10 +43,12 @@ export interface GoodsCreatePayload {
   subTitle?: string
   coverUrl?: string
   detailImages?: string[]
+  detailBlocks?: GoodsDetailBlock[]
   stock?: number
   maxBuy?: number
   requireRechargeAccount?: boolean
   accountTypes?: string[]
+  priceTemplateId?: string
   priceMode?: string
   priceCoefficient?: number
   priceFixedAdd?: number

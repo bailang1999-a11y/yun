@@ -693,6 +693,7 @@ public class InMemoryShopRepository {
             defaultText(request.description(), "这是一个用于前端联调的内存商品。"),
             defaultText(request.coverUrl(), "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80"),
             normalizeImages(request.detailImages()),
+            normalizeDetailBlocks(request.detailBlocks()),
             type,
             defaultText(request.platform(), "GENERAL"),
             request.price() == null ? BigDecimal.valueOf(9.90) : request.price(),
@@ -700,6 +701,7 @@ public class InMemoryShopRepository {
             request.maxBuy() == null ? 1 : Math.max(1, request.maxBuy()),
             Boolean.TRUE.equals(request.requireRechargeAccount()),
             normalizeTextList(request.accountTypes()),
+            defaultText(request.priceTemplateId(), "retail-default"),
             defaultText(request.priceMode(), "FIXED"),
             request.priceCoefficient() == null ? BigDecimal.ONE : request.priceCoefficient(),
             request.priceFixedAdd() == null ? BigDecimal.ZERO : request.priceFixedAdd(),
@@ -734,6 +736,7 @@ public class InMemoryShopRepository {
             defaultText(request.description(), current.description()),
             defaultText(request.coverUrl(), current.coverUrl()),
             request.detailImages() == null ? current.detailImages() : normalizeImages(request.detailImages()),
+            request.detailBlocks() == null ? current.detailBlocks() : normalizeDetailBlocks(request.detailBlocks()),
             type,
             defaultText(request.platform(), current.platform()),
             request.price() == null ? current.price() : request.price(),
@@ -741,6 +744,7 @@ public class InMemoryShopRepository {
             request.maxBuy() == null ? current.maxBuy() : Math.max(1, request.maxBuy()),
             request.requireRechargeAccount() == null ? current.requireRechargeAccount() : request.requireRechargeAccount(),
             request.accountTypes() == null ? current.accountTypes() : normalizeTextList(request.accountTypes()),
+            defaultText(request.priceTemplateId(), current.priceTemplateId()),
             defaultText(request.priceMode(), current.priceMode()),
             request.priceCoefficient() == null ? current.priceCoefficient() : request.priceCoefficient(),
             request.priceFixedAdd() == null ? current.priceFixedAdd() : request.priceFixedAdd(),
@@ -1411,6 +1415,22 @@ public class InMemoryShopRepository {
             .toList();
     }
 
+    private List<GoodsDetailBlock> normalizeDetailBlocks(List<GoodsDetailBlock> blocks) {
+        if (blocks == null || blocks.isEmpty()) {
+            return List.of();
+        }
+        return blocks.stream()
+            .filter(Objects::nonNull)
+            .map(block -> {
+                String type = defaultText(block.type(), StringUtils.hasText(block.imageUrl()) ? "image" : "text").trim();
+                String imageUrl = block.imageUrl() == null ? "" : block.imageUrl().trim();
+                String text = block.text() == null ? "" : block.text().trim();
+                return new GoodsDetailBlock(type, imageUrl, text);
+            })
+            .filter(block -> StringUtils.hasText(block.imageUrl()) || StringUtils.hasText(block.text()))
+            .toList();
+    }
+
     private List<String> normalizeTextList(List<String> values) {
         if (values == null || values.isEmpty()) {
             return List.of();
@@ -1720,6 +1740,7 @@ public class InMemoryShopRepository {
             "适合前端联调自动发货链路的 CARD 商品。",
             "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=800&q=80",
             List.of("https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80"),
+            List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "下单完成后自动出卡，订单详情页可查看卡密与使用说明。")),
             GoodsType.CARD,
             "VIDEO",
             BigDecimal.valueOf(6.90),
@@ -1727,6 +1748,7 @@ public class InMemoryShopRepository {
             5,
             false,
             List.of(),
+            "retail-default",
             "FIXED",
             BigDecimal.ONE,
             BigDecimal.ZERO,
@@ -1749,6 +1771,7 @@ public class InMemoryShopRepository {
             "用于验证 DIRECT 商品的下单、采购中状态和充值账号字段。",
             "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=800&q=80",
             List.of("https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80"),
+            List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "直充商品会按渠道优先级自动采购，失败后自动切换备用渠道。")),
             GoodsType.DIRECT,
             "GAME",
             BigDecimal.valueOf(5.80),
@@ -1756,6 +1779,7 @@ public class InMemoryShopRepository {
             1,
             true,
             List.of("mobile", "game_uid"),
+            "member-standard",
             "DYNAMIC",
             BigDecimal.valueOf(1.08),
             BigDecimal.valueOf(0.20),
@@ -1778,6 +1802,7 @@ public class InMemoryShopRepository {
             "用于验证 MANUAL 商品的待人工状态。",
             "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=800&q=80",
             List.of("https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80"),
+            List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "代充订单由后台人工确认完成，适合需要客服处理的服务商品。")),
             GoodsType.MANUAL,
             "SERVICE",
             BigDecimal.valueOf(19.90),
@@ -1785,6 +1810,7 @@ public class InMemoryShopRepository {
             1,
             true,
             List.of("mobile", "wechat"),
+            "manual-service",
             "FIXED",
             BigDecimal.ONE,
             BigDecimal.ZERO,

@@ -240,10 +240,12 @@ export async function createGoods(payload: GoodsCreatePayload) {
     subTitle: payload.subTitle,
     coverUrl: payload.coverUrl,
     detailImages: payload.detailImages || [],
+    detailBlocks: payload.detailBlocks || [],
     stock: payload.stock,
     maxBuy: payload.maxBuy,
     requireRechargeAccount: payload.requireRechargeAccount,
     accountTypes: payload.accountTypes || [],
+    priceTemplateId: payload.priceTemplateId,
     priceMode: payload.priceMode,
     priceCoefficient: payload.priceCoefficient,
     priceFixedAdd: payload.priceFixedAdd,
@@ -268,10 +270,12 @@ export async function updateGoods(goodsId: Goods['id'], payload: GoodsCreatePayl
     subTitle: payload.subTitle,
     coverUrl: payload.coverUrl,
     detailImages: payload.detailImages || [],
+    detailBlocks: payload.detailBlocks || [],
     stock: payload.stock,
     maxBuy: payload.maxBuy,
     requireRechargeAccount: payload.requireRechargeAccount,
     accountTypes: payload.accountTypes || [],
+    priceTemplateId: payload.priceTemplateId,
     priceMode: payload.priceMode,
     priceCoefficient: payload.priceCoefficient,
     priceFixedAdd: payload.priceFixedAdd,
@@ -406,9 +410,11 @@ function normalizeGoods(item: Record<string, unknown>): Goods {
     subTitle: text(item.subTitle),
     coverUrl: text(item.coverUrl),
     detailImages: stringArray(item.detailImages),
+    detailBlocks: normalizeDetailBlocks(item.detailBlocks),
     maxBuy: numberValue(item.maxBuy, 1),
     requireRechargeAccount: Boolean(item.requireRechargeAccount),
     accountTypes: stringArray(item.accountTypes),
+    priceTemplateId: text(item.priceTemplateId),
     priceMode: text(item.priceMode, 'FIXED'),
     priceCoefficient: numberValue(item.priceCoefficient, 1),
     priceFixedAdd: numberValue(item.priceFixedAdd, 0),
@@ -417,6 +423,20 @@ function normalizeGoods(item: Record<string, unknown>): Goods {
     description: text(item.description),
     createdAt: text(item.createdAt)
   }
+}
+
+function normalizeDetailBlocks(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item) => {
+      const record = (item || {}) as Record<string, unknown>
+      return {
+        type: text(record.type, text(record.imageUrl) ? 'image' : 'text') as 'image' | 'text',
+        imageUrl: text(record.imageUrl),
+        text: text(record.text)
+      }
+    })
+    .filter((item) => item.imageUrl || item.text)
 }
 
 function normalizeAdminProfile(item: Record<string, unknown>): AdminProfile {

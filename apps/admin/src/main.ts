@@ -16,7 +16,8 @@ import {
   ElSwitch,
   ElTable,
   ElTableColumn,
-  ElTag
+  ElTag,
+  ElUpload
 } from 'element-plus'
 import 'element-plus/dist/index.css'
 import './style.css'
@@ -41,7 +42,8 @@ const app = createApp(App)
   ElSwitch,
   ElTable,
   ElTableColumn,
-  ElTag
+  ElTag,
+  ElUpload
 ].forEach((component) => {
   app.use(component)
 })
