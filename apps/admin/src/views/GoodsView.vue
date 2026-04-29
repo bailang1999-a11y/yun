@@ -861,7 +861,7 @@ onMounted(() => {
                         />
                       </el-select>
                     </el-form-item>
-                    <el-form-item label="对接平台商品 ID">
+                    <el-form-item label="上游商品 ID">
                       <el-input v-model="item.supplierGoodsId" placeholder="填入后自动刷新" @blur="refreshIntegration(index)" @keyup.enter="refreshIntegration(index)" />
                     </el-form-item>
                     <el-form-item label="操作">
