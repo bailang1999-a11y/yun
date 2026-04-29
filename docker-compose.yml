@@ -1,0 +1,47 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: xiyiyun-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: xiyiyun_root
+      MYSQL_DATABASE: xiyiyun
+      MYSQL_USER: xiyiyun
+      MYSQL_PASSWORD: xiyiyun_pwd
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./db/init:/docker-entrypoint-initdb.d
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+
+  redis:
+    image: redis:7-alpine
+    container_name: xiyiyun-redis
+    ports:
+      - "6379:6379"
+
+  backend:
+    image: maven:3.9.9-eclipse-temurin-21
+    container_name: xiyiyun-backend
+    working_dir: /workspace
+    volumes:
+      - ./backend:/workspace
+      - maven-cache:/root/.m2
+    command: mvn spring-boot:run
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/xiyiyun?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: xiyiyun
+      SPRING_DATASOURCE_PASSWORD: xiyiyun_pwd
+      SPRING_DATA_REDIS_HOST: redis
+    ports:
+      - "8080:8080"
+    depends_on:
+      - mysql
+      - redis
+
+volumes:
+  mysql-data:
+  maven-cache:
