@@ -32,6 +32,8 @@ export interface Goods {
 
 export interface GoodsIntegration {
   id?: string
+  supplierId?: number | string
+  supplierName?: string
   platformCode?: string
   supplierGoodsId?: string
   supplierGoodsName?: string

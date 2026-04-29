@@ -450,6 +450,8 @@ function normalizeIntegrations(value: unknown) {
     const record = (item || {}) as Record<string, unknown>
     return {
       id: text(record.id),
+      supplierId: text(record.supplierId),
+      supplierName: text(record.supplierName),
       platformCode: text(record.platformCode),
       supplierGoodsId: text(record.supplierGoodsId),
       supplierGoodsName: text(record.supplierGoodsName),

@@ -172,11 +172,6 @@ const goodsModules: { key: GoodsModuleKey; title: string; desc: string }[] = [
   { key: 'integration', title: '对接监控', desc: '上游商品、轮询、监听范围' },
   { key: 'account', title: '账号规则', desc: '充值账号与补充约束' }
 ]
-const editorSummaryItems = computed(() => [
-  { label: '当前类型', value: deliveryLabel(form.deliveryType) },
-  { label: '权益时间', value: form.benefitDurations?.length ? form.benefitDurations.join(' / ') : '未设置' },
-  { label: '对接商品', value: `${form.integrations?.length || 0} 个` }
-])
 const activeModuleMeta = computed(() => goodsModules.find((item) => item.key === activeGoodsModule.value) || goodsModules[0])
 
 function fileToDataUrl(file: UploadRawFile) {
@@ -235,11 +230,13 @@ function applyPriceTemplate(templateId?: string) {
 }
 
 function addIntegration() {
+  const defaultSupplier = suppliers.value.find((item) => item.status === 'ENABLED') || suppliers.value[0]
   form.integrations = [
     ...(form.integrations || []),
     {
       id: `link-${Date.now()}`,
-      platformCode: 'taobao',
+      supplierId: defaultSupplier?.id,
+      supplierName: defaultSupplier?.name || '',
       supplierGoodsId: '',
       supplierGoodsName: '',
       supplierPrice: 0,
@@ -259,11 +256,13 @@ function removeIntegration(index: number) {
 function refreshIntegration(index: number) {
   const item = form.integrations?.[index]
   if (!item) return
-  const platformName = platformLabel(item.platformCode || 'private')
+  const supplier = suppliers.value.find((entry) => String(entry.id) === String(item.supplierId))
+  item.supplierName = supplier?.name || item.supplierName || '未选择渠道'
+  const sourceName = item.supplierName || '货源渠道'
   const suffix = item.supplierGoodsId ? item.supplierGoodsId.slice(-6) : String(index + 1).padStart(3, '0')
   item.enabled = true
   item.upstreamStatus = '正常'
-  item.supplierGoodsName = `${platformName}权益商品 ${suffix}`
+  item.supplierGoodsName = `${sourceName}商品 ${suffix}`
   item.upstreamTitle = item.supplierGoodsName
   item.supplierPrice = Number((4.9 + index * 0.35 + suffix.length * 0.08).toFixed(2))
   item.upstreamStock = 4800 + index * 60 + suffix.length
@@ -714,25 +713,6 @@ onMounted(() => {
     </template>
 
     <div class="editor-shell">
-      <aside class="editor-rail">
-        <button type="button" :class="{ active: editorStep === 'base' }" @click="editorStep = 'base'">
-          <strong>01</strong>
-          <span>商品基本信息</span>
-          <em>类型、分类、价格、库存、平台与上游对接</em>
-        </button>
-        <button type="button" :class="{ active: editorStep === 'detail' }" @click="editorStep = 'detail'">
-          <strong>02</strong>
-          <span>商品详情</span>
-          <em>长图、多图、文案与使用说明编排</em>
-        </button>
-        <div class="editor-summary">
-          <div v-for="item in editorSummaryItems" :key="item.label" class="summary-chip">
-            <strong>{{ item.value }}</strong>
-            <span>{{ item.label }}</span>
-          </div>
-        </div>
-      </aside>
-
       <div class="editor-main">
         <div class="editor-steps">
           <button type="button" :class="{ active: editorStep === 'base' }" @click="editorStep = 'base'">商品基本信息</button>
@@ -871,9 +851,14 @@ onMounted(() => {
               <div class="integration-list">
                 <div v-for="(item, index) in form.integrations || []" :key="item.id || index" class="integration-card">
                   <div class="integration-edit-row">
-                    <el-form-item label="对接平台">
-                      <el-select v-model="item.platformCode">
-                        <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+                    <el-form-item label="货源渠道">
+                      <el-select v-model="item.supplierId" filterable placeholder="选择供应商" @change="refreshIntegration(index)">
+                        <el-option
+                          v-for="supplier in suppliers"
+                          :key="supplier.id"
+                          :label="supplier.name"
+                          :value="supplier.id"
+                        />
                       </el-select>
                     </el-form-item>
                     <el-form-item label="对接平台商品 ID">
@@ -887,6 +872,7 @@ onMounted(() => {
                     </el-form-item>
                   </div>
                   <div class="upstream-snapshot">
+                    <span>渠道：{{ item.supplierName || '未选择渠道' }}</span>
                     <span>商品ID：{{ item.supplierGoodsId || '-' }}</span>
                     <span>名称：{{ item.supplierGoodsName || item.upstreamTitle || '填入 ID 后自动获取' }}</span>
                     <span>售价：{{ item.supplierPrice || 0 }}</span>
@@ -1243,102 +1229,10 @@ onMounted(() => {
 }
 
 .editor-shell {
-  display: grid;
-  grid-template-columns: 164px minmax(0, 1fr);
+  display: block;
   height: min(720px, calc(100vh - 190px));
   min-height: 560px;
   overflow: hidden;
-}
-
-.editor-rail {
-  padding: 12px;
-  border-right: 0.5px solid rgba(255, 255, 255, 0.08);
-  background: rgba(2, 8, 16, 0.28);
-}
-
-.editor-rail button {
-  width: 100%;
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 3px 8px;
-  padding: 10px;
-  margin-bottom: 8px;
-  text-align: left;
-  border-radius: 16px;
-  border: 0.5px solid rgba(255, 255, 255, 0.08);
-  color: rgba(255, 255, 255, 0.7);
-  background: rgba(255, 255, 255, 0.035);
-  cursor: pointer;
-  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
-}
-
-.editor-rail button:active {
-  transform: scale(0.99);
-}
-
-.editor-rail button.active {
-  color: rgba(255, 255, 255, 0.94);
-  border-color: rgba(0, 255, 195, 0.32);
-  background: rgba(0, 255, 195, 0.09);
-}
-
-.editor-rail strong {
-  grid-row: 1 / 3;
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border-radius: 12px;
-  color: #04100d;
-  background: rgba(0, 255, 195, 0.88);
-}
-
-.editor-rail span {
-  font-weight: 700;
-  font-size: 13px;
-}
-
-.editor-rail em {
-  color: rgba(255, 255, 255, 0.42);
-  font-size: 12px;
-  font-style: normal;
-  line-height: 1.45;
-}
-
-.editor-summary {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-  margin-top: 10px;
-  padding: 0;
-  background: transparent;
-  border: 0;
-}
-
-.summary-chip {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 8px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 0.5px solid rgba(255, 255, 255, 0.08);
-}
-
-.summary-chip span {
-  color: rgba(255, 255, 255, 0.44);
-  font-size: 12px;
-}
-
-.summary-chip strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: rgba(255, 255, 255, 0.82);
-  font-weight: 650;
-  font-size: 12px;
 }
 
 .editor-main {
@@ -1402,7 +1296,7 @@ onMounted(() => {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-columns: 178px minmax(0, 1fr) 214px;
+  grid-template-columns: 196px minmax(0, 1fr) 214px;
   gap: 10px;
   overflow: hidden;
 }
