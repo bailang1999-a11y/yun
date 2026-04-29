@@ -1,9 +1,17 @@
 package com.xiyiyun.shop.mvp;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiyiyun.shop.GoodsType;
 import com.xiyiyun.shop.OrderStatus;
 import com.xiyiyun.shop.realtime.OrderRealtimeBroadcaster;
 import java.math.BigDecimal;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
@@ -30,6 +38,11 @@ import org.springframework.util.StringUtils;
 @Component
 public class InMemoryShopRepository {
     private static final Duration PAYMENT_TIMEOUT = Duration.ofMinutes(15);
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
+    };
+    private static final TypeReference<List<Map<String, Object>>> LIST_MAP_TYPE = new TypeReference<>() {
+    };
 
     private final Map<Long, CategoryItem> categories = new ConcurrentHashMap<>();
     private final Map<Long, GoodsItem> goods = new ConcurrentHashMap<>();
@@ -40,6 +53,8 @@ public class InMemoryShopRepository {
     private final Map<Long, SmsLogItem> smsLogs = new ConcurrentHashMap<>();
     private final Map<Long, OperationLogItem> operationLogs = new ConcurrentHashMap<>();
     private final Map<Long, SupplierItem> suppliers = new ConcurrentHashMap<>();
+    private final Map<Long, String> supplierApiKeys = new ConcurrentHashMap<>();
+    private final Map<Long, RemoteGoodsSyncResult> remoteGoodsSyncResults = new ConcurrentHashMap<>();
     private final Map<Long, GoodsChannelItem> goodsChannels = new ConcurrentHashMap<>();
     private final Map<Long, UserGroupItem> userGroups = new ConcurrentHashMap<>();
     private final Map<Long, UserItem> users = new ConcurrentHashMap<>();
@@ -98,6 +113,7 @@ public class InMemoryShopRepository {
     public List<CategoryItem> listCategories() {
         return categories.values().stream()
             .sorted(Comparator.comparing(CategoryItem::sort).thenComparing(CategoryItem::id))
+            .map(this::enrichCategory)
             .toList();
     }
 
@@ -117,12 +133,54 @@ public class InMemoryShopRepository {
         CategoryItem item = new CategoryItem(
             id,
             request.name().trim(),
+            defaultText(request.nickname(), ""),
             parentId,
+            normalizeCategoryIcon(request.icon()),
             request.sort() == null ? (int) (id % 1000) : request.sort(),
-            request.enabled() == null || request.enabled()
+            categoryEnabled(request.enabled(), request.status()),
+            categoryStatus(categoryEnabled(request.enabled(), request.status())),
+            categoryLevel(parentId) + 1,
+            false
         );
         categories.put(id, item);
-        return item;
+        return enrichCategory(item);
+    }
+
+    public synchronized CategoryItem updateCategory(Long id, UpdateCategoryRequest request) {
+        CategoryItem current = categories.get(id);
+        if (current == null) {
+            throw new IllegalArgumentException("category not found");
+        }
+        if (request == null) {
+            throw new IllegalArgumentException("category update request is required");
+        }
+        Long parentId = request.parentId() == null ? current.parentId() : request.parentId();
+        validateCategoryParent(id, parentId);
+        String name = request.name() == null ? current.name() : request.name().trim();
+        if (!StringUtils.hasText(name)) {
+            throw new IllegalArgumentException("category name is required");
+        }
+        int newLevel = categoryLevel(parentId) + 1;
+        if (newLevel + categorySubtreeHeight(id) - 1 > 5) {
+            throw new IllegalStateException("category depth cannot exceed 5");
+        }
+        boolean enabled = request.enabled() == null && !StringUtils.hasText(request.status())
+            ? current.enabled() == null || current.enabled()
+            : categoryEnabled(request.enabled(), request.status());
+        CategoryItem next = new CategoryItem(
+            current.id(),
+            name,
+            request.nickname() == null ? current.nickname() : defaultText(request.nickname(), ""),
+            parentId,
+            request.icon() == null ? current.icon() : normalizeCategoryIcon(request.icon()),
+            request.sort() == null ? current.sort() : request.sort(),
+            enabled,
+            categoryStatus(enabled),
+            newLevel,
+            hasChildCategory(current.id())
+        );
+        categories.put(id, next);
+        return enrichCategory(next);
     }
 
     public synchronized CategoryItem updateCategoryStatus(Long id, boolean enabled) {
@@ -130,9 +188,34 @@ public class InMemoryShopRepository {
         if (item == null) {
             throw new IllegalArgumentException("category not found");
         }
-        CategoryItem next = new CategoryItem(item.id(), item.name(), item.parentId(), item.sort(), enabled);
+        CategoryItem next = new CategoryItem(
+            item.id(),
+            item.name(),
+            item.nickname(),
+            item.parentId(),
+            item.icon(),
+            item.sort(),
+            enabled,
+            categoryStatus(enabled),
+            categoryLevel(item.parentId()) + 1,
+            hasChildCategory(item.id())
+        );
         categories.put(id, next);
-        return next;
+        return enrichCategory(next);
+    }
+
+    public synchronized void deleteCategory(Long id) {
+        CategoryItem item = categories.get(id);
+        if (item == null) {
+            throw new IllegalArgumentException("category not found");
+        }
+        if (hasChildCategory(id)) {
+            throw new IllegalStateException("category has child categories and cannot be deleted");
+        }
+        if (goods.values().stream().anyMatch(goodsItem -> Objects.equals(goodsItem.categoryId(), id))) {
+            throw new IllegalStateException("category is referenced by goods and cannot be deleted");
+        }
+        categories.remove(id);
     }
 
     public List<GoodsItem> listGoods(Long categoryId, String search, String platform, boolean admin) {
@@ -372,19 +455,95 @@ public class InMemoryShopRepository {
             throw new IllegalArgumentException("supplier name is required");
         }
         Long id = supplierId.incrementAndGet();
+        String appKey = defaultText(request.appKey(), defaultText(request.appId(), "demo-app-key"));
+        String appSecret = defaultText(request.appSecret(), "demo-secret");
+        String apiKey = defaultText(request.apiKey(), appSecret);
+        String apiKeyMasked = StringUtils.hasText(request.apiKeyMasked()) ? request.apiKeyMasked().trim() : mask(apiKey);
+        String platformType = defaultText(request.platformType(), "CUSTOM");
+        String appId = firstText(request.appId(), request.userId(), appKey);
+        String userId = firstText(request.userId(), appId, appKey);
         SupplierItem item = new SupplierItem(
             id,
             request.name().trim(),
+            platformType,
             defaultText(request.baseUrl(), "https://supplier.example.com/api"),
-            defaultText(request.appKey(), "demo-app-key"),
-            mask(defaultText(request.appSecret(), "demo-secret")),
-            request.balance() == null ? BigDecimal.valueOf(1000) : request.balance(),
+            appKey,
+            mask(appSecret),
+            userId,
+            appId,
+            apiKeyMasked,
+            normalizedCallbackUrl(request.callbackUrl()),
+            normalizedTimeoutSeconds(request.timeoutSeconds()),
+            request.balance() == null ? BigDecimal.ZERO : request.balance(),
             defaultText(request.status(), "ENABLED"),
             defaultText(request.remark(), ""),
             OffsetDateTime.now()
         );
         suppliers.put(id, item);
+        if (StringUtils.hasText(apiKey)) {
+            supplierApiKeys.put(id, apiKey);
+        }
         return item;
+    }
+
+    public synchronized SupplierItem updateSupplier(Long id, CreateSupplierRequest request) {
+        SupplierItem current = requiredSupplier(id);
+        if (request == null) {
+            return current;
+        }
+        String name = defaultText(request.name(), current.name()).trim();
+        if (!StringUtils.hasText(name)) {
+            throw new IllegalArgumentException("supplier name is required");
+        }
+        String platformType = defaultText(request.platformType(), current.platformType());
+        String appKey = defaultText(request.appKey(), current.appKey());
+        String appId = defaultText(request.appId(), current.appId());
+        String userId = isKasushouPlatform(platformType)
+            ? firstText(request.userId(), appId, defaultText(current.userId(), appKey))
+            : defaultText(request.userId(), current.userId());
+        String appSecretMasked = current.appSecretMasked();
+        if (StringUtils.hasText(request.appSecret())) {
+            appSecretMasked = mask(request.appSecret());
+        }
+        String apiKeyMasked = current.apiKeyMasked();
+        if (StringUtils.hasText(request.apiKey())) {
+            String apiKey = request.apiKey().trim();
+            supplierApiKeys.put(id, apiKey);
+            apiKeyMasked = mask(apiKey);
+        } else if (StringUtils.hasText(request.appSecret())) {
+            String apiKey = request.appSecret().trim();
+            supplierApiKeys.put(id, apiKey);
+            apiKeyMasked = mask(apiKey);
+        } else if (StringUtils.hasText(request.apiKeyMasked())) {
+            apiKeyMasked = request.apiKeyMasked().trim();
+        }
+        SupplierItem next = new SupplierItem(
+            current.id(),
+            name,
+            platformType,
+            defaultText(request.baseUrl(), current.baseUrl()),
+            appKey,
+            appSecretMasked,
+            userId,
+            appId,
+            apiKeyMasked,
+            request.callbackUrl() == null ? current.callbackUrl() : normalizedCallbackUrl(request.callbackUrl()),
+            request.timeoutSeconds() == null ? current.timeoutSeconds() : normalizedTimeoutSeconds(request.timeoutSeconds()),
+            request.balance() == null ? current.balance() : request.balance(),
+            defaultText(request.status(), current.status()),
+            defaultText(request.remark(), current.remark()),
+            current.lastSyncAt()
+        );
+        suppliers.put(id, next);
+        return next;
+    }
+
+    public synchronized void deleteSupplier(Long id) {
+        requiredSupplier(id);
+        suppliers.remove(id);
+        supplierApiKeys.remove(id);
+        remoteGoodsSyncResults.remove(id);
+        goodsChannels.entrySet().removeIf(entry -> Objects.equals(entry.getValue().supplierId(), id));
     }
 
     public synchronized SupplierItem updateSupplierStatus(Long id, boolean enabled) {
@@ -396,18 +555,48 @@ public class InMemoryShopRepository {
 
     public synchronized SupplierItem refreshSupplierBalance(Long id) {
         SupplierItem item = requiredSupplier(id);
-        BigDecimal nextBalance = item.balance().add(BigDecimal.valueOf(12.34));
-        SupplierItem next = item.withBalance(nextBalance);
+        SupplierItem next = isKasushouSupplier(item)
+            ? refreshKasushouBalance(item)
+            : item.withBalance(item.balance().add(BigDecimal.valueOf(12.34)));
         suppliers.put(id, next);
         return next;
     }
 
-    public SupplierItem testSupplierConnection(Long id) {
+    public synchronized SupplierItem testSupplierConnection(Long id) {
         SupplierItem item = requiredSupplier(id);
         if (!"ENABLED".equals(item.status())) {
             throw new IllegalStateException("supplier is disabled");
         }
-        return item.withBalance(item.balance());
+        SupplierItem next = isKasushouSupplier(item) ? testKasushouConnection(item) : item.withBalance(item.balance());
+        suppliers.put(id, next);
+        return next;
+    }
+
+    public synchronized RemoteGoodsSyncResult syncRemoteGoods(Long id, SyncGoodsRequest request) {
+        SupplierItem item = requiredSupplier(id);
+        if (!"ENABLED".equals(item.status())) {
+            throw new IllegalStateException("supplier is disabled");
+        }
+        if (!isKasushouSupplier(item)) {
+            throw new IllegalArgumentException("supplier platformType must be KASUSHOU_2");
+        }
+
+        int page = request == null || request.page() == null ? 1 : Math.max(1, request.page());
+        int limit = request == null || request.limit() == null ? 20 : Math.max(1, Math.min(request.limit(), 100));
+        Long cateId = request == null ? null : request.cateId();
+        String keyword = request == null ? "" : defaultText(request.keyword(), "").trim();
+
+        RemoteGoodsSyncResult result = isPlaceholderBaseUrl(item.baseUrl())
+            ? mockKasushouGoodsSyncResult(item.id(), cateId, keyword, page, limit)
+            : fetchKasushouGoods(item, cateId, keyword, page, limit);
+        remoteGoodsSyncResults.put(id, result);
+        suppliers.put(id, item.withLastSyncAt(result.syncedAt()));
+        return result;
+    }
+
+    public Optional<RemoteGoodsSyncResult> latestRemoteGoods(Long id) {
+        requiredSupplier(id);
+        return Optional.ofNullable(remoteGoodsSyncResults.get(id));
     }
 
     public List<OrderItem> listOrders() {
@@ -1123,6 +1312,349 @@ public class InMemoryShopRepository {
         return item;
     }
 
+    private SupplierItem testKasushouConnection(SupplierItem item) {
+        validateKasushouCredentials(item);
+        if (isPlaceholderBaseUrl(item.baseUrl())) {
+            return item.withLastSyncAt(OffsetDateTime.now());
+        }
+
+        JsonNode root = kasushouPostJson(item, "/api/v1/user/info", Map.of(), "test connection");
+        ensureKasushouOk(root, "test connection");
+        return item.withLastSyncAt(OffsetDateTime.now());
+    }
+
+    private SupplierItem refreshKasushouBalance(SupplierItem item) {
+        validateKasushouCredentials(item);
+        if (isPlaceholderBaseUrl(item.baseUrl())) {
+            return item.withBalance(item.balance() == null ? BigDecimal.ZERO : item.balance());
+        }
+        JsonNode root = kasushouPostJson(item, "/api/v1/user/info", Map.of(), "balance refresh");
+        ensureKasushouOk(root, "balance refresh");
+        return item.withBalance(kasushouBalance(root));
+    }
+
+    private RemoteGoodsSyncResult fetchKasushouGoods(SupplierItem item, Long cateId, String keyword, int page, int limit) {
+        validateKasushouCredentials(item);
+
+        JsonNode cateRoot = kasushouPostJson(item, "/api/v1/goods/cate", Map.of(), "category sync");
+        ensureKasushouOk(cateRoot, "category sync");
+        List<Map<String, Object>> categories = kasushouCategories(cateRoot.path("data"));
+
+        Map<String, Object> listBody = new java.util.LinkedHashMap<>();
+        listBody.put("cate_id", cateId == null ? "" : cateId);
+        listBody.put("keyword", defaultText(keyword, ""));
+        listBody.put("limit", limit);
+        listBody.put("page", page);
+
+        JsonNode listRoot = kasushouPostJson(item, "/api/v1/goods/list", listBody, "goods list sync");
+        ensureKasushouOk(listRoot, "goods list sync");
+        JsonNode data = listRoot.path("data");
+        JsonNode listNode = data.path("list");
+        if (!listNode.isArray()) {
+            throw new IllegalStateException("kasushou goods list sync failed: data.list is missing");
+        }
+        int total = intValue(data.path("total"), listNode.size());
+        List<RemoteGoodsItem> items = new ArrayList<>();
+        for (JsonNode node : listNode) {
+            items.add(remoteGoodsItem(node));
+        }
+        OffsetDateTime syncedAt = OffsetDateTime.now();
+        return new RemoteGoodsSyncResult(
+            item.id(),
+            syncedAt,
+            total,
+            items,
+            categories,
+            page,
+            limit,
+            "synced " + items.size() + " kasushou goods from remote total " + total
+        );
+    }
+
+    private void validateKasushouCredentials(SupplierItem item) {
+        if (!StringUtils.hasText(item.baseUrl())) {
+            throw new IllegalArgumentException("kasushou baseUrl is required");
+        }
+        if (!StringUtils.hasText(kasushouIdentity(item))) {
+            throw new IllegalArgumentException("kasushou appId is required");
+        }
+        String apiKey = supplierApiKeys.get(item.id());
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalArgumentException("kasushou apiKey is required");
+        }
+    }
+
+    private JsonNode kasushouPostJson(SupplierItem item, String path, Object bodyObject, String action) {
+        Duration timeout = Duration.ofSeconds(normalizedTimeoutSeconds(item.timeoutSeconds()));
+        String apiKey = supplierApiKeys.get(item.id());
+        String body = KasushouSignatureUtil.sortedJsonBody(bodyObject);
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        Map<String, String> headers = KasushouSignatureUtil.headers(timestamp, kasushouIdentity(item), bodyObject, apiKey);
+        HttpRequest request = HttpRequest.newBuilder(kasushouUri(item.baseUrl(), path))
+            .timeout(timeout)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .header("Sign", headers.get("Sign"))
+            .header("Timestamp", headers.get("Timestamp"))
+            .header("UserId", headers.get("UserId"))
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+            .build();
+        try {
+            HttpResponse<String> response = HttpClient.newBuilder()
+                .connectTimeout(timeout)
+                .build()
+                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                throw new IllegalStateException("kasushou " + action + " failed: HTTP "
+                    + response.statusCode() + " " + abbreviate(response.body(), 300));
+            }
+            return OBJECT_MAPPER.readTree(response.body());
+        } catch (IllegalStateException ex) {
+            throw ex;
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("kasushou " + action + " interrupted");
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("kasushou " + action + " failed: invalid JSON response");
+        } catch (Exception ex) {
+            throw new IllegalStateException("kasushou " + action + " failed: " + ex.getMessage());
+        }
+    }
+
+    private void ensureKasushouOk(JsonNode root, String action) {
+        int code = intValue(root.path("code"), -1);
+        if (code != 200) {
+            String message = textValue(root, "msg", "message", "error");
+            throw new IllegalStateException("kasushou " + action + " failed: code=" + code
+                + (StringUtils.hasText(message) ? " message=" + message : ""));
+        }
+    }
+
+    private BigDecimal kasushouBalance(JsonNode root) {
+        BigDecimal balance = optionalDecimalValue(root,
+            "balance", "money", "user_money", "userMoney", "amount", "account_balance", "accountBalance");
+        if (balance != null) {
+            return balance;
+        }
+        JsonNode data = root.path("data");
+        balance = optionalDecimalValue(data,
+            "balance", "money", "user_money", "userMoney", "amount", "account_balance", "accountBalance");
+        if (balance != null) {
+            return balance;
+        }
+        throw new IllegalStateException("kasushou balance refresh failed: balance field is missing");
+    }
+
+    private List<Map<String, Object>> kasushouCategories(JsonNode data) {
+        JsonNode categoryNode = data.isArray() ? data : firstExisting(data, "list", "cate", "cates", "category", "categories");
+        if (categoryNode == null || !categoryNode.isArray()) {
+            return List.of();
+        }
+        return OBJECT_MAPPER.convertValue(categoryNode, LIST_MAP_TYPE);
+    }
+
+    private RemoteGoodsItem remoteGoodsItem(JsonNode node) {
+        return new RemoteGoodsItem(
+            textValue(node, "id", "goods_id", "goodsId"),
+            textValue(node, "goods_name", "goodsName", "name", "title"),
+            textValue(node, "goods_type", "goodsType", "type"),
+            decimalValue(node, "goods_price", "goodsPrice", "price"),
+            decimalValue(node, "face_value", "faceValue", "face"),
+            intValue(firstExisting(node, "stock_num", "stockNum", "stock", "num"), 0),
+            textValue(node, "status", "state"),
+            booleanValue(node, "can_buy", "canBuy"),
+            booleanValue(node, "can_no_buy", "canNoBuy", "can_not_buy"),
+            OBJECT_MAPPER.convertValue(node, MAP_TYPE)
+        );
+    }
+
+    private RemoteGoodsSyncResult mockKasushouGoodsSyncResult(Long supplierId, Long cateId, String keyword, int page, int limit) {
+        OffsetDateTime syncedAt = OffsetDateTime.now();
+        List<Map<String, Object>> categories = List.of(
+            Map.of("id", 101, "name", "会员权益"),
+            Map.of("id", 102, "name", "影音娱乐")
+        );
+        List<RemoteGoodsItem> items = List.of(
+            new RemoteGoodsItem(
+                "KSS-MOCK-1001",
+                "卡速售模拟商品 - 视频会员月卡",
+                "CARD",
+                BigDecimal.valueOf(18.80),
+                BigDecimal.valueOf(30),
+                128,
+                "ON_SALE",
+                true,
+                false,
+                Map.of("id", "KSS-MOCK-1001", "cate_id", cateId == null ? 101 : cateId, "mock", true)
+            ),
+            new RemoteGoodsItem(
+                "KSS-MOCK-1002",
+                "卡速售模拟商品 - 游戏点券直充",
+                "RECHARGE",
+                BigDecimal.valueOf(96.50),
+                BigDecimal.valueOf(100),
+                64,
+                "ON_SALE",
+                true,
+                false,
+                Map.of("id", "KSS-MOCK-1002", "keyword", defaultText(keyword, ""), "mock", true)
+            ),
+            new RemoteGoodsItem(
+                "KSS-MOCK-1003",
+                "卡速售模拟商品 - 库存不足样例",
+                "CARD",
+                BigDecimal.valueOf(9.90),
+                BigDecimal.valueOf(10),
+                0,
+                "SOLD_OUT",
+                false,
+                true,
+                Map.of("id", "KSS-MOCK-1003", "stock_num", 0, "mock", true)
+            )
+        );
+        int safeLimit = Math.max(1, limit);
+        int fromIndex = Math.min(items.size(), (page - 1) * safeLimit);
+        int toIndex = Math.min(items.size(), fromIndex + safeLimit);
+        List<RemoteGoodsItem> pageItems = items.subList(fromIndex, toIndex);
+        return new RemoteGoodsSyncResult(
+            supplierId,
+            syncedAt,
+            items.size(),
+            pageItems,
+            categories,
+            page,
+            limit,
+            "mocked kasushou goods sync for placeholder baseUrl"
+        );
+    }
+
+    private URI kasushouUserInfoUri(String baseUrl) {
+        return kasushouUri(baseUrl, "/api/v1/user/info");
+    }
+
+    private URI kasushouUri(String baseUrl, String path) {
+        String normalizedBaseUrl = baseUrl.trim().replaceAll("/+$", "");
+        return URI.create(normalizedBaseUrl + path);
+    }
+
+    private JsonNode firstExisting(JsonNode node, String... fieldNames) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        for (String fieldName : fieldNames) {
+            JsonNode value = node.get(fieldName);
+            if (value != null && !value.isMissingNode() && !value.isNull()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String textValue(JsonNode node, String... fieldNames) {
+        JsonNode value = firstExisting(node, fieldNames);
+        if (value == null || value.isMissingNode() || value.isNull()) {
+            return "";
+        }
+        return value.asText("");
+    }
+
+    private BigDecimal decimalValue(JsonNode node, String... fieldNames) {
+        BigDecimal value = optionalDecimalValue(node, fieldNames);
+        return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private BigDecimal optionalDecimalValue(JsonNode node, String... fieldNames) {
+        JsonNode value = firstExisting(node, fieldNames);
+        if (value == null || value.isMissingNode() || value.isNull() || !StringUtils.hasText(value.asText())) {
+            return null;
+        }
+        try {
+            return new BigDecimal(value.asText());
+        } catch (NumberFormatException ex) {
+            return null;
+        }
+    }
+
+    private int intValue(JsonNode node, int fallback) {
+        if (node == null || node.isMissingNode() || node.isNull() || !StringUtils.hasText(node.asText())) {
+            return fallback;
+        }
+        return node.asInt(fallback);
+    }
+
+    private Boolean booleanValue(JsonNode node, String... fieldNames) {
+        JsonNode value = firstExisting(node, fieldNames);
+        if (value == null || value.isMissingNode() || value.isNull() || !StringUtils.hasText(value.asText())) {
+            return null;
+        }
+        if (value.isBoolean()) {
+            return value.asBoolean();
+        }
+        String normalized = normalize(value.asText());
+        return "1".equals(normalized)
+            || "true".equals(normalized)
+            || "yes".equals(normalized)
+            || "y".equals(normalized)
+            || "on".equals(normalized);
+    }
+
+    private boolean isKasushouSupplier(SupplierItem item) {
+        return isKasushouPlatform(item.platformType());
+    }
+
+    private boolean isKasushouPlatform(String platformType) {
+        String normalizedPlatformType = normalize(platformType).replace("-", "_");
+        return "kasushou_2".equals(normalizedPlatformType)
+            || "kasushou".equals(normalizedPlatformType)
+            || "kasu".equals(normalizedPlatformType);
+    }
+
+    private String kasushouIdentity(SupplierItem item) {
+        return firstText(item.userId(), item.appId(), item.appKey());
+    }
+
+    private boolean isPlaceholderBaseUrl(String baseUrl) {
+        String trimmed = defaultText(baseUrl, "").trim();
+        if (!StringUtils.hasText(trimmed)) {
+            return false;
+        }
+        String normalized = trimmed.toLowerCase(Locale.ROOT);
+        if (normalized.contains("example") || normalized.contains("你的") || normalized.contains("占位")) {
+            return true;
+        }
+        try {
+            String host = URI.create(trimmed).getHost();
+            if (!StringUtils.hasText(host)) {
+                return false;
+            }
+            String normalizedHost = host.toLowerCase(Locale.ROOT);
+            return "example.com".equals(normalizedHost)
+                || normalizedHost.endsWith(".example.com")
+                || normalizedHost.endsWith(".example")
+                || normalizedHost.contains(".example.");
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    private int normalizedTimeoutSeconds(Integer timeoutSeconds) {
+        if (timeoutSeconds == null) {
+            return 10;
+        }
+        return Math.max(1, Math.min(timeoutSeconds, 60));
+    }
+
+    private String normalizedCallbackUrl(String callbackUrl) {
+        return defaultText(callbackUrl, "");
+    }
+
+    private String abbreviate(String value, int maxLength) {
+        if (!StringUtils.hasText(value) || value.length() <= maxLength) {
+            return defaultText(value, "");
+        }
+        return value.substring(0, maxLength) + "...";
+    }
+
     private UserItem requiredUser(Long id) {
         UserItem item = users.get(id);
         if (item == null) {
@@ -1387,6 +1919,66 @@ public class InMemoryShopRepository {
             .filter(category -> Objects.equals(category.parentId(), parentId))
             .sorted(Comparator.comparing(CategoryItem::sort).thenComparing(CategoryItem::id))
             .forEach(category -> collectCategoryTreeIds(category.id(), result));
+    }
+
+    private CategoryItem enrichCategory(CategoryItem item) {
+        boolean enabled = item.enabled() == null || item.enabled();
+        return new CategoryItem(
+            item.id(),
+            item.name(),
+            item.nickname(),
+            item.parentId(),
+            item.icon(),
+            item.sort(),
+            enabled,
+            categoryStatus(enabled),
+            categoryLevel(item.parentId()) + 1,
+            hasChildCategory(item.id())
+        );
+    }
+
+    private void validateCategoryParent(Long id, Long parentId) {
+        Long nextParentId = parentId == null ? 0L : parentId;
+        if (Objects.equals(id, nextParentId)) {
+            throw new IllegalArgumentException("category cannot be moved under itself");
+        }
+        if (nextParentId != 0L && !categories.containsKey(nextParentId)) {
+            throw new IllegalArgumentException("parent category not found");
+        }
+        if (nextParentId != 0L && categoryTreeIds(id).contains(nextParentId)) {
+            throw new IllegalArgumentException("category cannot be moved under its descendant");
+        }
+    }
+
+    private int categorySubtreeHeight(Long id) {
+        return categories.values().stream()
+            .filter(category -> Objects.equals(category.parentId(), id))
+            .mapToInt(category -> categorySubtreeHeight(category.id()) + 1)
+            .max()
+            .orElse(1);
+    }
+
+    private boolean hasChildCategory(Long id) {
+        return categories.values().stream().anyMatch(category -> Objects.equals(category.parentId(), id));
+    }
+
+    private boolean categoryEnabled(Boolean enabled, String status) {
+        if (enabled != null) {
+            return enabled;
+        }
+        if (!StringUtils.hasText(status)) {
+            return true;
+        }
+        String normalizedStatus = status.trim().toUpperCase(Locale.ROOT);
+        return !List.of("DISABLED", "DISABLE", "OFF", "INACTIVE", "FALSE", "0").contains(normalizedStatus);
+    }
+
+    private String categoryStatus(boolean enabled) {
+        return enabled ? "ENABLED" : "DISABLED";
+    }
+
+    private String normalizeCategoryIcon(String icon) {
+        return StringUtils.hasText(icon) ? icon.trim() : "";
     }
 
     private boolean containsOrderKeyword(OrderItem order, String keyword) {
@@ -1721,9 +2313,15 @@ public class InMemoryShopRepository {
         suppliers.put(20001L, new SupplierItem(
             20001L,
             "星河直充",
+            "CUSTOM",
             "https://api.starcharge.example",
             "star-demo-key",
             "star****cret",
+            "",
+            "star-demo-key",
+            "",
+            "",
+            10,
             BigDecimal.valueOf(2688.50),
             "ENABLED",
             "默认优先供应商，支持余额查询和模拟连接测试",
@@ -1732,9 +2330,15 @@ public class InMemoryShopRepository {
         suppliers.put(20002L, new SupplierItem(
             20002L,
             "云桥货源",
+            "CUSTOM",
             "https://api.bridge.example",
             "bridge-demo-key",
             "brid****cret",
+            "",
+            "bridge-demo-key",
+            "",
+            "",
+            10,
             BigDecimal.valueOf(188.20),
             "ENABLED",
             "低余额示例，用于仪表盘告警",

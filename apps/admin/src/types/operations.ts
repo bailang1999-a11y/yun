@@ -83,6 +83,9 @@ export interface GoodsCreatePayload {
 export interface Category {
   id: number | string
   name: string
+  nickname?: string
+  icon?: string
+  iconKey?: string
   parentId?: number | string
   sort?: number
   enabled?: boolean
@@ -93,9 +96,15 @@ export interface Category {
 export interface CategoryCreatePayload {
   parentId?: number | string
   name: string
+  nickname?: string
+  icon?: string
+  iconKey?: string
+  level?: number
   sort?: number
   enabled?: boolean
 }
+
+export interface CategoryUpdatePayload extends CategoryCreatePayload {}
 
 export interface Supplier {
   id: number | string
@@ -103,20 +112,59 @@ export interface Supplier {
   baseUrl: string
   appKey: string
   appSecretMasked: string
+  platformType?: SupplierPlatformType | string
+  userId?: string
+  appId?: string
+  apiKeyMasked?: string
+  callbackUrl?: string
+  timeoutSeconds?: number
   balance: number | string
   status: string
   remark?: string
   lastSyncAt?: string
 }
 
+export type SupplierPlatformType = 'CUSTOM' | 'KASUSHOU_2'
+
 export interface SupplierCreatePayload {
   name: string
   baseUrl: string
   appKey: string
   appSecret: string
+  platformType?: SupplierPlatformType
+  userId?: string
+  appId?: string
+  apiKey?: string
+  callbackUrl?: string
+  timeoutSeconds?: number
   balance?: number
   status?: string
   remark?: string
+}
+
+export interface RemoteGoodsSyncPayload {
+  page: number
+  limit: number
+  cateId: number | string
+  keyword: string
+}
+
+export interface RemoteGoods {
+  supplierGoodsId: string
+  name: string
+  type: string
+  price: number | string
+  faceValue?: number | string
+  stock?: number | string
+  status: string
+  availablePlatforms: string[]
+  forbiddenPlatforms: string[]
+}
+
+export interface RemoteGoodsSyncResult {
+  syncedAt: string
+  total: number
+  goods: RemoteGoods[]
 }
 
 export interface GoodsChannel {

@@ -1,6 +1,6 @@
 package com.xiyiyun.shop.mvp;
 
-public record CreateCategoryRequest(
+public record UpdateCategoryRequest(
     Long parentId,
     String name,
     String nickname,

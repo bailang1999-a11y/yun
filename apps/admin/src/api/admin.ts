@@ -5,6 +5,7 @@ import type {
   CardImportItem,
   Category,
   CategoryCreatePayload,
+  CategoryUpdatePayload,
   Goods,
   GoodsCard,
   GoodsChannel,
@@ -25,17 +26,30 @@ import type {
   UserGroupCreatePayload,
   Supplier,
   SupplierCreatePayload,
+  RemoteGoods,
+  RemoteGoodsSyncPayload,
+  RemoteGoodsSyncResult,
   SystemSetting
 } from '../types/operations'
 
 interface ApiEnvelope<T> {
+  code?: number
+  message?: string
   data?: T | ApiEnvelope<T>
   list?: T
   records?: T
   items?: T
 }
 
+function assertApiOk(payload: unknown) {
+  const envelope = payload as ApiEnvelope<unknown>
+  if (envelope && typeof envelope === 'object' && typeof envelope.code === 'number' && envelope.code !== 0) {
+    throw new Error(envelope.message || '请求失败')
+  }
+}
+
 function unwrapValue<T>(payload: T | ApiEnvelope<T>): T {
+  assertApiOk(payload)
   const envelope = payload as ApiEnvelope<T>
   if (envelope && typeof envelope === 'object' && 'data' in envelope && envelope.data !== undefined) {
     return unwrapValue(envelope.data as T | ApiEnvelope<T>)
@@ -44,6 +58,7 @@ function unwrapValue<T>(payload: T | ApiEnvelope<T>): T {
 }
 
 function unwrapResponse<T>(payload: T | ApiEnvelope<T>): T {
+  assertApiOk(payload)
   if (Array.isArray(payload)) {
     return payload as T
   }
@@ -198,6 +213,18 @@ export async function createCategory(payload: CategoryCreatePayload) {
   return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
+export async function updateCategory(categoryId: Category['id'], payload: CategoryUpdatePayload) {
+  const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}`, payload)
+
+  return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function deleteCategory(categoryId: Category['id']) {
+  const { data } = await apiClient.post(`/api/admin/categories/${categoryId}/delete`)
+
+  return data
+}
+
 export async function setCategoryEnabled(categoryId: Category['id'], enabled: boolean) {
   const action = enabled ? 'enable' : 'disable'
   const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}/${action}`)
@@ -217,6 +244,18 @@ export async function createSupplier(payload: SupplierCreatePayload) {
   return normalizeSupplier(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
+export async function updateSupplier(supplierId: Supplier['id'], payload: SupplierCreatePayload) {
+  const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}`, payload)
+
+  return normalizeSupplier(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function deleteSupplier(supplierId: Supplier['id']) {
+  const { data } = await apiClient.post(`/api/admin/suppliers/${supplierId}/delete`)
+
+  return data
+}
+
 export async function setSupplierEnabled(supplierId: Supplier['id'], enabled: boolean) {
   const action = enabled ? 'enable' : 'disable'
   const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}/${action}`)
@@ -234,6 +273,15 @@ export async function testSupplierConnection(supplierId: Supplier['id']) {
   const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}/test`)
 
   return normalizeSupplier(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function syncSupplierGoods(
+  supplierId: Supplier['id'],
+  payload: RemoteGoodsSyncPayload = { page: 1, limit: 20, cateId: 0, keyword: '' }
+) {
+  const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}/sync-goods`, payload)
+
+  return normalizeRemoteGoodsSyncResult(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
 export async function createGoods(payload: GoodsCreatePayload) {
@@ -406,8 +454,27 @@ function numberValue(value: unknown, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function booleanValue(value: unknown, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (['false', '0', 'disabled', 'disable', 'off', 'no'].includes(normalized)) return false
+    if (['true', '1', 'enabled', 'enable', 'on', 'yes'].includes(normalized)) return true
+  }
+  return Boolean(value)
+}
+
 function stringArray(value: unknown) {
   return Array.isArray(value) ? value.map((item) => text(item)).filter(Boolean) : []
+}
+
+function remoteChannelLabels(value: unknown, enabled: unknown, enabledLabel: string) {
+  const labels = stringArray(value)
+  if (labels.length > 0) return labels
+  if (text(value)) return text(value).split(/[,，/]/).map((item) => item.trim()).filter(Boolean)
+  return enabled === true ? [enabledLabel] : []
 }
 
 function normalizeGoods(item: Record<string, unknown>): Goods {
@@ -497,12 +564,20 @@ function normalizeAdminAuthSession(item: Record<string, unknown>): AdminAuthSess
 
 function normalizeCategory(item: Record<string, unknown>): Category {
   const rawParentId = text(item.parentId ?? item.parent_id)
+  const rawChildren = item.children ?? item.childCategories
   return {
     id: text(item.id),
     name: text(item.name, '未命名分类'),
+    nickname: text(item.nickname),
+    icon: text(item.icon ?? item.iconUrl ?? item.icon_url),
+    iconKey: text(item.iconKey ?? item.icon_key),
     parentId: rawParentId && rawParentId !== '0' ? rawParentId : undefined,
-    sort: numberValue(item.sort),
-    enabled: item.enabled === undefined ? true : Boolean(item.enabled)
+    sort: numberValue(item.sort ?? item.sortOrder ?? item.sort_order),
+    enabled: booleanValue(item.enabled ?? item.isEnabled ?? item.status, true),
+    level: numberValue(item.level),
+    children: Array.isArray(rawChildren)
+      ? rawChildren.map((child) => normalizeCategory((child || {}) as Record<string, unknown>))
+      : undefined
   }
 }
 
@@ -646,16 +721,57 @@ function normalizeOpenApiLog(item: Record<string, unknown>): OpenApiLog {
 }
 
 function normalizeSupplier(item: Record<string, unknown>): Supplier {
+  const config = item.integrationConfig && typeof item.integrationConfig === 'object' ? (item.integrationConfig as Record<string, unknown>) : {}
+
   return {
     id: text(item.id),
     name: text(item.name, '未命名供应商'),
     baseUrl: text(item.baseUrl),
-    appKey: text(item.appKey),
+    appKey: text(item.appKey ?? item.appId ?? config.appId ?? config.userId),
     appSecretMasked: text(item.appSecretMasked),
+    platformType: text(item.platformType ?? item.platformCode ?? config.platformType, 'CUSTOM'),
+    userId: text(item.userId ?? config.userId),
+    appId: text(item.appId ?? config.appId),
+    apiKeyMasked: text(item.apiKeyMasked ?? config.apiKeyMasked ?? item.appSecretMasked),
+    callbackUrl: text(item.callbackUrl ?? config.callbackUrl),
+    timeoutSeconds: numberValue(item.timeoutSeconds ?? config.timeoutSeconds),
     balance: numberValue(item.balance),
     status: text(item.status, 'UNKNOWN'),
     remark: text(item.remark),
     lastSyncAt: text(item.lastSyncAt)
+  }
+}
+
+function normalizeRemoteGoodsSyncResult(item: Record<string, unknown>): RemoteGoodsSyncResult {
+  const goodsSource = item.goods ?? item.list ?? item.records ?? item.items ?? item.data
+  const goods = Array.isArray(goodsSource) ? goodsSource.map((goodsItem) => normalizeRemoteGoods((goodsItem || {}) as Record<string, unknown>)) : []
+
+  return {
+    syncedAt: text(item.syncedAt ?? item.syncTime ?? item.updatedAt ?? item.createdAt),
+    total: numberValue(item.total ?? item.totalCount ?? goods.length),
+    goods
+  }
+}
+
+function normalizeRemoteGoods(item: Record<string, unknown>): RemoteGoods {
+  return {
+    supplierGoodsId: text(item.supplierGoodsId ?? item.goodsId ?? item.id ?? item.productId),
+    name: text(item.name ?? item.goodsName ?? item.title, '未命名商品'),
+    type: text(item.type ?? item.goodsType ?? item.deliveryType, '-'),
+    price: numberValue(item.price ?? item.salePrice ?? item.supplierPrice ?? item.goodsPrice ?? item.goods_price),
+    faceValue: numberValue(item.faceValue ?? item.parValue ?? item.originalPrice),
+    stock: numberValue(item.stock ?? item.inventory ?? item.stockNum ?? item.stock_num),
+    status: text(item.status ?? item.upstreamStatus, 'UNKNOWN'),
+    availablePlatforms: remoteChannelLabels(
+      item.availablePlatforms ?? item.available_platforms ?? item.availableChannels ?? item.saleChannels,
+      item.canBuy,
+      '可售'
+    ),
+    forbiddenPlatforms: remoteChannelLabels(
+      item.forbiddenPlatforms ?? item.forbidden_platforms ?? item.forbiddenChannels ?? item.disabledChannels,
+      item.canNoBuy,
+      '禁售'
+    )
   }
 }
 

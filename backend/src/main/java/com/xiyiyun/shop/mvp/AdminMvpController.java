@@ -121,6 +121,15 @@ public class AdminMvpController {
         }
     }
 
+    @PostMapping("/categories/{id}")
+    public ApiResponse<CategoryItem> updateCategory(@PathVariable Long id, @RequestBody UpdateCategoryRequest request) {
+        try {
+            return ApiResponse.ok(repository.updateCategory(id, request));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @PostMapping("/categories/{id}/enable")
     public ApiResponse<CategoryItem> enableCategory(@PathVariable Long id) {
         try {
@@ -135,6 +144,16 @@ public class AdminMvpController {
         try {
             return ApiResponse.ok(repository.updateCategoryStatus(id, false));
         } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/categories/{id}/delete")
+    public ApiResponse<String> deleteCategory(@PathVariable Long id) {
+        try {
+            repository.deleteCategory(id);
+            return ApiResponse.ok("deleted");
+        } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
     }
@@ -171,6 +190,25 @@ public class AdminMvpController {
         }
     }
 
+    @PostMapping("/suppliers/{id}")
+    public ApiResponse<SupplierItem> updateSupplier(@PathVariable Long id, @RequestBody CreateSupplierRequest request) {
+        try {
+            return ApiResponse.ok(repository.updateSupplier(id, request));
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/suppliers/{id}/delete")
+    public ApiResponse<String> deleteSupplier(@PathVariable Long id) {
+        try {
+            repository.deleteSupplier(id);
+            return ApiResponse.ok("deleted");
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @PostMapping("/suppliers/{id}/enable")
     public ApiResponse<SupplierItem> enableSupplier(@PathVariable Long id) {
         try {
@@ -193,7 +231,7 @@ public class AdminMvpController {
     public ApiResponse<SupplierItem> refreshSupplierBalance(@PathVariable Long id) {
         try {
             return ApiResponse.ok(repository.refreshSupplierBalance(id));
-        } catch (IllegalArgumentException ex) {
+        } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
     }
@@ -203,6 +241,29 @@ public class AdminMvpController {
         try {
             return ApiResponse.ok(repository.testSupplierConnection(id));
         } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/suppliers/{id}/sync-goods")
+    public ApiResponse<RemoteGoodsSyncResult> syncSupplierGoods(
+        @PathVariable Long id,
+        @RequestBody(required = false) SyncGoodsRequest request
+    ) {
+        try {
+            return ApiResponse.ok(repository.syncRemoteGoods(id, request));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @GetMapping("/suppliers/{id}/remote-goods")
+    public ApiResponse<RemoteGoodsSyncResult> remoteSupplierGoods(@PathVariable Long id) {
+        try {
+            return repository.latestRemoteGoods(id)
+                .map(ApiResponse::ok)
+                .orElseGet(() -> ApiResponse.fail("remote goods sync result not found"));
+        } catch (IllegalArgumentException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
     }

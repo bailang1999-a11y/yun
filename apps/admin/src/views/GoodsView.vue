@@ -26,6 +26,7 @@ import type {
   GoodsDetailBlock,
   Supplier
 } from '../types/operations'
+import CategoryManagerPanel from '../components/CategoryManagerPanel.vue'
 import { loadPriceTemplates } from '../utils/priceTemplates'
 
 const goods = ref<Goods[]>([])
@@ -129,6 +130,31 @@ const categoryOptions = computed(() => {
   return flattenCategoryTree(tree)
 })
 
+const selectedFilterCategoryIds = computed(() => {
+  if (!goodsFilters.categoryId) return new Set<string>()
+
+  const childrenMap = new Map<string, Category[]>()
+  categoryOptions.value.forEach((item) => {
+    const parentId = item.parentId ? String(item.parentId) : ''
+    if (!parentId) return
+
+    const siblings = childrenMap.get(parentId) || []
+    siblings.push(item)
+    childrenMap.set(parentId, siblings)
+  })
+
+  const ids = new Set<string>()
+  const collect = (categoryId: string) => {
+    if (ids.has(categoryId)) return
+    ids.add(categoryId)
+    const childCategories = childrenMap.get(categoryId) || []
+    childCategories.forEach((child) => collect(String(child.id)))
+  }
+
+  collect(String(goodsFilters.categoryId))
+  return ids
+})
+
 const parsedCards = computed<CardImportItem[]>(() =>
   cardText.value
     .split('\n')
@@ -148,7 +174,8 @@ const parsedCards = computed<CardImportItem[]>(() =>
 const filteredGoods = computed(() =>
   goods.value.filter((item) => {
     const keyword = goodsFilters.search.trim().toLowerCase()
-    const categoryMatched = !goodsFilters.categoryId || String(item.categoryId) === String(goodsFilters.categoryId)
+    const categoryMatched =
+      !goodsFilters.categoryId || selectedFilterCategoryIds.value.has(String(item.categoryId))
     const platformMatched =
       !goodsFilters.platform || (item.availablePlatforms || []).includes(goodsFilters.platform)
     const keywordMatched =
@@ -300,6 +327,26 @@ function flattenCategoryTree(nodes: Category[], result: Category[] = []) {
     flattenCategoryTree(node.children || [], result)
   })
   return result
+}
+
+function normalizeCategories(items: Category[], parentId?: Category['id'], result: Category[] = []) {
+  items.forEach((item) => {
+    const normalizedParentId = item.parentId ?? parentId
+    const children = item.children || []
+
+    result.push({
+      ...item,
+      parentId: normalizedParentId,
+      children: []
+    })
+    normalizeCategories(children, item.id, result)
+  })
+
+  return result
+}
+
+function handleCategoriesLoaded(loadedCategories: Category[]) {
+  categories.value = normalizeCategories(loadedCategories || [])
 }
 
 function formatMoney(value: Goods['price']) {
@@ -629,6 +676,12 @@ onMounted(() => {
           <el-button :icon="RefreshCw" :loading="loading" @click="loadGoods">刷新</el-button>
         </div>
       </div>
+
+      <CategoryManagerPanel
+        v-model="goodsFilters.categoryId"
+        class="goods-category-panel"
+        @categories-loaded="handleCategoriesLoaded"
+      />
 
       <div class="table-filters">
         <el-input v-model="goodsFilters.search" clearable placeholder="搜索商品名称 / ID" />
@@ -1118,9 +1171,14 @@ onMounted(() => {
 }
 
 .goods-form,
+.goods-category-panel,
 .table-panel :deep(.el-table) {
   position: relative;
   z-index: 1;
+}
+
+.goods-category-panel {
+  margin-bottom: 12px;
 }
 
 .goods-form :deep(.el-input-number),
