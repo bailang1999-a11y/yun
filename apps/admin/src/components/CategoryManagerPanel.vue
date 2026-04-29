@@ -500,7 +500,8 @@ async function removeCategory(row: Category) {
 .category-canvas {
   display: grid;
   grid-template-columns: 86px minmax(0, 1fr);
-  min-height: calc(100vh - 190px);
+  align-self: start;
+  height: auto;
   background:
     linear-gradient(90deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.03)),
     rgba(255, 255, 255, 0.04);
