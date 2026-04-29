@@ -45,6 +45,7 @@ public class InMemoryShopRepository {
     };
 
     private final Map<Long, CategoryItem> categories = new ConcurrentHashMap<>();
+    private final Map<Long, CardKindItem> cardKinds = new ConcurrentHashMap<>();
     private final Map<Long, GoodsItem> goods = new ConcurrentHashMap<>();
     private final Map<Long, CardSecret> cards = new ConcurrentHashMap<>();
     private final Map<String, OrderItem> orders = new ConcurrentHashMap<>();
@@ -86,6 +87,7 @@ public class InMemoryShopRepository {
     private final AtomicLong smsLogId = new AtomicLong(1);
     private final AtomicLong operationLogId = new AtomicLong(1);
     private final AtomicLong categoryId = new AtomicLong(40000);
+    private final AtomicLong cardKindId = new AtomicLong(1);
     private final AtomicLong supplierId = new AtomicLong(20002);
     private final AtomicLong channelId = new AtomicLong(30002);
     private final AtomicLong userId = new AtomicLong(90003);
@@ -117,6 +119,31 @@ public class InMemoryShopRepository {
             .toList();
     }
 
+    public List<CardKindItem> listCardKinds() {
+        return cardKinds.values().stream()
+            .sorted(Comparator.comparing(CardKindItem::id))
+            .toList();
+    }
+
+    public synchronized CardKindItem createCardKind(CreateCardKindRequest request) {
+        if (request == null || !StringUtils.hasText(request.name())) {
+            throw new IllegalArgumentException("card kind name is required");
+        }
+        String type = normalizeCardKindType(request.type());
+        if (request.cost() != null && request.cost().compareTo(BigDecimal.ZERO) < 0) {
+            throw new IllegalArgumentException("card kind cost cannot be negative");
+        }
+        Long id = cardKindId.getAndIncrement();
+        CardKindItem item = new CardKindItem(
+            id,
+            request.name().trim(),
+            type,
+            request.cost() == null ? BigDecimal.ZERO : request.cost()
+        );
+        cardKinds.put(id, item);
+        return item;
+    }
+
     public synchronized CategoryItem createCategory(CreateCategoryRequest request) {
         if (request == null || !StringUtils.hasText(request.name())) {
             throw new IllegalArgumentException("category name is required");
@@ -136,6 +163,8 @@ public class InMemoryShopRepository {
             defaultText(request.nickname(), ""),
             parentId,
             normalizeCategoryIcon(request.icon()),
+            normalizeCategoryIcon(request.iconUrl()),
+            normalizeCategoryIcon(request.customIconUrl()),
             request.sort() == null ? (int) (id % 1000) : request.sort(),
             categoryEnabled(request.enabled(), request.status()),
             categoryStatus(categoryEnabled(request.enabled(), request.status())),
@@ -173,6 +202,8 @@ public class InMemoryShopRepository {
             request.nickname() == null ? current.nickname() : defaultText(request.nickname(), ""),
             parentId,
             request.icon() == null ? current.icon() : normalizeCategoryIcon(request.icon()),
+            request.iconUrl() == null ? current.iconUrl() : normalizeCategoryIcon(request.iconUrl()),
+            request.customIconUrl() == null ? current.customIconUrl() : normalizeCategoryIcon(request.customIconUrl()),
             request.sort() == null ? current.sort() : request.sort(),
             enabled,
             categoryStatus(enabled),
@@ -194,6 +225,8 @@ public class InMemoryShopRepository {
             item.nickname(),
             item.parentId(),
             item.icon(),
+            item.iconUrl(),
+            item.customIconUrl(),
             item.sort(),
             enabled,
             categoryStatus(enabled),
@@ -1929,6 +1962,8 @@ public class InMemoryShopRepository {
             item.nickname(),
             item.parentId(),
             item.icon(),
+            item.iconUrl(),
+            item.customIconUrl(),
             item.sort(),
             enabled,
             categoryStatus(enabled),
@@ -1979,6 +2014,17 @@ public class InMemoryShopRepository {
 
     private String normalizeCategoryIcon(String icon) {
         return StringUtils.hasText(icon) ? icon.trim() : "";
+    }
+
+    private String normalizeCardKindType(String type) {
+        if (!StringUtils.hasText(type)) {
+            throw new IllegalArgumentException("card kind type is required");
+        }
+        String normalized = type.trim().toUpperCase(Locale.ROOT);
+        if (!List.of("ONCE", "REUSABLE").contains(normalized)) {
+            throw new IllegalArgumentException("card kind type must be ONCE or REUSABLE");
+        }
+        return normalized;
     }
 
     private boolean containsOrderKeyword(OrderItem order, String keyword) {

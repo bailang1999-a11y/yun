@@ -4,6 +4,7 @@ import AdminLayout from '../components/AdminLayout.vue'
 const LoginView = () => import('../views/LoginView.vue')
 const DashboardView = () => import('../views/DashboardView.vue')
 const GoodsView = () => import('../views/GoodsView.vue')
+const CardWarehouseView = () => import('../views/CardWarehouseView.vue')
 const PriceTemplatesView = () => import('../views/PriceTemplatesView.vue')
 const CategoriesView = () => import('../views/CategoriesView.vue')
 const SuppliersView = () => import('../views/SuppliersView.vue')
@@ -24,6 +25,7 @@ const router = createRouter({
       children: [
         { path: '', name: 'dashboard', component: DashboardView, meta: { title: '实时业务看板' } },
         { path: 'goods', name: 'goods', component: GoodsView, meta: { title: '商品管理' } },
+        { path: 'goods/card-warehouse', name: 'card-warehouse', component: CardWarehouseView, meta: { title: '卡密仓库' } },
         { path: 'goods/price-templates', name: 'goods-price-templates', component: PriceTemplatesView, meta: { title: '价格模板配置' } },
         { path: 'categories', name: 'categories', component: CategoriesView, meta: { title: '分类管理' } },
         { path: 'suppliers', name: 'suppliers', component: SuppliersView, meta: { title: '供应商管理' } },

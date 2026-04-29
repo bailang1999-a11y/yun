@@ -19,6 +19,7 @@ const navItems = [
 const goodsChildren = [
   { label: '商品分类', name: 'categories' },
   { label: '商品列表', name: 'goods' },
+  { label: '卡密仓库', name: 'card-warehouse' },
   { label: '价格模板配置', name: 'goods-price-templates' }
 ]
 

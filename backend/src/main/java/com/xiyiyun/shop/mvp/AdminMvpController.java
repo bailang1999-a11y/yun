@@ -69,6 +69,20 @@ public class AdminMvpController {
         return ApiResponse.ok(repository.listCategories());
     }
 
+    @GetMapping("/card-kinds")
+    public ApiResponse<List<CardKindItem>> cardKinds() {
+        return ApiResponse.ok(repository.listCardKinds());
+    }
+
+    @PostMapping("/card-kinds")
+    public ApiResponse<CardKindItem> createCardKind(@RequestBody CreateCardKindRequest request) {
+        try {
+            return ApiResponse.ok(repository.createCardKind(request));
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @GetMapping("/user-groups")
     public ApiResponse<List<UserGroupItem>> userGroups() {
         return ApiResponse.ok(repository.listUserGroups());

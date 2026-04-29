@@ -3,6 +3,8 @@ import type {
   AdminAuthSession,
   AdminProfile,
   CardImportItem,
+  CardKind,
+  CardKindCreatePayload,
   Category,
   CategoryCreatePayload,
   CategoryUpdatePayload,
@@ -366,6 +368,18 @@ export async function fetchGoodsCards(goodsId: Goods['id']) {
   return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeCard)
 }
 
+export async function fetchCardKinds() {
+  const { data } = await apiClient.get<unknown>('/api/admin/card-kinds')
+
+  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeCardKind)
+}
+
+export async function createCardKind(payload: CardKindCreatePayload) {
+  const { data } = await apiClient.post<unknown>('/api/admin/card-kinds', payload)
+
+  return normalizeCardKind(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
 export async function fetchGoodsChannels(goodsId: Goods['id']) {
   const { data } = await apiClient.get<unknown>(`/api/admin/goods/${goodsId}/channels`)
 
@@ -565,12 +579,15 @@ function normalizeAdminAuthSession(item: Record<string, unknown>): AdminAuthSess
 function normalizeCategory(item: Record<string, unknown>): Category {
   const rawParentId = text(item.parentId ?? item.parent_id)
   const rawChildren = item.children ?? item.childCategories
+  const iconUrl = text(item.customIconUrl ?? item.custom_icon_url ?? item.iconUrl ?? item.icon_url)
   return {
     id: text(item.id),
     name: text(item.name, '未命名分类'),
     nickname: text(item.nickname),
-    icon: text(item.icon ?? item.iconUrl ?? item.icon_url),
+    icon: text(item.icon),
     iconKey: text(item.iconKey ?? item.icon_key),
+    iconUrl,
+    customIconUrl: text(item.customIconUrl ?? item.custom_icon_url) || iconUrl,
     parentId: rawParentId && rawParentId !== '0' ? rawParentId : undefined,
     sort: numberValue(item.sort ?? item.sortOrder ?? item.sort_order),
     enabled: booleanValue(item.enabled ?? item.isEnabled ?? item.status, true),
@@ -783,6 +800,16 @@ function normalizeCard(item: Record<string, unknown>): GoodsCard {
     status: text(item.status),
     usedAt: text(item.deliveredAt),
     createdAt: text(item.createdAt ?? item.importedAt)
+  }
+}
+
+function normalizeCardKind(item: Record<string, unknown>): CardKind {
+  return {
+    id: text(item.id),
+    name: text(item.name ?? item.kindName ?? item.cardKindName, '未命名卡种'),
+    type: text(item.type ?? item.kindType ?? item.cardType, 'ONCE'),
+    cost: numberValue(item.cost ?? item.costPrice ?? item.price),
+    createdAt: text(item.createdAt)
   }
 }
 

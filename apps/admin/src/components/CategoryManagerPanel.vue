@@ -11,6 +11,7 @@ import {
   FolderPlus,
   Gamepad2,
   HeartHandshake,
+  ImagePlus,
   MonitorCog,
   MoreVertical,
   Plus,
@@ -43,6 +44,7 @@ const selectedCategoryId = ref<string>(props.modelValue == null ? '' : String(pr
 const editorVisible = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
 const editingCategoryId = ref<Category['id']>()
+const iconFileInput = ref<HTMLInputElement>()
 const contextMenu = reactive({
   visible: false,
   x: 0,
@@ -50,11 +52,13 @@ const contextMenu = reactive({
   row: undefined as Category | undefined
 })
 
-const form = reactive<CategoryCreatePayload & { icon: string; nickname: string }>({
+const form = reactive<CategoryCreatePayload & { icon: string; iconUrl: string; customIconUrl: string; nickname: string }>({
   parentId: undefined,
   name: '',
   nickname: '',
   icon: 'badge',
+  iconUrl: '',
+  customIconUrl: '',
   sort: 10,
   enabled: true
 })
@@ -199,6 +203,69 @@ function iconForCategory(row: Category) {
   return BadgeIcon
 }
 
+function categoryIconUrl(row: Category) {
+  const candidates = [row.customIconUrl, row.iconUrl, row.icon]
+  return candidates.find((value) => Boolean(value && isImageUrl(value))) || ''
+}
+
+function isImageUrl(value?: string) {
+  return Boolean(value && /^(data:image\/|https?:\/\/|\/)/i.test(value))
+}
+
+function triggerIconUpload() {
+  iconFileInput.value?.click()
+}
+
+function clearCustomIcon() {
+  form.iconUrl = ''
+  form.customIconUrl = ''
+  if (iconFileInput.value) iconFileInput.value.value = ''
+}
+
+function handleIconFileChange(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+
+  if (!/^image\/(jpeg|png)$/.test(file.type)) {
+    ElMessage.warning('仅支持 JPG、JPEG、PNG 图片')
+    input.value = ''
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = () => {
+    const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+    if (!dataUrl) {
+      ElMessage.error('图标读取失败')
+      input.value = ''
+      return
+    }
+
+    const image = new Image()
+    image.onload = () => {
+      if (image.naturalWidth !== image.naturalHeight) {
+        ElMessage.warning('请上传 1:1 的正方形图片')
+        input.value = ''
+        return
+      }
+      form.iconUrl = dataUrl
+      form.customIconUrl = dataUrl
+      ElMessage.success('图标已上传')
+    }
+    image.onerror = () => {
+      ElMessage.error('图标解析失败')
+      input.value = ''
+    }
+    image.src = dataUrl
+  }
+  reader.onerror = () => {
+    ElMessage.error('图标读取失败')
+    input.value = ''
+  }
+  reader.readAsDataURL(file)
+}
+
 function depthLabel(row?: Category) {
   if (!row) return '0 级'
   return `第 ${row.level || 1} 级`
@@ -228,8 +295,11 @@ function resetForm() {
   form.name = ''
   form.nickname = ''
   form.icon = 'badge'
+  form.iconUrl = ''
+  form.customIconUrl = ''
   form.sort = 10
   form.enabled = true
+  if (iconFileInput.value) iconFileInput.value.value = ''
   editingCategoryId.value = undefined
 }
 
@@ -250,7 +320,9 @@ function openEdit(row: Category) {
   form.parentId = row.parentId || undefined
   form.name = row.name || ''
   form.nickname = row.nickname || ''
-  form.icon = row.icon || row.iconKey || 'badge'
+  form.icon = isImageUrl(row.icon) ? row.iconKey || 'badge' : row.icon || row.iconKey || 'badge'
+  form.iconUrl = categoryIconUrl(row)
+  form.customIconUrl = categoryIconUrl(row)
   form.sort = Number(row.sort ?? 10)
   form.enabled = row.enabled ?? true
   editorVisible.value = true
@@ -300,6 +372,8 @@ async function submitCategory() {
       nickname: form.nickname.trim() || undefined,
       icon: form.icon || undefined,
       iconKey: form.icon || undefined,
+      iconUrl: form.iconUrl || undefined,
+      customIconUrl: form.customIconUrl || form.iconUrl || undefined,
       sort: form.sort,
       enabled: form.enabled
     }
@@ -374,7 +448,10 @@ async function removeCategory(row: Category) {
             @click="selectRoot(item)"
             @contextmenu.prevent="openContextMenu($event, item)"
           >
-            <span class="icon-bubble"><component :is="iconForCategory(item)" :size="30" /></span>
+            <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
+              <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
+              <component v-else :is="iconForCategory(item)" :size="30" />
+            </span>
             <strong>{{ item.name }}</strong>
             <em>{{ item.children?.length || 0 }} 个子类</em>
             <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
@@ -397,7 +474,10 @@ async function removeCategory(row: Category) {
             @click="selectChild(item)"
             @contextmenu.prevent="openContextMenu($event, item)"
           >
-            <span class="icon-bubble"><component :is="iconForCategory(item)" :size="26" /></span>
+            <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
+              <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
+              <component v-else :is="iconForCategory(item)" :size="26" />
+            </span>
             <strong>{{ item.name }}</strong>
             <em>{{ depthLabel(item) }} · 排序 {{ item.sort }}</em>
             <small :data-enabled="item.enabled">{{ item.enabled ? '启用' : '停用' }}</small>
@@ -436,6 +516,24 @@ async function removeCategory(row: Category) {
       <el-dialog v-model="editorVisible" :title="editorTitle" width="540px" destroy-on-close class="category-editor-dialog" @closed="resetForm">
         <el-form :model="form" label-position="top" class="category-form dialog-form">
           <el-form-item label="图标">
+            <div class="custom-icon-uploader">
+              <span class="icon-bubble preview" :class="{ 'has-image': form.iconUrl }">
+                <img v-if="form.iconUrl" :src="form.iconUrl" alt="自定义分类图标预览" />
+                <component v-else :is="iconMap.get(form.icon) || BadgeIcon" :size="24" />
+              </span>
+              <div class="custom-icon-actions">
+                <input
+                  ref="iconFileInput"
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  class="sr-only-input"
+                  @change="handleIconFileChange"
+                />
+                <el-button :icon="ImagePlus" @click="triggerIconUpload">上传图片</el-button>
+                <el-button v-if="form.iconUrl" :icon="Trash2" @click="clearCustomIcon">移除图片</el-button>
+              </div>
+              <span class="custom-icon-hint">支持 JPG、JPEG、PNG，图片比例需为 1:1</span>
+            </div>
             <div class="icon-picker" role="radiogroup" aria-label="选择分类图标">
               <button
                 v-for="option in iconOptions"
@@ -618,12 +716,25 @@ async function removeCategory(row: Category) {
   height: 58px;
   display: grid;
   place-items: center;
+  overflow: hidden;
   border-radius: 18px;
   color: #071410;
   background:
     radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.72), transparent 24%),
     linear-gradient(135deg, #00ffc3, #3aa5ff);
   box-shadow: 0 12px 26px rgba(0, 255, 195, 0.13);
+}
+
+.icon-bubble.has-image {
+  color: transparent;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.icon-bubble img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
 }
 
 .category-icon-card.root .icon-bubble {
@@ -713,6 +824,43 @@ async function removeCategory(row: Category) {
   color: #00ffc3;
   border-color: rgba(0, 255, 195, 0.32);
   background: rgba(0, 255, 195, 0.09);
+}
+
+.custom-icon-uploader {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+.icon-bubble.preview {
+  width: 58px;
+  height: 58px;
+}
+
+.custom-icon-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.custom-icon-hint {
+  grid-column: 2;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.sr-only-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .form-grid {

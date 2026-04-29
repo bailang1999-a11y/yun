@@ -86,6 +86,8 @@ export interface Category {
   nickname?: string
   icon?: string
   iconKey?: string
+  iconUrl?: string
+  customIconUrl?: string
   parentId?: number | string
   sort?: number
   enabled?: boolean
@@ -99,6 +101,8 @@ export interface CategoryCreatePayload {
   nickname?: string
   icon?: string
   iconKey?: string
+  iconUrl?: string
+  customIconUrl?: string
   level?: number
   sort?: number
   enabled?: boolean
@@ -190,6 +194,22 @@ export interface GoodsChannelCreatePayload {
 export interface CardImportItem {
   cardNo: string
   password: string
+}
+
+export type CardKindType = 'ONCE' | 'REUSABLE'
+
+export interface CardKind {
+  id: number | string
+  name: string
+  type: CardKindType | string
+  cost: number | string
+  createdAt?: string
+}
+
+export interface CardKindCreatePayload {
+  name: string
+  type: CardKindType
+  cost: number
 }
 
 export interface GoodsCard {

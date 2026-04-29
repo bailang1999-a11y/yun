@@ -6,6 +6,8 @@ public record CategoryItem(
     String nickname,
     Long parentId,
     String icon,
+    String iconUrl,
+    String customIconUrl,
     Integer sort,
     Boolean enabled,
     String status,
@@ -13,6 +15,6 @@ public record CategoryItem(
     Boolean hasChildren
 ) {
     public CategoryItem(Long id, String name, Long parentId, Integer sort, Boolean enabled) {
-        this(id, name, "", parentId, null, sort, enabled, enabled == null || enabled ? "ENABLED" : "DISABLED", 0, false);
+        this(id, name, "", parentId, null, "", "", sort, enabled, enabled == null || enabled ? "ENABLED" : "DISABLED", 0, false);
     }
 }

@@ -5,6 +5,8 @@ public record CreateCategoryRequest(
     String name,
     String nickname,
     String icon,
+    String iconUrl,
+    String customIconUrl,
     Integer sort,
     Boolean enabled,
     String status
