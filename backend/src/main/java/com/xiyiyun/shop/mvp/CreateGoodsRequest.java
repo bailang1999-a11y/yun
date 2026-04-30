@@ -32,6 +32,7 @@ public record CreateGoodsRequest(
     String status,
     List<String> tags,
     List<String> availablePlatforms,
-    List<String> forbiddenPlatforms
+    List<String> forbiddenPlatforms,
+    Long cardKindId
 ) {
 }

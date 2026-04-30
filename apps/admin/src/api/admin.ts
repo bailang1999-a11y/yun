@@ -3,6 +3,7 @@ import type {
   AdminAuthSession,
   AdminProfile,
   CardImportItem,
+  CardKindImportResult,
   CardKind,
   CardKindCreatePayload,
   Category,
@@ -294,6 +295,7 @@ export async function createGoods(payload: GoodsCreatePayload) {
     originalPrice: payload.originalPrice,
     status: payload.status,
     type: normalizeGoodsType(payload.deliveryType),
+    cardKindId: payload.deliveryType === 'CARD' ? payload.cardKindId : undefined,
     subTitle: payload.subTitle,
     coverUrl: payload.coverUrl,
     detailImages: payload.detailImages || [],
@@ -328,6 +330,7 @@ export async function updateGoods(goodsId: Goods['id'], payload: GoodsCreatePayl
     originalPrice: payload.originalPrice,
     status: payload.status,
     type: normalizeGoodsType(payload.deliveryType),
+    cardKindId: payload.deliveryType === 'CARD' ? payload.cardKindId : undefined,
     subTitle: payload.subTitle,
     coverUrl: payload.coverUrl,
     detailImages: payload.detailImages || [],
@@ -378,6 +381,20 @@ export async function createCardKind(payload: CardKindCreatePayload) {
   const { data } = await apiClient.post<unknown>('/api/admin/card-kinds', payload)
 
   return normalizeCardKind(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function importCardKindCards(cardKindId: CardKind['id'], cards: string[]) {
+  const { data } = await apiClient.post<unknown>(`/api/admin/card-kinds/${cardKindId}/cards/import`, { cards })
+
+  return normalizeCardKindImportResult(
+    unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>)
+  )
+}
+
+export async function fetchCardKindCards(cardKindId: CardKind['id']) {
+  const { data } = await apiClient.get<unknown>(`/api/admin/card-kinds/${cardKindId}/cards`)
+
+  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeCard)
 }
 
 export async function fetchGoodsChannels(goodsId: Goods['id']) {
@@ -492,6 +509,9 @@ function remoteChannelLabels(value: unknown, enabled: unknown, enabledLabel: str
 }
 
 function normalizeGoods(item: Record<string, unknown>): Goods {
+  const cardKind = item.cardKind && typeof item.cardKind === 'object' ? item.cardKind as Record<string, unknown> : {}
+  const cardKindStockSource = item.cardKindStock ?? item.cardKindUnusedCount ?? item.unusedCount ?? cardKind.stock ?? cardKind.unusedCount
+
   return {
     id: text(item.id),
     categoryId: text(item.categoryId),
@@ -502,6 +522,9 @@ function normalizeGoods(item: Record<string, unknown>): Goods {
     status: text(item.status, 'UNKNOWN'),
     stock: numberValue(item.stock, 0),
     deliveryType: text(item.deliveryType ?? item.type ?? item.goodsType, 'CARD'),
+    cardKindId: text(item.cardKindId ?? item.kindId ?? cardKind.id),
+    cardKindName: text(item.cardKindName ?? item.kindName ?? cardKind.name),
+    cardKindStock: cardKindStockSource === undefined || cardKindStockSource === null ? undefined : numberValue(cardKindStockSource),
     platform: text(item.platform),
     subTitle: text(item.subTitle),
     coverUrl: text(item.coverUrl),
@@ -795,10 +818,15 @@ function normalizeRemoteGoods(item: Record<string, unknown>): RemoteGoods {
 function normalizeCard(item: Record<string, unknown>): GoodsCard {
   return {
     id: text(item.id),
-    cardNo: text(item.cardNo),
+    goodsId: text(item.goodsId),
+    cardKindId: text(item.cardKindId ?? item.kindId),
+    cardNo: text(item.cardNo ?? item.card_no),
     password: text(item.password ?? item.secret ?? item.preview),
+    content: text(item.content),
+    preview: text(item.preview ?? item.secret ?? item.password ?? item.content),
     status: text(item.status),
-    usedAt: text(item.deliveredAt),
+    orderNo: text(item.orderNo),
+    usedAt: text(item.usedAt ?? item.deliveredAt),
     createdAt: text(item.createdAt ?? item.importedAt)
   }
 }
@@ -809,7 +837,20 @@ function normalizeCardKind(item: Record<string, unknown>): CardKind {
     name: text(item.name ?? item.kindName ?? item.cardKindName, '未命名卡种'),
     type: text(item.type ?? item.kindType ?? item.cardType, 'ONCE'),
     cost: numberValue(item.cost ?? item.costPrice ?? item.price),
+    stock: numberValue(item.stock ?? item.inventory ?? item.availableCount ?? item.unusedCount, 0),
+    unusedCount: numberValue(item.unusedCount ?? item.availableCount ?? item.stock ?? item.inventory, 0),
+    usedCount: numberValue(item.usedCount, 0),
+    totalCount: numberValue(item.totalCount ?? item.total ?? item.count, 0),
     createdAt: text(item.createdAt)
+  }
+}
+
+function normalizeCardKindImportResult(item: Record<string, unknown>): CardKindImportResult {
+  return {
+    importTotal: numberValue(item.importTotal ?? item.total),
+    successCount: numberValue(item.successCount ?? item.success),
+    duplicateCount: numberValue(item.duplicateCount ?? item.duplicates),
+    failedLines: Array.isArray(item.failedLines) ? item.failedLines.map((line) => numberValue(line)).filter(Boolean) : []
   }
 }
 

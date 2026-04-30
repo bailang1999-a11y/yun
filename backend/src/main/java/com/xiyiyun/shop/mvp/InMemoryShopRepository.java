@@ -122,6 +122,7 @@ public class InMemoryShopRepository {
     public List<CardKindItem> listCardKinds() {
         return cardKinds.values().stream()
             .sorted(Comparator.comparing(CardKindItem::id))
+            .map(this::enrichCardKind)
             .toList();
     }
 
@@ -141,7 +142,7 @@ public class InMemoryShopRepository {
             request.cost() == null ? BigDecimal.ZERO : request.cost()
         );
         cardKinds.put(id, item);
-        return item;
+        return enrichCardKind(item);
     }
 
     public synchronized CategoryItem createCategory(CreateCategoryRequest request) {
@@ -925,6 +926,7 @@ public class InMemoryShopRepository {
         CategoryItem category = categories.get(categoryId);
         OffsetDateTime now = OffsetDateTime.now();
         GoodsType type = request.type() == null ? GoodsType.CARD : request.type();
+        Long boundCardKindId = normalizeGoodsCardKindId(type, request.cardKindId(), null);
         GoodsItem item = new GoodsItem(
             id,
             categoryId,
@@ -958,7 +960,8 @@ public class InMemoryShopRepository {
             now,
             now,
             normalizePlatforms(request.availablePlatforms()),
-            normalizePlatforms(request.forbiddenPlatforms())
+            normalizePlatforms(request.forbiddenPlatforms()),
+            boundCardKindId
         );
         goods.put(id, item);
         return refreshStock(item);
@@ -972,6 +975,7 @@ public class InMemoryShopRepository {
         Long categoryId = request.categoryId() == null ? current.categoryId() : request.categoryId();
         CategoryItem category = categories.get(categoryId);
         GoodsType type = request.type() == null ? current.type() : request.type();
+        Long boundCardKindId = normalizeGoodsCardKindId(type, request.cardKindId(), current.cardKindId());
         GoodsItem next = new GoodsItem(
             current.id(),
             categoryId,
@@ -1005,7 +1009,8 @@ public class InMemoryShopRepository {
             current.createdAt(),
             OffsetDateTime.now(),
             request.availablePlatforms() == null ? current.availablePlatforms() : normalizePlatforms(request.availablePlatforms()),
-            request.forbiddenPlatforms() == null ? current.forbiddenPlatforms() : normalizePlatforms(request.forbiddenPlatforms())
+            request.forbiddenPlatforms() == null ? current.forbiddenPlatforms() : normalizePlatforms(request.forbiddenPlatforms()),
+            boundCardKindId
         );
         goods.put(id, next);
         return refreshStock(next);
@@ -1128,8 +1133,12 @@ public class InMemoryShopRepository {
     }
 
     private OrderItem deliverCardsAfterPayment(OrderItem order, OffsetDateTime paidAt) {
+        GoodsItem item = goods.get(order.goodsId());
+        Long boundCardKindId = item == null ? null : item.cardKindId();
         List<CardSecret> available = cards.values().stream()
-            .filter(card -> Objects.equals(card.goodsId(), order.goodsId()))
+            .filter(card -> boundCardKindId == null
+                ? Objects.equals(card.goodsId(), order.goodsId())
+                : Objects.equals(card.cardKindId(), boundCardKindId))
             .filter(card -> "AVAILABLE".equals(card.status()))
             .sorted(Comparator.comparing(CardSecret::id))
             .limit(order.quantity())
@@ -1158,6 +1167,11 @@ public class InMemoryShopRepository {
             CardSecret used = card.delivered(order.orderNo());
             cards.put(used.id(), used);
             deliveryItems.add(used.content());
+        }
+        if (boundCardKindId == null) {
+            refreshGoodsStock(order.goodsId());
+        } else {
+            refreshGoodsStockForCardKind(boundCardKindId);
         }
 
         OrderItem next = order.withProcurementResult(
@@ -1742,6 +1756,53 @@ public class InMemoryShopRepository {
         return new CardImportResult(targetGoodsId, lines.size(), successCount, duplicateCount, List.copyOf(failedLines));
     }
 
+    public synchronized CardImportResult importCardKindCards(Long targetCardKindId, CardImportRequest request) {
+        if (!cardKinds.containsKey(targetCardKindId)) {
+            throw new IllegalArgumentException("card kind not found");
+        }
+        List<String> lines = cardLines(request);
+        int duplicateCount = 0;
+        List<Integer> failedLines = new ArrayList<>();
+        Set<String> seenInRequest = new LinkedHashSet<>();
+        Set<String> existing = new LinkedHashSet<>(cards.values().stream()
+            .map(CardSecret::content)
+            .toList());
+
+        int lineNo = 0;
+        int successCount = 0;
+        OffsetDateTime importedAt = OffsetDateTime.now();
+        for (String raw : lines) {
+            lineNo++;
+            String content = raw == null ? "" : raw.trim();
+            if (!StringUtils.hasText(content)) {
+                failedLines.add(lineNo);
+                continue;
+            }
+            if (existing.contains(content) || !seenInRequest.add(content)) {
+                duplicateCount++;
+                continue;
+            }
+            Long id = cardId.getAndIncrement();
+            CardSecret card = new CardSecret(
+                id,
+                null,
+                "CARD-" + id,
+                mask(content),
+                content,
+                mask(content),
+                "AVAILABLE",
+                null,
+                importedAt,
+                null,
+                targetCardKindId
+            );
+            cards.put(id, card);
+            successCount++;
+        }
+        refreshGoodsStockForCardKind(targetCardKindId);
+        return new CardImportResult(null, lines.size(), successCount, duplicateCount, List.copyOf(failedLines), targetCardKindId);
+    }
+
     public List<CardSecret> listCards(Long goodsId) {
         return cards.values().stream()
             .filter(card -> Objects.equals(card.goodsId(), goodsId))
@@ -1755,7 +1816,31 @@ public class InMemoryShopRepository {
                 card.status(),
                 card.orderNo(),
                 card.importedAt(),
-                card.deliveredAt()
+                card.deliveredAt(),
+                card.cardKindId()
+            ))
+            .sorted(Comparator.comparing(CardSecret::id))
+            .toList();
+    }
+
+    public List<CardSecret> listCardKindCards(Long cardKindId) {
+        if (!cardKinds.containsKey(cardKindId)) {
+            throw new IllegalArgumentException("card kind not found");
+        }
+        return cards.values().stream()
+            .filter(card -> Objects.equals(card.cardKindId(), cardKindId))
+            .map(card -> new CardSecret(
+                card.id(),
+                card.goodsId(),
+                card.cardNo(),
+                card.preview(),
+                card.preview(),
+                card.preview(),
+                card.status(),
+                card.orderNo(),
+                card.importedAt(),
+                card.deliveredAt(),
+                card.cardKindId()
             ))
             .sorted(Comparator.comparing(CardSecret::id))
             .toList();
@@ -1913,19 +1998,32 @@ public class InMemoryShopRepository {
         if (item.type() != GoodsType.CARD) {
             return item;
         }
-        return item.withStock(availableCardCount(item.id()));
+        return item.withStock(item.cardKindId() == null ? availableCardCount(item.id()) : availableCardKindCardCount(item.cardKindId()));
     }
 
     private void refreshGoodsStock(Long targetGoodsId) {
         GoodsItem item = goods.get(targetGoodsId);
         if (item != null && item.type() == GoodsType.CARD) {
-            goods.put(item.id(), item.withStock(availableCardCount(item.id())));
+            goods.put(item.id(), refreshStock(item));
         }
+    }
+
+    private void refreshGoodsStockForCardKind(Long targetCardKindId) {
+        goods.values().stream()
+            .filter(item -> Objects.equals(item.cardKindId(), targetCardKindId))
+            .forEach(item -> goods.put(item.id(), refreshStock(item)));
     }
 
     private int availableCardCount(Long targetGoodsId) {
         return (int) cards.values().stream()
             .filter(card -> Objects.equals(card.goodsId(), targetGoodsId))
+            .filter(card -> "AVAILABLE".equals(card.status()))
+            .count();
+    }
+
+    private int availableCardKindCardCount(Long targetCardKindId) {
+        return (int) cards.values().stream()
+            .filter(card -> Objects.equals(card.cardKindId(), targetCardKindId))
             .filter(card -> "AVAILABLE".equals(card.status()))
             .count();
     }
@@ -1969,6 +2067,26 @@ public class InMemoryShopRepository {
             categoryStatus(enabled),
             categoryLevel(item.parentId()) + 1,
             hasChildCategory(item.id())
+        );
+    }
+
+    private CardKindItem enrichCardKind(CardKindItem item) {
+        int total = (int) cards.values().stream()
+            .filter(card -> Objects.equals(card.cardKindId(), item.id()))
+            .count();
+        int available = availableCardKindCardCount(item.id());
+        int used = (int) cards.values().stream()
+            .filter(card -> Objects.equals(card.cardKindId(), item.id()))
+            .filter(card -> "USED".equals(card.status()))
+            .count();
+        return new CardKindItem(
+            item.id(),
+            item.name(),
+            item.type(),
+            item.cost(),
+            total,
+            available,
+            used
         );
     }
 
@@ -2025,6 +2143,23 @@ public class InMemoryShopRepository {
             throw new IllegalArgumentException("card kind type must be ONCE or REUSABLE");
         }
         return normalized;
+    }
+
+    private Long normalizeGoodsCardKindId(GoodsType type, Long requestedCardKindId, Long currentCardKindId) {
+        if (type != GoodsType.CARD) {
+            if (requestedCardKindId != null) {
+                throw new IllegalArgumentException("card kind can only be bound to card goods");
+            }
+            return null;
+        }
+        Long nextCardKindId = requestedCardKindId == null ? currentCardKindId : requestedCardKindId;
+        if (nextCardKindId == null) {
+            return null;
+        }
+        if (!cardKinds.containsKey(nextCardKindId)) {
+            throw new IllegalArgumentException("card kind not found");
+        }
+        return nextCardKindId;
     }
 
     private boolean containsOrderKeyword(OrderItem order, String keyword) {
@@ -2463,7 +2598,8 @@ public class InMemoryShopRepository {
             now,
             now,
             List.of("douyin", "taobao", "private"),
-            List.of("pdd")
+            List.of("pdd"),
+            null
         ));
         goods.put(10002L, new GoodsItem(
             10002L,
@@ -2501,7 +2637,8 @@ public class InMemoryShopRepository {
             now,
             now,
             List.of("taobao", "pdd", "xianyu"),
-            List.of()
+            List.of(),
+            null
         ));
         goods.put(10003L, new GoodsItem(
             10003L,
@@ -2536,7 +2673,8 @@ public class InMemoryShopRepository {
             now,
             now,
             List.of("xiaohongshu", "private"),
-            List.of("douyin")
+            List.of("douyin"),
+            null
         ));
     }
 

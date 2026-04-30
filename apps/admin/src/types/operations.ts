@@ -8,6 +8,9 @@ export interface Goods {
   status?: string
   stock?: number
   deliveryType?: string
+  cardKindId?: number | string
+  cardKindName?: string
+  cardKindStock?: number
   platform?: string
   subTitle?: string
   coverUrl?: string
@@ -58,6 +61,7 @@ export interface GoodsCreatePayload {
   originalPrice?: number
   status: string
   deliveryType: string
+  cardKindId?: number | string
   platform?: string
   subTitle?: string
   coverUrl?: string
@@ -203,6 +207,10 @@ export interface CardKind {
   name: string
   type: CardKindType | string
   cost: number | string
+  stock?: number
+  unusedCount?: number
+  usedCount?: number
+  totalCount?: number
   createdAt?: string
 }
 
@@ -214,11 +222,23 @@ export interface CardKindCreatePayload {
 
 export interface GoodsCard {
   id: number | string
+  goodsId?: number | string
+  cardKindId?: number | string
   cardNo?: string
   password?: string
+  content?: string
+  preview?: string
   status?: string
+  orderNo?: string
   usedAt?: string
   createdAt?: string
+}
+
+export interface CardKindImportResult {
+  importTotal?: number
+  successCount?: number
+  duplicateCount?: number
+  failedLines?: number[]
 }
 
 export interface Order {

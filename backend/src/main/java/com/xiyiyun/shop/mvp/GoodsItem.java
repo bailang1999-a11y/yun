@@ -38,7 +38,8 @@ public record GoodsItem(
     OffsetDateTime createdAt,
     OffsetDateTime updatedAt,
     List<String> availablePlatforms,
-    List<String> forbiddenPlatforms
+    List<String> forbiddenPlatforms,
+    Long cardKindId
 ) {
     public GoodsItem withStock(Integer nextStock) {
         return new GoodsItem(
@@ -74,7 +75,8 @@ public record GoodsItem(
             createdAt,
             OffsetDateTime.now(),
             availablePlatforms,
-            forbiddenPlatforms
+            forbiddenPlatforms,
+            cardKindId
         );
     }
 }

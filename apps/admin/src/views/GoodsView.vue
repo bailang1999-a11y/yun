@@ -7,6 +7,7 @@ import {
   createGoods,
   createGoodsChannel,
   deleteGoodsChannel,
+  fetchCardKinds,
   fetchCategories,
   fetchGoods,
   fetchGoodsCards,
@@ -17,6 +18,7 @@ import {
 } from '../api/admin'
 import type {
   CardImportItem,
+  CardKind,
   Category,
   Goods,
   GoodsCard,
@@ -31,11 +33,13 @@ import { loadPriceTemplates } from '../utils/priceTemplates'
 
 const goods = ref<Goods[]>([])
 const cards = ref<GoodsCard[]>([])
+const cardKinds = ref<CardKind[]>([])
 const channels = ref<GoodsChannel[]>([])
 const categories = ref<Category[]>([])
 const suppliers = ref<Supplier[]>([])
 const loading = ref(false)
 const categoryLoading = ref(false)
+const cardKindLoading = ref(false)
 const saving = ref(false)
 const cardLoading = ref(false)
 const channelLoading = ref(false)
@@ -100,6 +104,7 @@ const form = reactive<GoodsCreatePayload>({
   stock: 5000,
   status: 'ON_SALE',
   deliveryType: 'CARD',
+  cardKindId: undefined,
   platform: 'GENERAL',
   availablePlatforms: ['douyin', 'taobao', 'private'],
   forbiddenPlatforms: [],
@@ -128,6 +133,12 @@ const channelForm = reactive<GoodsChannelCreatePayload>({
 const categoryOptions = computed(() => {
   const tree = buildCategoryTree(categories.value)
   return flattenCategoryTree(tree)
+})
+
+const cardKindById = computed(() => {
+  const map = new Map<string, CardKind>()
+  cardKinds.value.forEach((item) => map.set(String(item.id), item))
+  return map
 })
 
 const selectedFilterCategoryIds = computed(() => {
@@ -363,6 +374,31 @@ function stockText(row: Goods) {
   return typeof row.stock === 'number' ? row.stock : '-'
 }
 
+function cardKindUnused(row: CardKind) {
+  return Number(row.unusedCount ?? row.stock ?? 0)
+}
+
+function cardKindTotal(row: CardKind) {
+  const total = Number(row.totalCount || 0)
+  if (total > 0) return total
+  return Number(row.unusedCount || 0) + Number(row.usedCount || 0)
+}
+
+function goodsCardKind(row: Goods) {
+  if (!row.cardKindId) return undefined
+  return cardKindById.value.get(String(row.cardKindId))
+}
+
+function cardKindName(row: Goods) {
+  return row.cardKindName || goodsCardKind(row)?.name || ''
+}
+
+function cardKindStockText(row: Goods) {
+  const kind = goodsCardKind(row)
+  const stock = kind ? cardKindUnused(kind) : row.cardKindStock
+  return typeof stock === 'number' && Number.isFinite(stock) ? stock : undefined
+}
+
 function categoryLabel(row: Goods) {
   return row.categoryName || '-'
 }
@@ -392,6 +428,7 @@ function resetForm() {
   form.stock = 5000
   form.status = 'ON_SALE'
   form.deliveryType = 'CARD'
+  form.cardKindId = undefined
   form.platform = 'GENERAL'
   form.availablePlatforms = ['douyin', 'taobao', 'private']
   form.forbiddenPlatforms = []
@@ -429,6 +466,7 @@ function fillForm(row: Goods) {
   form.stock = Number(row.stock) || 0
   form.status = row.status || 'ON_SALE'
   form.deliveryType = row.deliveryType === 'AUTO' ? 'DIRECT' : row.deliveryType || 'CARD'
+  form.cardKindId = row.cardKindId
   form.platform = row.platform || 'GENERAL'
   form.availablePlatforms = row.availablePlatforms?.length ? [...row.availablePlatforms] : ['private']
   form.forbiddenPlatforms = row.forbiddenPlatforms?.length ? [...row.forbiddenPlatforms] : []
@@ -490,6 +528,18 @@ async function loadGoods() {
   }
 }
 
+async function loadCardKinds() {
+  cardKindLoading.value = true
+
+  try {
+    cardKinds.value = await fetchCardKinds()
+  } catch {
+    ElMessage.error('卡种列表加载失败')
+  } finally {
+    cardKindLoading.value = false
+  }
+}
+
 async function loadSuppliers() {
   try {
     suppliers.value = await fetchSuppliers()
@@ -524,6 +574,7 @@ async function submitGoods() {
     const payload = {
       ...form,
       name: form.name.trim(),
+      cardKindId: form.deliveryType === 'CARD' ? form.cardKindId : undefined,
       subTitle: form.subTitle?.trim(),
       coverUrl: form.coverUrl?.trim(),
       detailImages: normalizedBlocks.map((item) => item.imageUrl).filter(Boolean),
@@ -661,6 +712,7 @@ async function removeChannel(row: GoodsChannel) {
 
 onMounted(() => {
   void loadCategories()
+  void loadCardKinds()
   void loadGoods()
   void loadSuppliers()
 })
@@ -721,6 +773,16 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="发货类型" width="120">
           <template #default="{ row }">{{ deliveryLabel(row.deliveryType) }}</template>
+        </el-table-column>
+        <el-table-column label="卡种货源" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.deliveryType === 'CARD' && cardKindName(row)">
+              {{ cardKindName(row) }}
+              <em v-if="cardKindStockText(row) !== undefined"> · 库存 {{ cardKindStockText(row) }}</em>
+            </span>
+            <span v-else-if="row.deliveryType === 'CARD' && row.cardKindId">卡种 #{{ row.cardKindId }}</span>
+            <span v-else>-</span>
+          </template>
         </el-table-column>
         <el-table-column label="可售平台" min-width="180">
           <template #default="{ row }">
@@ -805,6 +867,16 @@ onMounted(() => {
                 <el-form-item label="发货类型">
                   <el-select v-model="form.deliveryType">
                     <el-option v-for="item in deliveryOptions" :key="item.value" :label="item.label" :value="item.value" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="form.deliveryType === 'CARD'" label="卡种货源">
+                  <el-select v-model="form.cardKindId" :loading="cardKindLoading" clearable filterable placeholder="选择卡密仓库卡种">
+                    <el-option
+                      v-for="item in cardKinds"
+                      :key="item.id"
+                      :label="`${item.name} · 可用 ${cardKindUnused(item)} / 总 ${cardKindTotal(item)}`"
+                      :value="item.id"
+                    />
                   </el-select>
                 </el-form-item>
               </div>

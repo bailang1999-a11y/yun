@@ -83,6 +83,24 @@ public class AdminMvpController {
         }
     }
 
+    @GetMapping("/card-kinds/{id}/cards")
+    public ApiResponse<List<CardSecret>> cardKindCards(@PathVariable Long id) {
+        try {
+            return ApiResponse.ok(repository.listCardKindCards(id));
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/card-kinds/{id}/cards/import")
+    public ApiResponse<CardImportResult> importCardKindCards(@PathVariable Long id, @RequestBody CardImportRequest request) {
+        try {
+            return ApiResponse.ok(repository.importCardKindCards(id, request));
+        } catch (IllegalArgumentException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @GetMapping("/user-groups")
     public ApiResponse<List<UserGroupItem>> userGroups() {
         return ApiResponse.ok(repository.listUserGroups());
