@@ -74,31 +74,49 @@ public class AdminMvpController {
         return ApiResponse.ok(repository.listCardKinds());
     }
 
+    @GetMapping("/recharge-fields")
+    public ApiResponse<List<RechargeFieldItem>> rechargeFields(@RequestParam(required = false) Boolean enabled) {
+        return ApiResponse.ok(repository.listRechargeFields(enabled));
+    }
+
+    @PostMapping("/recharge-fields")
+    public ApiResponse<RechargeFieldItem> createRechargeField(@RequestBody RechargeFieldRequest request) {
+        return safe(() -> repository.createRechargeField(request));
+    }
+
+    @PostMapping("/recharge-fields/{id}")
+    public ApiResponse<RechargeFieldItem> updateRechargeField(@PathVariable Long id, @RequestBody RechargeFieldRequest request) {
+        return safe(() -> repository.updateRechargeField(id, request));
+    }
+
+    @PostMapping("/recharge-fields/{id}/enable")
+    public ApiResponse<RechargeFieldItem> enableRechargeField(@PathVariable Long id) {
+        return safe(() -> repository.updateRechargeFieldEnabled(id, true));
+    }
+
+    @PostMapping("/recharge-fields/{id}/disable")
+    public ApiResponse<RechargeFieldItem> disableRechargeField(@PathVariable Long id) {
+        return safe(() -> repository.updateRechargeFieldEnabled(id, false));
+    }
+
+    @PostMapping("/recharge-fields/{id}/delete")
+    public ApiResponse<String> deleteRechargeField(@PathVariable Long id) {
+        return safeDeleted(() -> repository.deleteRechargeField(id));
+    }
+
     @PostMapping("/card-kinds")
     public ApiResponse<CardKindItem> createCardKind(@RequestBody CreateCardKindRequest request) {
-        try {
-            return ApiResponse.ok(repository.createCardKind(request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.createCardKind(request));
     }
 
     @GetMapping("/card-kinds/{id}/cards")
     public ApiResponse<List<CardSecret>> cardKindCards(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.listCardKindCards(id));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.listCardKindCards(id));
     }
 
     @PostMapping("/card-kinds/{id}/cards/import")
     public ApiResponse<CardImportResult> importCardKindCards(@PathVariable Long id, @RequestBody CardImportRequest request) {
-        try {
-            return ApiResponse.ok(repository.importCardKindCards(id, request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.importCardKindCards(id, request));
     }
 
     @GetMapping("/user-groups")
@@ -108,11 +126,7 @@ public class AdminMvpController {
 
     @PostMapping("/user-groups")
     public ApiResponse<UserGroupItem> createUserGroup(@RequestBody CreateUserGroupRequest request) {
-        try {
-            return ApiResponse.ok(repository.createUserGroup(request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.createUserGroup(request));
     }
 
     @GetMapping("/users")
@@ -125,11 +139,15 @@ public class AdminMvpController {
         @PathVariable Long groupId,
         @RequestBody UpdateGroupRulesRequest request
     ) {
-        try {
-            return ApiResponse.ok(repository.updateGroupRules(groupId, request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateGroupRules(groupId, request));
+    }
+
+    @PostMapping("/user-groups/{groupId}/order-permission")
+    public ApiResponse<UserGroupItem> updateUserGroupOrderPermission(
+        @PathVariable Long groupId,
+        @RequestBody UpdateUserGroupOrderPermissionRequest request
+    ) {
+        return safe(() -> repository.updateUserGroupOrderPermission(groupId, request));
     }
 
     @PostMapping("/users/{userId}/group")
@@ -137,75 +155,50 @@ public class AdminMvpController {
         @PathVariable Long userId,
         @RequestBody UpdateUserGroupRequest request
     ) {
-        try {
-            return ApiResponse.ok(repository.updateUserGroup(userId, request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateUserGroup(userId, request));
+    }
+
+    @PostMapping("/users/{userId}/funds")
+    public ApiResponse<UserItem> adjustUserFunds(
+        @PathVariable Long userId,
+        @RequestBody UserFundAdjustRequest request
+    ) {
+        return safe(() -> repository.adjustUserFunds(userId, request));
     }
 
     @PostMapping("/categories")
     public ApiResponse<CategoryItem> createCategory(@RequestBody CreateCategoryRequest request) {
-        try {
-            return ApiResponse.ok(repository.createCategory(request));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.createCategory(request));
     }
 
     @PostMapping("/categories/{id}")
     public ApiResponse<CategoryItem> updateCategory(@PathVariable Long id, @RequestBody UpdateCategoryRequest request) {
-        try {
-            return ApiResponse.ok(repository.updateCategory(id, request));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateCategory(id, request));
     }
 
     @PostMapping("/categories/{id}/enable")
     public ApiResponse<CategoryItem> enableCategory(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.updateCategoryStatus(id, true));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateCategoryStatus(id, true));
     }
 
     @PostMapping("/categories/{id}/disable")
     public ApiResponse<CategoryItem> disableCategory(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.updateCategoryStatus(id, false));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateCategoryStatus(id, false));
     }
 
     @PostMapping("/categories/{id}/delete")
     public ApiResponse<String> deleteCategory(@PathVariable Long id) {
-        try {
-            repository.deleteCategory(id);
-            return ApiResponse.ok("deleted");
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safeDeleted(() -> repository.deleteCategory(id));
     }
 
     @PostMapping("/goods")
     public ApiResponse<GoodsItem> createGoods(@RequestBody CreateGoodsRequest request) {
-        try {
-            return ApiResponse.ok(repository.createGoods(request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.createGoods(request));
     }
 
     @PostMapping("/goods/{id}")
     public ApiResponse<GoodsItem> updateGoods(@PathVariable Long id, @RequestBody CreateGoodsRequest request) {
-        try {
-            return ApiResponse.ok(repository.updateGoods(id, request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateGoods(id, request));
     }
 
     @GetMapping("/suppliers")
@@ -215,66 +208,37 @@ public class AdminMvpController {
 
     @PostMapping("/suppliers")
     public ApiResponse<SupplierItem> createSupplier(@RequestBody CreateSupplierRequest request) {
-        try {
-            return ApiResponse.ok(repository.createSupplier(request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.createSupplier(request));
     }
 
     @PostMapping("/suppliers/{id}")
     public ApiResponse<SupplierItem> updateSupplier(@PathVariable Long id, @RequestBody CreateSupplierRequest request) {
-        try {
-            return ApiResponse.ok(repository.updateSupplier(id, request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateSupplier(id, request));
     }
 
     @PostMapping("/suppliers/{id}/delete")
     public ApiResponse<String> deleteSupplier(@PathVariable Long id) {
-        try {
-            repository.deleteSupplier(id);
-            return ApiResponse.ok("deleted");
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safeDeleted(() -> repository.deleteSupplier(id));
     }
 
     @PostMapping("/suppliers/{id}/enable")
     public ApiResponse<SupplierItem> enableSupplier(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.updateSupplierStatus(id, true));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateSupplierStatus(id, true));
     }
 
     @PostMapping("/suppliers/{id}/disable")
     public ApiResponse<SupplierItem> disableSupplier(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.updateSupplierStatus(id, false));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.updateSupplierStatus(id, false));
     }
 
     @PostMapping("/suppliers/{id}/balance")
     public ApiResponse<SupplierItem> refreshSupplierBalance(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.refreshSupplierBalance(id));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.refreshSupplierBalance(id));
     }
 
     @PostMapping("/suppliers/{id}/test")
     public ApiResponse<SupplierItem> testSupplier(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.testSupplierConnection(id));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.testSupplierConnection(id));
     }
 
     @PostMapping("/suppliers/{id}/sync-goods")
@@ -282,11 +246,7 @@ public class AdminMvpController {
         @PathVariable Long id,
         @RequestBody(required = false) SyncGoodsRequest request
     ) {
-        try {
-            return ApiResponse.ok(repository.syncRemoteGoods(id, request));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.syncRemoteGoods(id, request));
     }
 
     @GetMapping("/suppliers/{id}/remote-goods")
@@ -300,22 +260,54 @@ public class AdminMvpController {
         }
     }
 
+    @PostMapping("/source-connect/suppliers/{id}/remote-goods")
+    public ApiResponse<RemoteGoodsSyncResult> sourceConnectRemoteGoods(
+        @PathVariable Long id,
+        @RequestBody(required = false) SyncGoodsRequest request
+    ) {
+        return safe(() -> repository.sourceConnectRemoteGoods(id, request));
+    }
+
+    @PostMapping("/source-connect/suppliers/{id}/clone")
+    public ApiResponse<SourceCloneResult> cloneSourceGoods(
+        @PathVariable Long id,
+        @RequestBody SourceCloneRequest request
+    ) {
+        return safe(() -> repository.cloneSourceGoods(id, request));
+    }
+
     @PostMapping("/goods/{id}/cards/import")
     public ApiResponse<CardImportResult> importCards(@PathVariable Long id, @RequestBody CardImportRequest request) {
-        try {
-            return ApiResponse.ok(repository.importCards(id, request));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.importCards(id, request));
     }
 
     @GetMapping("/goods/{id}/channels")
     public ApiResponse<List<GoodsChannelItem>> goodsChannels(@PathVariable Long id) {
-        try {
-            return ApiResponse.ok(repository.listGoodsChannels(id));
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
+        return safe(() -> repository.listGoodsChannels(id));
+    }
+
+    @GetMapping("/goods-monitor")
+    public ApiResponse<ProductMonitorOverview> goodsMonitor() {
+        return ApiResponse.ok(repository.productMonitorOverview());
+    }
+
+    @GetMapping("/goods-monitor/logs")
+    public ApiResponse<List<ProductMonitorLogItem>> goodsMonitorLogs() {
+        return ApiResponse.ok(repository.listProductMonitorLogs());
+    }
+
+    @PostMapping("/goods-monitor/scan")
+    public ApiResponse<List<ProductMonitorScanResult>> scanGoodsMonitor() {
+        return ApiResponse.ok(repository.scanAllProductMonitorChannels(true));
+    }
+
+    @PostMapping("/goods-monitor/channels/{channelId}/scan")
+    public ApiResponse<ProductMonitorScanResult> scanGoodsMonitorChannel(@PathVariable Long channelId) {
+        ProductMonitorScanResult result = repository.scanProductMonitorChannel(channelId, true);
+        if (result == null) {
+            return ApiResponse.fail("monitor channel not found");
         }
+        return ApiResponse.ok(result);
     }
 
     @PostMapping("/goods/{id}/channels")
@@ -323,21 +315,12 @@ public class AdminMvpController {
         @PathVariable Long id,
         @RequestBody CreateGoodsChannelRequest request
     ) {
-        try {
-            return ApiResponse.ok(repository.createGoodsChannel(id, request));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.createGoodsChannel(id, request));
     }
 
     @PostMapping("/goods/{id}/channels/{channelId}/delete")
     public ApiResponse<String> deleteGoodsChannel(@PathVariable Long id, @PathVariable Long channelId) {
-        try {
-            repository.deleteGoodsChannel(id, channelId);
-            return ApiResponse.ok("deleted");
-        } catch (IllegalArgumentException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safeDeleted(() -> repository.deleteGoodsChannel(id, channelId));
     }
 
     @GetMapping("/goods/{id}/cards")
@@ -381,38 +364,37 @@ public class AdminMvpController {
 
     @PostMapping("/orders/{orderNo}/complete-manual")
     public ApiResponse<OrderItem> completeManual(@PathVariable String orderNo) {
-        try {
-            return ApiResponse.ok(repository.completeManualOrder(orderNo));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.completeManualOrder(orderNo));
     }
 
     @PostMapping("/orders/{orderNo}/retry")
     public ApiResponse<OrderItem> retry(@PathVariable String orderNo) {
-        try {
-            return ApiResponse.ok(repository.retryProcurement(orderNo));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.retryProcurement(orderNo));
     }
 
     @PostMapping("/orders/{orderNo}/retry-channel/{channelId}")
     public ApiResponse<OrderItem> retryWithChannel(@PathVariable String orderNo, @PathVariable Long channelId) {
-        try {
-            return ApiResponse.ok(repository.retryProcurementWithChannel(orderNo, channelId));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.retryProcurementWithChannel(orderNo, channelId));
     }
 
     @PostMapping("/orders/{orderNo}/refund")
     public ApiResponse<OrderItem> refund(@PathVariable String orderNo) {
-        try {
-            return ApiResponse.ok(repository.refundOrder(orderNo));
-        } catch (IllegalArgumentException | IllegalStateException ex) {
-            return ApiResponse.fail(ex.getMessage());
-        }
+        return safe(() -> repository.refundOrder(orderNo));
+    }
+
+    @PostMapping("/orders/{orderNo}/manual-success")
+    public ApiResponse<OrderItem> manualSuccess(@PathVariable String orderNo) {
+        return safe(() -> repository.markOrderSuccess(orderNo));
+    }
+
+    @PostMapping("/orders/{orderNo}/manual-failed")
+    public ApiResponse<OrderItem> manualFailed(@PathVariable String orderNo) {
+        return safe(() -> repository.markOrderFailed(orderNo));
+    }
+
+    @PostMapping("/orders/{orderNo}/delete")
+    public ApiResponse<String> deleteOrder(@PathVariable String orderNo) {
+        return safeDeleted(() -> repository.deleteOrder(orderNo));
     }
 
     @GetMapping("/payments")
@@ -438,6 +420,19 @@ public class AdminMvpController {
     @GetMapping("/member-api-credentials")
     public ApiResponse<List<MemberApiCredentialItem>> memberApiCredentials() {
         return ApiResponse.ok(repository.listMemberCredentials());
+    }
+
+    @GetMapping("/users/{userId}/member-api")
+    public ApiResponse<MemberApiCredentialItem> userMemberApiCredential(@PathVariable Long userId) {
+        return safe(() -> repository.memberCredentialForUser(userId));
+    }
+
+    @PostMapping("/users/{userId}/member-api")
+    public ApiResponse<MemberApiCredentialItem> saveUserMemberApiCredential(
+        @PathVariable Long userId,
+        @RequestBody MemberApiCredentialRequest request
+    ) {
+        return safe(() -> repository.saveMemberCredential(userId, request));
     }
 
     @GetMapping("/open-api-logs")
@@ -494,5 +489,27 @@ public class AdminMvpController {
 
     private String text(String value) {
         return value == null ? "" : value;
+    }
+
+    private <T> ApiResponse<T> safe(ApiAction<T> action) {
+        try {
+            return ApiResponse.ok(action.run());
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    private ApiResponse<String> safeDeleted(Runnable action) {
+        try {
+            action.run();
+            return ApiResponse.ok("deleted");
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @FunctionalInterface
+    private interface ApiAction<T> {
+        T run();
     }
 }

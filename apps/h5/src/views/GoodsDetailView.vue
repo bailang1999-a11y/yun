@@ -3,15 +3,16 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, LoaderCircle, ShieldCheck } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { createH5Order, fetchH5GoodsDetail } from '../api/h5'
+import { createH5Order, fetchH5GoodsDetail, fetchH5RechargeFields } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
-import type { GoodsCard, GoodsType } from '../types/h5'
+import type { GoodsCard, GoodsType, RechargeField } from '../types/h5'
 
 const route = useRoute()
 const router = useRouter()
 const catalog = useCatalogStore()
 const goods = ref<GoodsCard | null>(null)
+const rechargeFields = ref<RechargeField[]>([])
 const loading = ref(false)
 const creating = ref(false)
 const errorMessage = ref('')
@@ -25,6 +26,18 @@ const typeLabel: Record<GoodsType, string> = {
 }
 
 const totalAmount = computed(() => (goods.value ? goods.value.price * quantity.value : 0))
+const selectedRechargeFields = computed(() => {
+  if (!goods.value?.accountTypes?.length) return []
+  const selectedCodes = new Set(goods.value.accountTypes)
+  return rechargeFields.value.filter((item) => selectedCodes.has(item.code))
+})
+const primaryRechargeField = computed(() => selectedRechargeFields.value[0])
+const rechargeAccountLabel = computed(() => primaryRechargeField.value?.label || '充值账号')
+const rechargeAccountPlaceholder = computed(() => {
+  if (primaryRechargeField.value?.placeholder) return primaryRechargeField.value.placeholder
+  if (selectedRechargeFields.value.length) return `请输入${selectedRechargeFields.value.map((item) => item.label).join(' / ')}`
+  return '手机号 / QQ / 游戏账号'
+})
 const forbiddenPlatformText = computed(() => {
   const platforms = goods.value?.forbiddenPlatforms || []
   if (!platforms.length) return ''
@@ -35,8 +48,17 @@ onMounted(async () => {
   if (!catalog.categories.length) {
     await catalog.loadCatalog()
   }
+  await loadRechargeFields()
   await loadGoods()
 })
+
+async function loadRechargeFields() {
+  try {
+    rechargeFields.value = await fetchH5RechargeFields()
+  } catch {
+    rechargeFields.value = []
+  }
+}
 
 async function loadGoods() {
   loading.value = true
@@ -55,6 +77,11 @@ async function createOrder() {
   if (!goods.value || creating.value) return
   if (goods.value.requireRechargeAccount && !rechargeAccount.value.trim()) {
     errorMessage.value = '请先填写充值账号。'
+    return
+  }
+  const validationMessage = validateRechargeAccount(rechargeAccount.value.trim())
+  if (validationMessage) {
+    errorMessage.value = validationMessage
     return
   }
 
@@ -83,6 +110,32 @@ function platformLabel(value: string) {
     miniapp: '微信小程序'
   }
   return labels[value] || value
+}
+
+function validateRechargeAccount(value: string) {
+  if (!goods.value?.requireRechargeAccount || !value || !selectedRechargeFields.value.length) return ''
+  const matched = selectedRechargeFields.value.some((field) => accountMatches(field.inputType, value))
+  if (matched) return ''
+  return `请输入正确的${selectedRechargeFields.value.map((item) => item.label).join(' / ')}`
+}
+
+function accountMatches(inputType: string, value: string) {
+  switch (inputType) {
+    case 'mobile':
+      return /^1[3-9]\d{9}$/.test(value)
+    case 'email':
+      return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(value)
+    case 'number':
+      return /^\d+$/.test(value)
+    case 'qq':
+      return /^[1-9]\d{4,11}$/.test(value)
+    case 'jianying_id':
+      return /^[A-Za-z0-9_-]{4,32}$/.test(value)
+    case 'douyin_id':
+      return /^[A-Za-z0-9_.-]{4,32}$/.test(value)
+    default:
+      return value.trim().length > 0
+  }
 }
 </script>
 
@@ -121,8 +174,8 @@ function platformLabel(value: string) {
         </div>
 
         <label v-if="goods.requireRechargeAccount" class="account-field">
-          <span>充值账号</span>
-          <input v-model.trim="rechargeAccount" placeholder="手机号 / QQ / 游戏账号" />
+          <span>{{ rechargeAccountLabel }}</span>
+          <input v-model.trim="rechargeAccount" :placeholder="rechargeAccountPlaceholder" />
         </label>
 
         <div class="service-line">

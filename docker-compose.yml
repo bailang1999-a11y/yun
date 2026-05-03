@@ -36,6 +36,8 @@ services:
       SPRING_DATASOURCE_USERNAME: xiyiyun
       SPRING_DATASOURCE_PASSWORD: xiyiyun_pwd
       SPRING_DATA_REDIS_HOST: redis
+      XIYIYUN_PAYMENT_CALLBACK_SECRET: ${XIYIYUN_PAYMENT_CALLBACK_SECRET:-xiyiyun_mock_payment_secret}
+      XIYIYUN_CARD_ENCRYPTION_SECRET: ${XIYIYUN_CARD_ENCRYPTION_SECRET:-xiyiyun_dev_card_secret}
     ports:
       - "8080:8080"
     depends_on:

@@ -22,8 +22,9 @@ import {
   Trash2,
   X
 } from 'lucide-vue-next'
-import { createCategory, deleteCategory, fetchCategories, updateCategory } from '../api/admin'
+import { createCategory, deleteCategory, fetchCategories, updateCategory } from '../api/catalog'
 import type { Category, CategoryCreatePayload, CategoryUpdatePayload } from '../types/operations'
+import { buildCategoryTree, flattenCategoryTree } from '../utils/categoryTree'
 
 const props = defineProps<{
   modelValue?: string | number | null
@@ -40,6 +41,7 @@ const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
 const selectedRootId = ref<string>('')
+const selectedSecondId = ref<string>('')
 const selectedCategoryId = ref<string>(props.modelValue == null ? '' : String(props.modelValue))
 const editorVisible = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
@@ -63,21 +65,31 @@ const form = reactive<CategoryCreatePayload & { icon: string; iconUrl: string; c
   enabled: true
 })
 
-const categoryTree = computed(() => buildTree(categories.value))
+const categoryTree = computed(() => buildCategoryTree(categories.value))
 const parentOptions = computed(() =>
   categories.value.filter((item) => {
     if ((item.level || 1) >= 5) return false
     if (editorMode.value !== 'edit' || editingCategoryId.value === undefined) return true
     const blockedIds = new Set([
       String(editingCategoryId.value),
-      ...flattenTree(findInTree(categoryTree.value, editingCategoryId.value)?.children || []).map((child) => String(child.id))
+      ...flattenCategoryTree(findInTree(categoryTree.value, editingCategoryId.value)?.children || []).map((child) => String(child.id))
     ])
     return !blockedIds.has(String(item.id))
   })
 )
 const rootCategories = computed(() => categoryTree.value)
 const selectedRoot = computed(() => rootCategories.value.find((item) => String(item.id) === selectedRootId.value) || rootCategories.value[0])
-const selectedDescendants = computed(() => (selectedRoot.value ? flattenTree(selectedRoot.value.children || []) : []))
+const secondLevelCategories = computed(() => selectedRoot.value?.children || [])
+const selectedSecond = computed(() => {
+  const explicit = secondLevelCategories.value.find((item) => String(item.id) === selectedSecondId.value)
+  if (explicit) return explicit
+  const selected = selectedCategory.value
+  if (selected && selectedRoot.value) {
+    return secondLevelCategories.value.find((item) => String(item.id) === String(selected.id) || findInTree(item.children || [], selected.id))
+  }
+  return secondLevelCategories.value[0]
+})
+const thirdLevelCategories = computed(() => selectedSecond.value?.children || [])
 const selectedCategory = computed(() => findInTree(categoryTree.value, selectedCategoryId.value))
 const editorTitle = computed(() => (editorMode.value === 'edit' ? '编辑分类' : '新增分类'))
 const editorActionText = computed(() => (editorMode.value === 'edit' ? '保存修改' : '创建分类'))
@@ -117,45 +129,14 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown)
 })
 
-function buildTree(items: Category[]) {
-  const map = new Map<string, Category>()
-  const roots: Category[] = []
-
-  items.forEach((item) => {
-    map.set(String(item.id), { ...item, children: [] })
-  })
-
-  map.forEach((item) => {
-    const parentId = item.parentId ? String(item.parentId) : ''
-    const parent = parentId ? map.get(parentId) : undefined
-    item.level = parent ? (parent.level || 1) + 1 : 1
-    if (parent) parent.children?.push(item)
-    else roots.push(item)
-  })
-
-  const sortNode = (nodes: Category[]) => {
-    nodes.sort((a, b) => Number(a.sort || 0) - Number(b.sort || 0))
-    nodes.forEach((node) => sortNode(node.children || []))
-  }
-  sortNode(roots)
-  return roots
-}
-
-function flattenTree(nodes: Category[], result: Category[] = []) {
-  nodes.forEach((node) => {
-    result.push(node)
-    flattenTree(node.children || [], result)
-  })
-  return result
-}
-
 async function loadCategories() {
   loading.value = true
   try {
-    const tree = buildTree(await fetchCategories())
-    categories.value = flattenTree(tree)
+    const tree = buildCategoryTree(await fetchCategories())
+    categories.value = flattenCategoryTree(tree)
     syncRootToSelection()
     selectedRootId.value ||= String(tree[0]?.id || '')
+    selectedSecondId.value ||= String(selectedRoot.value?.children?.[0]?.id || '')
     emit('categories-loaded', categories.value)
     if (selectedCategoryId.value && !selectedCategory.value) selectCategory(null)
   } catch {
@@ -167,11 +148,13 @@ async function loadCategories() {
 
 function selectRoot(row: Category) {
   selectedRootId.value = String(row.id)
+  selectedSecondId.value = String(row.children?.[0]?.id || '')
   selectCategory(row)
 }
 
 function selectChild(row: Category) {
   form.parentId = row.id
+  if ((row.level || 1) === 2) selectedSecondId.value = String(row.id)
   selectCategory(row)
 }
 
@@ -185,6 +168,10 @@ function selectCategory(row: Category | null) {
 function syncRootToSelection() {
   const selectedRootItem = findRootForId(categoryTree.value, selectedCategoryId.value)
   if (selectedRootItem) selectedRootId.value = String(selectedRootItem.id)
+  const selectedItem = selectedCategory.value
+  const selectedSecondItem = findSecondForId(categoryTree.value, selectedCategoryId.value)
+  if (selectedSecondItem) selectedSecondId.value = String(selectedSecondItem.id)
+  else if (selectedItem && (selectedItem.level || 1) === 1) selectedSecondId.value = String(selectedItem.children?.[0]?.id || '')
 }
 
 function iconForCategory(row: Category) {
@@ -286,6 +273,17 @@ function findRootForId(nodes: Category[], id?: Category['id'] | string): Categor
   for (const node of nodes) {
     if (String(node.id) === String(id)) return node
     if (findInTree(node.children || [], id)) return node
+  }
+  return undefined
+}
+
+function findSecondForId(nodes: Category[], id?: Category['id'] | string): Category | undefined {
+  if (id === undefined || id === '') return undefined
+  const root = findRootForId(nodes, id)
+  if (!root) return undefined
+  for (const child of root.children || []) {
+    if (String(child.id) === String(id)) return child
+    if (findInTree(child.children || [], id)) return child
   }
   return undefined
 }
@@ -400,7 +398,8 @@ async function removeCategory(row: Category) {
     await ElMessageBox.confirm(`确认删除「${row.name}」？存在子分类或已被商品引用时系统会拒绝删除。`, '删除分类', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
-      type: 'warning'
+      type: 'warning',
+      customClass: 'xiyiyun-glass-message-box'
     })
   } catch {
     return
@@ -424,71 +423,96 @@ async function removeCategory(row: Category) {
 <template>
   <section class="category-board">
     <article class="category-canvas liquid-admin-panel">
-      <div class="catalog-sidebar">
-        <span>目录</span>
-        <span>分类</span>
-      </div>
-
       <div class="catalog-content">
         <div class="panel-head">
           <div>
             <h2>分类管理</h2>
-            <span>{{ categories.length }} 个节点，当前 {{ selectedCategory?.name || selectedRoot?.name || '未选择' }} · {{ depthLabel(selectedCategory || selectedRoot) }}</span>
+            <span class="category-breadcrumb">
+              目录 / 分类
+              <em>{{ categories.length }} 个节点</em>
+              <em>当前 {{ selectedCategory?.name || selectedRoot?.name || '未选择' }}</em>
+              <em>{{ depthLabel(selectedCategory || selectedRoot) }}</em>
+            </span>
           </div>
           <el-button :icon="RefreshCw" :loading="loading" @click="loadCategories">刷新</el-button>
         </div>
 
-        <section class="category-strip" aria-label="一级分类目录">
+        <nav v-if="rootCategories.length" class="root-tabs" aria-label="一级分类">
           <button
             v-for="item in rootCategories"
             :key="item.id"
             type="button"
-            class="category-icon-card root"
-            :class="{ active: String(item.id) === selectedRootId || String(item.id) === selectedCategoryId }"
+            :class="{ active: String(item.id) === selectedRootId }"
             @click="selectRoot(item)"
-            @contextmenu.prevent="openContextMenu($event, item)"
           >
-            <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
-              <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
-              <component v-else :is="iconForCategory(item)" :size="30" />
-            </span>
-            <strong>{{ item.name }}</strong>
-            <em>{{ item.children?.length || 0 }} 个子类</em>
-            <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
+            {{ item.name }}
           </button>
-          <button type="button" class="category-icon-card root add-card" @click="openCreate()">
-            <span class="icon-bubble"><Plus :size="30" /></span>
-            <strong>新增分类</strong>
-            <em>一级分类</em>
-          </button>
+          <button type="button" class="add-root-tab" @click="openCreate()">+ 一级分类</button>
+        </nav>
+
+        <section class="category-level" aria-label="二级分类">
+          <div class="level-title">
+            <strong>二级分类</strong>
+            <span>{{ selectedRoot ? `归属 ${selectedRoot.name}` : '请选择一级分类' }}</span>
+          </div>
+          <div class="category-strip">
+            <button
+              v-for="item in secondLevelCategories"
+              :key="item.id"
+              type="button"
+              class="category-icon-card"
+              :class="{ active: String(item.id) === selectedSecondId || String(item.id) === selectedCategoryId }"
+              @click="selectChild(item)"
+              @contextmenu.prevent="openContextMenu($event, item)"
+            >
+              <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
+                <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
+                <component v-else :is="iconForCategory(item)" :size="28" />
+              </span>
+              <strong>{{ item.name }}</strong>
+              <em>{{ item.children?.length || 0 }} 个子类</em>
+              <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
+            </button>
+            <button type="button" class="category-icon-card add-card" @click="openCreate(selectedRoot?.id)">
+              <span class="icon-bubble"><Plus :size="30" /></span>
+              <strong>新增分类</strong>
+              <em>{{ selectedRoot ? `挂到 ${selectedRoot.name}` : '二级分类' }}</em>
+            </button>
+          </div>
         </section>
 
-        <section class="category-matrix" aria-label="所选分类下级">
-          <button
-            v-for="item in selectedDescendants"
-            :key="item.id"
-            type="button"
-            class="category-icon-card"
-            :class="{ active: String(item.id) === selectedCategoryId }"
-            :style="{ '--depth': String(Math.max((item.level || 1) - 1, 0)) }"
-            @click="selectChild(item)"
-            @contextmenu.prevent="openContextMenu($event, item)"
-          >
-            <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
-              <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
-              <component v-else :is="iconForCategory(item)" :size="26" />
-            </span>
-            <strong>{{ item.name }}</strong>
-            <em>{{ depthLabel(item) }} · 排序 {{ item.sort }}</em>
-            <small :data-enabled="item.enabled">{{ item.enabled ? '启用' : '停用' }}</small>
-            <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
-          </button>
-          <button type="button" class="category-icon-card add-card" @click="openCreate(selectedRoot?.id)">
-            <span class="icon-bubble"><FolderPlus :size="28" /></span>
-            <strong>新增分类</strong>
-            <em>{{ selectedRoot ? `挂到 ${selectedRoot.name}` : '选择父级' }}</em>
-          </button>
+        <section class="category-level" aria-label="三级分类">
+          <div class="level-title">
+            <strong>三级分类</strong>
+            <span>{{ selectedSecond ? `归属 ${selectedSecond.name}` : '请选择二级分类' }}</span>
+          </div>
+          <div class="category-matrix">
+            <button
+              v-for="item in thirdLevelCategories"
+              :key="item.id"
+              type="button"
+              class="category-icon-card"
+              :class="{ active: String(item.id) === selectedCategoryId }"
+              @click="selectChild(item)"
+              @contextmenu.prevent="openContextMenu($event, item)"
+            >
+              <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
+                <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
+                <component v-else :is="iconForCategory(item)" :size="26" />
+              </span>
+              <strong>{{ item.name }}</strong>
+              <em>排序 {{ item.sort }}</em>
+              <small :data-enabled="item.enabled">{{ item.enabled ? '启用' : '停用' }}</small>
+              <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
+            </button>
+            <button type="button" class="category-icon-card add-card" @click="openCreate(selectedSecond?.id || selectedRoot?.id)">
+              <span class="icon-bubble"><FolderPlus :size="28" /></span>
+              <strong>新增分类</strong>
+              <em>{{ selectedSecond ? `挂到 ${selectedSecond.name}` : '选择二级分类' }}</em>
+            </button>
+          </div>
         </section>
+
       </div>
     </article>
 
@@ -513,7 +537,7 @@ async function removeCategory(row: Category) {
         </button>
       </div>
 
-      <el-dialog v-model="editorVisible" :title="editorTitle" width="540px" destroy-on-close class="category-editor-dialog" @closed="resetForm">
+      <el-dialog v-model="editorVisible" :title="editorTitle" width="540px" destroy-on-close class="xiyiyun-glass-dialog category-editor-dialog" @closed="resetForm">
         <el-form :model="form" label-position="top" class="category-form dialog-form">
           <el-form-item label="图标">
             <div class="custom-icon-uploader">
@@ -596,8 +620,6 @@ async function removeCategory(row: Category) {
 }
 
 .category-canvas {
-  display: grid;
-  grid-template-columns: 86px minmax(0, 1fr);
   align-self: start;
   height: auto;
   background:
@@ -605,24 +627,9 @@ async function removeCategory(row: Category) {
     rgba(255, 255, 255, 0.04);
 }
 
-.catalog-sidebar {
-  display: grid;
-  grid-template-rows: 148px 1fr;
-  border-right: 0.5px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.catalog-sidebar span {
-  display: grid;
-  place-items: start center;
-  padding-top: 34px;
-  color: rgba(255, 255, 255, 0.58);
-  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
-}
-
 .catalog-content {
   min-width: 0;
-  padding: 20px 24px 28px;
+  padding: 20px 24px 26px;
 }
 
 .panel-head {
@@ -644,6 +651,56 @@ async function removeCategory(row: Category) {
   font-size: 13px;
 }
 
+.category-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.category-breadcrumb em {
+  padding-left: 8px;
+  color: rgba(255, 255, 255, 0.48);
+  font-style: normal;
+  border-left: 0.5px solid rgba(255, 255, 255, 0.14);
+}
+
+.root-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -2px 0 14px;
+}
+
+.root-tabs button {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.58);
+  background: rgba(255, 255, 255, 0.045);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.root-tabs button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(0, 255, 195, 0.24);
+}
+
+.root-tabs button.active {
+  color: #06110f;
+  background: #00ffc3;
+  border-color: rgba(0, 255, 195, 0.8);
+  box-shadow: 0 8px 22px rgba(0, 255, 195, 0.12);
+}
+
+.root-tabs .add-root-tab {
+  color: rgba(205, 255, 246, 0.78);
+  border-style: dashed;
+  background: rgba(0, 255, 195, 0.06);
+}
+
 .category-form :deep(.el-input-number),
 .category-form :deep(.el-select) {
   width: 100%;
@@ -655,17 +712,45 @@ async function removeCategory(row: Category) {
   gap: 18px 20px;
 }
 
+.category-level {
+  min-width: 0;
+}
+
+.category-level + .category-level {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.level-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-height: 24px;
+  margin-bottom: 8px;
+}
+
+.level-title strong {
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.level-title span {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+}
+
 .category-strip {
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   align-items: start;
-  padding: 8px 0 22px;
-  border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+  padding: 4px 0 2px;
 }
 
 .category-matrix {
   grid-template-columns: repeat(auto-fill, minmax(106px, 1fr));
   align-items: start;
-  padding-top: 22px;
+  padding-top: 4px;
 }
 
 .category-icon-card {

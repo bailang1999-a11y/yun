@@ -2,11 +2,11 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { LoaderCircle, LogIn } from 'lucide-vue-next'
-import { loginAdmin } from '../api/admin'
+import { loginAdmin } from '../api/auth'
 
 const router = useRouter()
-const account = ref('admin')
-const password = ref('admin123')
+const account = ref('')
+const password = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
 

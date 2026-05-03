@@ -2,9 +2,11 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Activity, RefreshCw, RotateCw, WalletCards } from 'lucide-vue-next'
-import { fetchOrders, fetchSuppliers, refreshSupplierBalance } from '../api/admin'
+import { fetchOrders } from '../api/orders'
+import { fetchSuppliers, refreshSupplierBalance } from '../api/suppliers'
 import { subscribeOrderEvents } from '../api/realtime'
 import type { Order, Supplier } from '../types/operations'
+import { formatDateTime, formatMoney } from '../utils/formatters'
 
 const orders = ref<Order[]>([])
 const suppliers = ref<Supplier[]>([])
@@ -52,16 +54,8 @@ onBeforeUnmount(() => {
   if (flashTimer) window.clearTimeout(flashTimer)
 })
 
-function formatMoney(value: Supplier['balance']) {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) ? `¥${numberValue.toFixed(2)}` : '-'
-}
-
 function formatTime(value?: string) {
-  if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return formatDateTime(value)
 }
 
 async function loadMonitor(options: { silent?: boolean } = {}) {

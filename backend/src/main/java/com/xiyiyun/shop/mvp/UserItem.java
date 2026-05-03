@@ -12,6 +12,13 @@ public record UserItem(
     Long groupId,
     String groupName,
     BigDecimal balance,
+    BigDecimal deposit,
     String status,
-    OffsetDateTime createdAt
+    OffsetDateTime createdAt,
+    OffsetDateTime lastLoginAt,
+    String realNameType,
+    String realName,
+    String subjectName,
+    String certificateNo,
+    String verificationStatus
 ) {}

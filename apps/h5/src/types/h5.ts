@@ -19,8 +19,27 @@ export interface GoodsCard {
   categoryId?: string
   cover: string
   requireRechargeAccount: boolean
+  accountTypes: string[]
   availablePlatforms?: string[]
   forbiddenPlatforms?: string[]
+}
+
+export interface RechargeField {
+  id: string
+  code: string
+  label: string
+  placeholder: string
+  helpText: string
+  inputType: string
+  required: boolean
+  sort: number
+  enabled: boolean
+}
+
+export interface H5SystemSetting {
+  registrationEnabled: boolean
+  registrationType: string
+  defaultUserGroupId?: string
 }
 
 export interface H5Order {

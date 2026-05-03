@@ -9,5 +9,7 @@ public record UserGroupItem(
     boolean defaultGroup,
     int userCount,
     String status,
+    boolean orderEnabled,
+    boolean realNameRequiredForOrder,
     List<GroupRuleItem> rules
 ) {}

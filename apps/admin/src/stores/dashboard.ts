@@ -1,9 +1,11 @@
 import { defineStore } from 'pinia'
-import { fetchOrders, fetchSuppliers } from '../api/admin'
+import { fetchOrders } from '../api/orders'
+import { fetchSuppliers } from '../api/suppliers'
 import type { Order, Supplier } from '../types/operations'
+import { formatMoney, formatOrderStatus } from '../utils/formatters'
 
 function money(value: number) {
-  return `¥${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+  return formatMoney(value)
 }
 
 function numberValue(value: unknown) {
@@ -47,19 +49,10 @@ export const useDashboardStore = defineStore('dashboard', {
       ]
     },
     recentOrders(state) {
-      const statusLabel: Record<string, string> = {
-        UNPAID: '待支付',
-        PROCURING: '采购中',
-        WAITING_MANUAL: '待人工',
-        DELIVERED: '已发货',
-        FAILED: '失败',
-        REFUNDED: '已退款',
-        CANCELLED: '已取消'
-      }
       return state.orders.slice(0, 5).map((order) => ({
         orderNo: order.orderNo,
         goods: order.goodsName || '-',
-        status: statusLabel[order.status] ?? order.status,
+        status: formatOrderStatus(order.status),
         amount: money(numberValue(order.amount))
       }))
     },

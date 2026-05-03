@@ -15,6 +15,13 @@ These rules apply to the whole `xiyiyun` project unless the user explicitly over
 - After finishing frontend changes, stop and wait for the user's visual or functional confirmation.
 - Do not start corresponding backend work until the user confirms that the frontend is acceptable.
 
+## Frontend UI Consistency
+
+- All dialogs, modals, popovers that behave like dialogs, and drawer-style overlays must use the project's unified dark glass UI style.
+- This rule applies to every page and every future feature, not only to the category management dialogs.
+- Any new or modified `el-dialog` or equivalent overlay must reuse the unified dialog class/style system instead of falling back to the default Element Plus white dialog.
+- When subagents deliver frontend work, the main agent must explicitly review dialog and overlay styling consistency before reporting the task as complete.
+
 ## Browser Usage
 
 - Do not use the in-app browser for inspection or verification unless the user explicitly asks for browser checking, preview, or testing.

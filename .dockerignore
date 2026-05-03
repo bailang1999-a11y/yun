@@ -1,9 +1,12 @@
-.git
-.DS_Store
-node_modules
 **/node_modules
 **/dist
+**/target
 **/.next
-backend/target
+**/.DS_Store
+**/*.log
+.git
+.env
+.env.*
+!.env.example
+!.env.feiniu.example
 artifacts
-*.log

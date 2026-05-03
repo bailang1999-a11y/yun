@@ -4,13 +4,16 @@ import { ElMessage } from 'element-plus'
 import { RefreshCw } from 'lucide-vue-next'
 import {
   fetchMemberApiCredentials,
-  fetchOpenApiLogs,
+  fetchOpenApiLogs
+} from '../api/users'
+import {
   fetchOperationLogs,
   fetchPayments,
   fetchRefunds,
   fetchSmsLogs
-} from '../api/admin'
+} from '../api/operations'
 import type { MemberApiCredential, OpenApiLog, OperationLog, PaymentRecord, RefundRecord, SmsLog } from '../types/operations'
+import { formatMoney } from '../utils/formatters'
 
 const loading = ref(false)
 const activeTab = ref('payments')
@@ -47,10 +50,6 @@ async function loadAll() {
   }
 }
 
-function formatMoney(value: number | string) {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) ? `¥${numberValue.toFixed(2)}` : '-'
-}
 </script>
 
 <template>

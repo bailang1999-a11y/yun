@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Save, Trash2 } from 'lucide-vue-next'
-import { fetchUserGroups } from '../api/admin'
+import { fetchUserGroups } from '../api/users'
 import type { UserGroup } from '../types/operations'
 import { loadPriceTemplates, savePriceTemplates, type PriceGroupRate, type PriceTemplate } from '../utils/priceTemplates'
 

@@ -3,10 +3,10 @@ services:
     image: mysql:8.0
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-xiyiyun_root}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-xiyiyun}
-      MYSQL_USER: ${MYSQL_USER:-xiyiyun}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-xiyiyun_pwd}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set mysql root password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?set mysql database}
+      MYSQL_USER: ${MYSQL_USER:?set mysql user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set mysql password}
       TZ: Asia/Shanghai
     volumes:
       - mysql-data:/var/lib/mysql
@@ -27,14 +27,31 @@ services:
       context: ./backend
     restart: unless-stopped
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-xiyiyun}?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
-      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-xiyiyun}
-      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:-xiyiyun_pwd}
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:?set mysql database}?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:?set mysql user}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?set mysql password}
       SPRING_DATA_REDIS_HOST: redis
       SPRING_PROFILES_ACTIVE: prod
+      XIYIYUN_ADMIN_USERNAME: ${XIYIYUN_ADMIN_USERNAME:?set admin username}
+      XIYIYUN_ADMIN_PASSWORD_BCRYPT: ${XIYIYUN_ADMIN_PASSWORD_BCRYPT:?set admin bcrypt password hash}
+      XIYIYUN_ADMIN_NICKNAME: ${XIYIYUN_ADMIN_NICKNAME:-运营管理员}
+      XIYIYUN_PAYMENT_CALLBACK_SECRET: ${XIYIYUN_PAYMENT_CALLBACK_SECRET:?set payment callback secret}
+      XIYIYUN_CARD_ENCRYPTION_SECRET: ${XIYIYUN_CARD_ENCRYPTION_SECRET:?set card encryption secret}
     depends_on:
       - mysql
       - redis
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      - backend
 
   h5:
     build:
@@ -44,7 +61,7 @@ services:
         VITE_API_BASE_URL: /api
     restart: unless-stopped
     ports:
-      - "${H5_PORT:-80}:80"
+      - "${H5_PORT:-18080}:80"
     depends_on:
       - backend
 

@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Eye, Plus, RefreshCw, Upload } from 'lucide-vue-next'
-import { createCardKind, fetchCardKindCards, fetchCardKinds, importCardKindCards } from '../api/admin'
+import { createCardKind, fetchCardKindCards, fetchCardKinds, importCardKindCards } from '../api/cardKinds'
 import type { CardKind, CardKindCreatePayload, CardKindType, GoodsCard } from '../types/operations'
 
 const cardTypeOptions: Array<{ label: string; value: CardKindType }> = [
@@ -26,12 +26,11 @@ const form = reactive<CardKindCreatePayload>({
 })
 
 const totalCost = computed(() => cardKinds.value.reduce((sum, item) => sum + Number(item.cost || 0), 0))
+const importLines = computed(() => cardText.value.split(/\r?\n/).map((line) => line.trim()))
+const filledImportLines = computed(() => importLines.value.filter(Boolean))
 const parsedCards = computed(() => {
   const seen = new Set<string>()
-  return cardText.value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
+  return filledImportLines.value
     .filter((line) => {
       if (seen.has(line)) return false
       seen.add(line)
@@ -39,9 +38,10 @@ const parsedCards = computed(() => {
     })
 })
 const ignoredImportCount = computed(() => {
-  const filledLines = cardText.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  return Math.max(filledLines.length - parsedCards.value.length, 0)
+  return Math.max(filledImportLines.value.length - parsedCards.value.length, 0)
 })
+const emptyImportCount = computed(() => Math.max(importLines.value.length - filledImportLines.value.length, 0))
+const canSubmitCards = computed(() => Boolean(selectedKind.value) && parsedCards.value.length > 0 && !cardLoading.value)
 
 onMounted(loadCardKinds)
 
@@ -142,17 +142,20 @@ function openImport(row: CardKind) {
 async function submitCards() {
   if (!selectedKind.value) return
 
-  if (!parsedCards.value.length) {
+  const cardsToImport = parsedCards.value
+  if (!cardsToImport.length) {
     ElMessage.warning('请填写卡密，每行一条')
     return
   }
 
   cardLoading.value = true
   try {
-    const result = await importCardKindCards(selectedKind.value.id, parsedCards.value)
-    const successCount = result.successCount ?? parsedCards.value.length
-    ElMessage.success(`已导入 ${successCount} 条卡密`)
+    const result = await importCardKindCards(selectedKind.value.id, cardsToImport)
+    const successCount = result.successCount ?? cardsToImport.length
+    const duplicateCount = result.duplicateCount ?? 0
+    ElMessage.success(`已导入 ${successCount} 条卡密${duplicateCount ? `，后端过滤重复 ${duplicateCount} 条` : ''}`)
     importVisible.value = false
+    cardText.value = ''
     await loadCardKinds()
   } catch {
     ElMessage.error('卡密导入失败')
@@ -194,7 +197,7 @@ async function openCards(row: CardKind) {
         </el-form-item>
         <el-form-item label="卡种类型">
           <el-radio-group v-model="form.type">
-            <el-radio-button v-for="item in cardTypeOptions" :key="item.value" :label="item.value">
+            <el-radio-button v-for="item in cardTypeOptions" :key="item.value" :value="item.value">
               {{ item.label }}
             </el-radio-button>
           </el-radio-group>
@@ -254,22 +257,46 @@ async function openCards(row: CardKind) {
       </el-table>
     </article>
 
-    <el-dialog v-model="importVisible" title="添加卡密" width="560px">
-      <p class="dialog-hint">{{ selectedKind?.name }}，每行一条卡密，提交前会自动去除空行和重复行。</p>
-      <el-input
-        v-model="cardText"
-        type="textarea"
-        :rows="12"
-        placeholder="VIP-7D-ALPHA----8F2K&#10;VIP-7D-BRAVO----6P9Q"
-      />
+    <el-dialog v-model="importVisible" width="620px" destroy-on-close class="xiyiyun-glass-dialog warehouse-dialog">
+      <template #header>
+        <div class="dialog-title-block">
+          <span>添加卡密</span>
+          <small>{{ selectedKind?.name || '当前卡种' }}</small>
+        </div>
+      </template>
+
+      <div class="import-dialog-body">
+        <div class="import-brief">
+          <div>
+            <strong>逐行粘贴卡密</strong>
+            <span>提交前会自动去除空行和本次重复行，后端也会再次校验。</span>
+          </div>
+          <el-tag effect="dark" type="success">{{ typeLabel(selectedKind?.type || '') }}</el-tag>
+        </div>
+
+        <el-input
+          v-model="cardText"
+          class="card-import-input"
+          type="textarea"
+          :rows="13"
+          resize="none"
+          placeholder="VIP-7D-ALPHA----8F2K&#10;VIP-7D-BRAVO----6P9Q"
+        />
+
+        <div class="import-stats" aria-live="polite">
+          <span class="stat-item strong">有效 {{ parsedCards.length }} 条</span>
+          <span class="stat-item">重复 {{ ignoredImportCount }} 条</span>
+          <span class="stat-item">空行 {{ emptyImportCount }} 条</span>
+        </div>
+      </div>
+
       <template #footer>
-        <span class="dialog-count">有效 {{ parsedCards.length }} 条，重复 {{ ignoredImportCount }} 条</span>
         <el-button @click="importVisible = false">取消</el-button>
-        <el-button type="primary" :loading="cardLoading" @click="submitCards">提交导入</el-button>
+        <el-button type="primary" :disabled="!canSubmitCards" :loading="cardLoading" @click="submitCards">提交导入</el-button>
       </template>
     </el-dialog>
 
-    <el-dialog v-model="cardsVisible" :title="`${selectedKind?.name || '卡种'}卡密列表`" width="840px">
+    <el-dialog v-model="cardsVisible" :title="`${selectedKind?.name || '卡种'}卡密列表`" width="840px" class="xiyiyun-glass-dialog warehouse-dialog">
       <el-table v-loading="cardLoading" :data="cards" height="420" style="width: 100%">
         <el-table-column prop="id" label="ID" width="90" />
         <el-table-column label="卡密" min-width="260" show-overflow-tooltip>
@@ -342,14 +369,155 @@ async function openCards(row: CardKind) {
   gap: 8px;
 }
 
-.dialog-hint {
-  margin: 0 0 12px;
+.dialog-title-block {
+  display: grid;
+  gap: 4px;
+}
+
+.dialog-title-block span {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.dialog-title-block small {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+}
+
+.import-dialog-body {
+  display: grid;
+  gap: 14px;
+}
+
+.import-brief {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.import-brief div {
+  display: grid;
+  gap: 4px;
+}
+
+.import-brief strong {
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 14px;
+}
+
+.import-brief span {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+}
+
+.card-import-input :deep(.el-textarea__inner) {
+  min-height: 260px;
+  border-radius: 16px;
+  color: rgba(255, 255, 255, 0.9) !important;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    rgba(5, 10, 17, 0.58) !important;
+  background-size: 100% 21px, auto;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.card-import-input :deep(.el-textarea__inner:focus) {
+  border-color: rgba(0, 255, 195, 0.36);
+  box-shadow: 0 0 0 2px rgba(0, 255, 195, 0.08) !important;
+}
+
+.card-import-input :deep(.el-textarea__inner::placeholder) {
+  color: rgba(255, 255, 255, 0.32);
+}
+
+.import-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stat-item {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 0.5px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.stat-item.strong {
+  color: #071410;
+  border-color: rgba(0, 255, 195, 0.72);
+  background: #00ffc3;
+  font-weight: 700;
+}
+
+:global(.warehouse-dialog) {
+  --el-dialog-bg-color: rgba(8, 17, 31, 0.9);
+  overflow: hidden;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  border-radius: 20px;
+  color: rgba(255, 255, 255, 0.84);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(0, 255, 195, 0.14), transparent 34%),
+    radial-gradient(circle at 90% 0%, rgba(88, 166, 255, 0.16), transparent 30%),
+    linear-gradient(145deg, rgba(14, 22, 32, 0.96), rgba(5, 9, 14, 0.96)) !important;
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
+}
+
+:global(.warehouse-dialog .el-dialog__header) {
+  min-height: 58px;
+  padding: 16px 20px 10px;
+  margin: 0;
+}
+
+:global(.warehouse-dialog .el-dialog__title) {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+:global(.warehouse-dialog .el-dialog__headerbtn) {
+  top: 12px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+}
+
+:global(.warehouse-dialog .el-dialog__headerbtn:hover) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+:global(.warehouse-dialog .el-dialog__close) {
   color: rgba(255, 255, 255, 0.62);
 }
 
-.dialog-count {
-  float: left;
-  color: rgba(255, 255, 255, 0.62);
-  line-height: 32px;
+:global(.warehouse-dialog .el-dialog__body) {
+  padding: 8px 20px 16px;
+  background: transparent;
+}
+
+:global(.warehouse-dialog .el-dialog__footer) {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px 18px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
 }
 </style>

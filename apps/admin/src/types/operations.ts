@@ -150,6 +150,31 @@ export interface SupplierCreatePayload {
   remark?: string
 }
 
+export interface RechargeField {
+  id: number | string
+  code: string
+  label: string
+  placeholder: string
+  helpText: string
+  inputType: string
+  required: boolean
+  sort: number
+  enabled: boolean
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface RechargeFieldPayload {
+  code: string
+  label: string
+  placeholder?: string
+  helpText?: string
+  inputType: string
+  required: boolean
+  sort: number
+  enabled: boolean
+}
+
 export interface RemoteGoodsSyncPayload {
   page: number
   limit: number
@@ -175,6 +200,46 @@ export interface RemoteGoodsSyncResult {
   goods: RemoteGoods[]
 }
 
+export interface SourceCloneConfig {
+  supplierGoodsId: string
+  name: string
+  categoryId?: number | string
+  price: number
+  originalPrice?: number
+  stock: number
+  status: string
+  coverUrl?: string
+  description?: string
+  accountTypes: string[]
+  requireRechargeAccount: boolean
+  priority: number
+  timeoutSeconds: number
+}
+
+export interface SourceClonePayload {
+  supplierGoodsIds?: string[]
+  items?: SourceCloneConfig[]
+  categoryId?: number | string
+  priority?: number
+  timeoutSeconds?: number
+}
+
+export interface SourceCloneItem {
+  supplierGoodsId: string
+  supplierGoodsName: string
+  status: string
+  goodsId?: number | string
+  channelId?: number | string
+  message: string
+}
+
+export interface SourceCloneResult {
+  createdCount: number
+  skippedCount: number
+  failedCount: number
+  items: SourceCloneItem[]
+}
+
 export interface GoodsChannel {
   id: number | string
   goodsId: number | string
@@ -193,6 +258,43 @@ export interface GoodsChannelCreatePayload {
   priority: number
   timeoutSeconds: number
   status: string
+}
+
+export interface ProductMonitorItem {
+  channelId: number | string
+  goodsId: number | string
+  goodsName: string
+  supplierId: number | string
+  supplierName: string
+  supplierGoodsId: string
+  primaryChannel: boolean
+  status: string
+  lastScanAt?: string
+  nextScanAt?: string
+  lastResult: string
+  lastMessage: string
+  scanCount: number
+  changeCount: number
+}
+
+export interface ProductMonitorLog {
+  id: number | string
+  channelId: number | string
+  goodsId: number | string
+  goodsName: string
+  supplierId: number | string
+  supplierName: string
+  supplierGoodsId: string
+  result: string
+  message: string
+  changes: string[]
+  scannedAt?: string
+  nextScanAt?: string
+}
+
+export interface ProductMonitorOverview {
+  items: ProductMonitorItem[]
+  logs: ProductMonitorLog[]
 }
 
 export interface CardImportItem {
@@ -245,6 +347,7 @@ export interface Order {
   id?: number | string
   orderNo: string
   userId?: number | string
+  buyerNickname?: string
   buyerAccount?: string
   goodsId?: number | string
   goodsName?: string
@@ -255,9 +358,17 @@ export interface Order {
   status: string
   paymentNo?: string
   payMethod?: string
+  orderSource?: string
   deliveryType?: string
   platform?: string
   rechargeAccount?: string
+  orderIp?: string
+  buyerContact?: string
+  buyerMobile?: string
+  buyerEmail?: string
+  supplierName?: string
+  supplierGoodsId?: string
+  supplierGoodsName?: string
   buyerRemark?: string
   requestId?: string
   deliveryItems?: string[]
@@ -279,6 +390,12 @@ export interface ChannelAttempt {
   supplierId?: number | string
   supplierName: string
   supplierGoodsId: string
+  supplierGoodsName?: string
+  supplierPrice?: number | string
+  upstreamStatus?: string
+  callbackStatus?: string
+  callbackMessage?: string
+  rawResponse?: string
   priority: number
   status: string
   message: string
@@ -304,6 +421,8 @@ export interface UserGroup {
   defaultGroup?: boolean
   userCount?: number
   status?: string
+  orderEnabled?: boolean
+  realNameRequiredForOrder?: boolean
   rules: GroupRule[]
 }
 
@@ -312,6 +431,8 @@ export interface UserGroupCreatePayload {
   description?: string
   defaultGroup?: boolean
   status?: string
+  orderEnabled?: boolean
+  realNameRequiredForOrder?: boolean
 }
 
 export interface UserAccount {
@@ -323,8 +444,22 @@ export interface UserAccount {
   groupId?: number | string
   groupName?: string
   balance?: number | string
+  deposit?: number | string
   status?: string
   createdAt?: string
+  lastLoginAt?: string
+  realNameType?: string
+  realName?: string
+  subjectName?: string
+  certificateNo?: string
+  verificationStatus?: string
+}
+
+export interface UserFundAdjustPayload {
+  accountType: 'balance' | 'deposit'
+  direction: 'increase' | 'decrease'
+  amount: number
+  remark?: string
 }
 
 export interface GroupRulePatchPayload {
@@ -340,6 +475,7 @@ export interface AdminProfile {
   id: number | string
   username: string
   nickname: string
+  balance?: number | string
   permissions: string[]
 }
 
@@ -352,6 +488,10 @@ export interface SystemSetting {
   siteName: string
   logoUrl?: string
   customerService?: string
+  companyName?: string
+  icpRecordNo?: string
+  policeRecordNo?: string
+  disclaimer?: string
   paymentMode: string
   autoRefundEnabled: boolean
   smsProvider: string
@@ -359,6 +499,9 @@ export interface SystemSetting {
   upstreamSyncSeconds: number
   autoShelfEnabled: boolean
   autoPriceEnabled: boolean
+  registrationEnabled: boolean
+  registrationType: string
+  defaultUserGroupId?: number | string
   notificationReceivers: Record<string, string>
 }
 
@@ -417,6 +560,15 @@ export interface MemberApiCredential {
   dailyLimit: number
   createdAt?: string
   lastUsedAt?: string
+}
+
+export interface MemberApiCredentialPayload {
+  enabled: boolean
+  appKey: string
+  appSecret?: string
+  resetSecret?: boolean
+  ipWhitelist: string[]
+  dailyLimit: number
 }
 
 export interface OpenApiLog {

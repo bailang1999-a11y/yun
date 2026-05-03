@@ -25,6 +25,16 @@ public class H5MvpController {
         return ApiResponse.ok(repository.listCategories());
     }
 
+    @GetMapping("/recharge-fields")
+    public ApiResponse<List<RechargeFieldItem>> rechargeFields() {
+        return ApiResponse.ok(repository.listRechargeFields(true));
+    }
+
+    @GetMapping("/settings")
+    public ApiResponse<SystemSettingItem> settings() {
+        return ApiResponse.ok(repository.systemSetting());
+    }
+
     @PostMapping("/auth/login")
     public ApiResponse<AuthSession<UserItem>> login(@RequestBody LoginRequest request) {
         try {

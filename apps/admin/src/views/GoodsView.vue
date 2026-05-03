@@ -7,15 +7,15 @@ import {
   createGoods,
   createGoodsChannel,
   deleteGoodsChannel,
-  fetchCardKinds,
-  fetchCategories,
   fetchGoods,
   fetchGoodsCards,
   fetchGoodsChannels,
-  fetchSuppliers,
   importGoodsCards,
   updateGoods
-} from '../api/admin'
+} from '../api/goods'
+import { fetchCardKinds } from '../api/cardKinds'
+import { fetchCategories, fetchRechargeFields } from '../api/catalog'
+import { fetchSuppliers } from '../api/suppliers'
 import type {
   CardImportItem,
   CardKind,
@@ -26,9 +26,25 @@ import type {
   GoodsChannelCreatePayload,
   GoodsCreatePayload,
   GoodsDetailBlock,
+  RechargeField,
   Supplier
 } from '../types/operations'
 import CategoryManagerPanel from '../components/CategoryManagerPanel.vue'
+import GoodsBenefitSelector from '../components/GoodsBenefitSelector.vue'
+import GoodsPlatformSelector from '../components/GoodsPlatformSelector.vue'
+import GoodsPricingFields from '../components/GoodsPricingFields.vue'
+import { buildCategoryTree, flattenCategoryTree, normalizeLoadedCategories } from '../utils/categoryTree'
+import {
+  benefitDurationOptions,
+  deliveryOptions,
+  fallbackAccountTypeOptions,
+  goodsModules,
+  monitoringItems,
+  platformOptions,
+  statusOptions,
+  type GoodsModuleKey
+} from '../utils/goodsOptions'
+import { formatMoney } from '../utils/formatters'
 import { loadPriceTemplates } from '../utils/priceTemplates'
 
 const goods = ref<Goods[]>([])
@@ -37,6 +53,7 @@ const cardKinds = ref<CardKind[]>([])
 const channels = ref<GoodsChannel[]>([])
 const categories = ref<Category[]>([])
 const suppliers = ref<Supplier[]>([])
+const rechargeFields = ref<RechargeField[]>([])
 const loading = ref(false)
 const categoryLoading = ref(false)
 const cardKindLoading = ref(false)
@@ -54,44 +71,12 @@ const editingGoodsId = ref<Goods['id']>()
 const detailBlocks = ref<GoodsDetailBlock[]>([])
 const priceTemplates = ref(loadPriceTemplates())
 const editorStep = ref<'base' | 'detail'>('base')
-type GoodsModuleKey = 'base' | 'pricing' | 'media' | 'integration' | 'account'
 const activeGoodsModule = ref<GoodsModuleKey>('base')
 const goodsFilters = reactive({
   categoryId: '',
   platform: '',
   search: ''
 })
-
-const platformOptions = [
-  { label: '抖音', value: 'douyin' },
-  { label: '淘宝', value: 'taobao' },
-  { label: '拼多多', value: 'pdd' },
-  { label: '咸鱼', value: 'xianyu' },
-  { label: '小红书', value: 'xiaohongshu' },
-  { label: '私域', value: 'private' }
-]
-
-const statusOptions = [
-  { label: '上架', value: 'ON_SALE', type: 'success' },
-  { label: '下架', value: 'OFF_SALE', type: 'info' },
-  { label: '售罄', value: 'SOLD_OUT', type: 'warning' }
-]
-
-const deliveryOptions = [
-  { label: '卡密', value: 'CARD' },
-  { label: '代充', value: 'MANUAL' },
-  { label: '直充', value: 'DIRECT' }
-]
-
-const benefitDurationOptions = ['一天', '三天', '周卡', '半月', '月卡', '季卡', '半年', '一年']
-
-const accountTypeOptions = [
-  { label: '手机号', value: 'mobile' },
-  { label: 'QQ号', value: 'qq' },
-  { label: '微信号', value: 'wechat' },
-  { label: '邮箱', value: 'email' },
-  { label: '游戏 UID', value: 'game_uid' }
-]
 
 const form = reactive<GoodsCreatePayload>({
   categoryId: undefined,
@@ -106,7 +91,7 @@ const form = reactive<GoodsCreatePayload>({
   deliveryType: 'CARD',
   cardKindId: undefined,
   platform: 'GENERAL',
-  availablePlatforms: ['douyin', 'taobao', 'private'],
+  availablePlatforms: ['douyin', 'taobao'],
   forbiddenPlatforms: [],
   benefitDurations: [],
   integrations: [],
@@ -133,6 +118,15 @@ const channelForm = reactive<GoodsChannelCreatePayload>({
 const categoryOptions = computed(() => {
   const tree = buildCategoryTree(categories.value)
   return flattenCategoryTree(tree)
+})
+
+const accountTypeOptions = computed(() => {
+  const enabledFields = rechargeFields.value
+    .filter((item) => item.enabled)
+    .sort((left, right) => Number(left.sort) - Number(right.sort))
+    .map((item) => ({ label: item.label, value: item.code }))
+
+  return enabledFields.length ? enabledFields : fallbackAccountTypeOptions
 })
 
 const cardKindById = computed(() => {
@@ -202,14 +196,6 @@ const filteredGoods = computed(() =>
 const formTitle = computed(() => (editingGoodsId.value ? '编辑商品' : '新增商品'))
 const formSubtitle = computed(() => (editingGoodsId.value ? '更新商品资料与销售配置' : '卡密/直充/代充商品资料'))
 const enabledPriceTemplates = computed(() => priceTemplates.value.filter((item) => item.enabled))
-const monitoringItems = ['价格', '库存', '商品状态', '上游标题']
-const goodsModules: { key: GoodsModuleKey; title: string; desc: string }[] = [
-  { key: 'base', title: '基础资料', desc: '类型、分类、名称、权益' },
-  { key: 'pricing', title: '价格库存', desc: '模板、售价、库存、状态' },
-  { key: 'media', title: '销售展示', desc: '主图、可售平台、禁用说明' },
-  { key: 'integration', title: '对接监控', desc: '上游商品、轮询、监听范围' },
-  { key: 'account', title: '账号规则', desc: '充值账号与补充约束' }
-]
 const activeModuleMeta = computed(() => goodsModules.find((item) => item.key === activeGoodsModule.value) || goodsModules[0])
 
 function fileToDataUrl(file: UploadRawFile) {
@@ -308,66 +294,8 @@ function refreshIntegration(index: number) {
   ElMessage.success('已刷新对接信息')
 }
 
-function buildCategoryTree(items: Category[]) {
-  const map = new Map<string, Category>()
-  const roots: Category[] = []
-
-  items.forEach((item) => {
-    map.set(String(item.id), { ...item, children: [] })
-  })
-
-  map.forEach((item) => {
-    const parentId = item.parentId ? String(item.parentId) : ''
-    const parent = parentId ? map.get(parentId) : undefined
-    item.level = parent ? (parent.level || 1) + 1 : 1
-    if (parent) parent.children?.push(item)
-    else roots.push(item)
-  })
-
-  const sortNode = (nodes: Category[]) => {
-    nodes.sort((a, b) => Number(a.sort || 0) - Number(b.sort || 0))
-    nodes.forEach((node) => sortNode(node.children || []))
-  }
-  sortNode(roots)
-  return roots
-}
-
-function flattenCategoryTree(nodes: Category[], result: Category[] = []) {
-  nodes.forEach((node) => {
-    result.push(node)
-    flattenCategoryTree(node.children || [], result)
-  })
-  return result
-}
-
-function normalizeCategories(items: Category[], parentId?: Category['id'], result: Category[] = []) {
-  items.forEach((item) => {
-    const normalizedParentId = item.parentId ?? parentId
-    const children = item.children || []
-
-    result.push({
-      ...item,
-      parentId: normalizedParentId,
-      children: []
-    })
-    normalizeCategories(children, item.id, result)
-  })
-
-  return result
-}
-
 function handleCategoriesLoaded(loadedCategories: Category[]) {
-  categories.value = normalizeCategories(loadedCategories || [])
-}
-
-function formatMoney(value: Goods['price']) {
-  const numberValue = Number(value)
-
-  if (Number.isNaN(numberValue)) {
-    return String(value ?? '-')
-  }
-
-  return `¥${numberValue.toFixed(2)}`
+  categories.value = normalizeLoadedCategories(loadedCategories || [])
 }
 
 function stockText(row: Goods) {
@@ -430,7 +358,7 @@ function resetForm() {
   form.deliveryType = 'CARD'
   form.cardKindId = undefined
   form.platform = 'GENERAL'
-  form.availablePlatforms = ['douyin', 'taobao', 'private']
+  form.availablePlatforms = ['douyin', 'taobao']
   form.forbiddenPlatforms = []
   form.benefitDurations = []
   form.integrations = []
@@ -540,6 +468,14 @@ async function loadCardKinds() {
   }
 }
 
+async function loadRechargeFields() {
+  try {
+    rechargeFields.value = await fetchRechargeFields({ enabled: true })
+  } catch {
+    rechargeFields.value = []
+  }
+}
+
 async function loadSuppliers() {
   try {
     suppliers.value = await fetchSuppliers()
@@ -559,6 +495,20 @@ async function submitGoods() {
   if (!form.categoryId) {
     ElMessage.warning('请选择商品分类')
     return
+  }
+  if (!form.availablePlatforms?.length) {
+    ElMessage.warning('请选择可售平台，或选择无限制')
+    return
+  }
+  if (form.deliveryType !== 'CARD') {
+    form.requireRechargeAccount = true
+    if (!form.accountTypes?.length) {
+      ElMessage.warning('请选择充值字段')
+      return
+    }
+  } else {
+    form.requireRechargeAccount = false
+    form.accountTypes = []
   }
 
   saving.value = true
@@ -713,6 +663,7 @@ async function removeChannel(row: GoodsChannel) {
 onMounted(() => {
   void loadCategories()
   void loadCardKinds()
+  void loadRechargeFields()
   void loadGoods()
   void loadSuppliers()
 })
@@ -813,7 +764,7 @@ onMounted(() => {
     </article>
   </section>
 
-  <el-dialog v-model="goodsEditorVisible" width="min(1180px, calc(100vw - 96px))" class="goods-editor-dialog" :show-close="false">
+  <el-dialog v-model="goodsEditorVisible" width="min(1180px, calc(100vw - 96px))" class="xiyiyun-glass-dialog goods-editor-dialog" :show-close="false">
     <template #header>
       <div class="editor-header">
         <div>
@@ -850,84 +801,78 @@ onMounted(() => {
                 <span>{{ module.desc }}</span>
               </button>
             </div>
-            <section v-if="activeGoodsModule === 'base'" class="form-section module-panel">
-              <h3>基础资料</h3>
-              <div class="form-grid">
-                <el-form-item label="商品分类">
-                  <el-select v-model="form.categoryId" :loading="categoryLoading" filterable placeholder="选择五级分类">
-                    <el-option
-                      v-for="item in categoryOptions"
-                      :key="item.id"
-                      :disabled="item.enabled === false"
-                      :label="`${'· '.repeat(Math.max((item.level || 1) - 1, 0))}${item.name}`"
-                      :value="item.id"
-                    />
-                  </el-select>
+            <section v-if="activeGoodsModule === 'base'" class="form-section module-panel merged-basic-panel">
+              <div class="merged-section">
+                <h3>基础资料</h3>
+                <div class="form-grid">
+                  <el-form-item label="商品分类">
+                    <el-select v-model="form.categoryId" :loading="categoryLoading" filterable placeholder="选择五级分类">
+                      <el-option
+                        v-for="item in categoryOptions"
+                        :key="item.id"
+                        :disabled="item.enabled === false"
+                        :label="`${'· '.repeat(Math.max((item.level || 1) - 1, 0))}${item.name}`"
+                        :value="item.id"
+                      />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item label="发货类型">
+                    <el-select v-model="form.deliveryType">
+                      <el-option v-for="item in deliveryOptions" :key="item.value" :label="item.label" :value="item.value" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item v-if="form.deliveryType === 'CARD'" label="卡种货源">
+                    <el-select v-model="form.cardKindId" :loading="cardKindLoading" clearable filterable placeholder="选择卡密仓库卡种">
+                      <el-option
+                        v-for="item in cardKinds"
+                        :key="item.id"
+                        :label="`${item.name} · 可用 ${cardKindUnused(item)} / 总 ${cardKindTotal(item)}`"
+                        :value="item.id"
+                      />
+                    </el-select>
+                  </el-form-item>
+                </div>
+                <el-form-item label="商品名称">
+                  <el-input v-model="form.name" placeholder="例如：视频会员月卡" />
                 </el-form-item>
-                <el-form-item label="发货类型">
-                  <el-select v-model="form.deliveryType">
-                    <el-option v-for="item in deliveryOptions" :key="item.value" :label="item.label" :value="item.value" />
-                  </el-select>
+                <el-form-item label="商品副标题">
+                  <el-input v-model="form.subTitle" placeholder="例如：自动发卡，秒级到账" />
                 </el-form-item>
-                <el-form-item v-if="form.deliveryType === 'CARD'" label="卡种货源">
-                  <el-select v-model="form.cardKindId" :loading="cardKindLoading" clearable filterable placeholder="选择卡密仓库卡种">
-                    <el-option
-                      v-for="item in cardKinds"
-                      :key="item.id"
-                      :label="`${item.name} · 可用 ${cardKindUnused(item)} / 总 ${cardKindTotal(item)}`"
-                      :value="item.id"
-                    />
-                  </el-select>
+                <el-form-item label="权益时间">
+                  <GoodsBenefitSelector v-model="form.benefitDurations" :options="benefitDurationOptions" />
                 </el-form-item>
               </div>
-              <el-form-item label="商品名称">
-                <el-input v-model="form.name" placeholder="例如：视频会员月卡" />
-              </el-form-item>
-              <el-form-item label="商品副标题">
-                <el-input v-model="form.subTitle" placeholder="例如：自动发卡，秒级到账" />
-              </el-form-item>
-              <el-form-item label="权益时间">
-                <el-checkbox-group v-model="form.benefitDurations" class="benefit-options">
-                  <el-checkbox v-for="item in benefitDurationOptions" :key="item" :value="item">{{ item }}</el-checkbox>
-                </el-checkbox-group>
-              </el-form-item>
-            </section>
 
-            <section v-else-if="activeGoodsModule === 'pricing'" class="form-section module-panel">
-              <h3>价格与库存</h3>
-              <div class="form-grid three">
-                <el-form-item label="价格模板">
-                  <el-select v-model="form.priceTemplateId" placeholder="选择价格模板" @change="applyPriceTemplate">
-                    <el-option
-                      v-for="item in enabledPriceTemplates"
-                      :key="item.id"
-                      :label="`${item.name} · ${item.groupRates?.length || 0} 个会员等级`"
-                      :value="item.id"
-                    />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="售价">
-                  <el-input-number v-model="form.price" :min="0" :precision="2" :step="1" controls-position="right" />
-                </el-form-item>
-                <el-form-item label="库存">
-                  <el-input-number v-model="form.stock" :min="0" :step="1" controls-position="right" />
-                </el-form-item>
-                <el-form-item label="状态">
-                  <el-select v-model="form.status">
-                    <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
-                  </el-select>
-                </el-form-item>
-                <el-form-item label="最大购买数量">
-                  <el-input-number v-model="form.maxBuy" :min="1" :step="1" controls-position="right" />
-                </el-form-item>
-                <el-form-item label="划线原价">
-                  <el-input-number v-model="form.originalPrice" :min="0" :precision="2" :step="1" controls-position="right" placeholder="选填" />
-                </el-form-item>
+              <div class="merged-section">
+                <h3>价格库存与充值字段</h3>
+                <GoodsPricingFields
+                  v-model:price-template-id="form.priceTemplateId"
+                  v-model:status="form.status"
+                  v-model:price="form.price"
+                  v-model:original-price="form.originalPrice"
+                  v-model:stock="form.stock"
+                  v-model:max-buy="form.maxBuy"
+                  v-model:account-types="form.accountTypes"
+                  :price-templates="enabledPriceTemplates"
+                  :status-options="statusOptions"
+                  :account-type-options="accountTypeOptions"
+                  :delivery-type="form.deliveryType"
+                  @apply-price-template="applyPriceTemplate"
+                />
+              </div>
+
+              <div class="merged-section">
+                <h3>销售平台</h3>
+                <GoodsPlatformSelector
+                  v-model:available-platforms="form.availablePlatforms"
+                  v-model:forbidden-platforms="form.forbiddenPlatforms"
+                  :options="platformOptions"
+                />
               </div>
             </section>
 
             <section v-else-if="activeGoodsModule === 'media'" class="form-section module-panel">
-              <h3>商品主图与销售平台</h3>
+              <h3>商品主图</h3>
               <div class="cover-uploader">
                 <el-upload :before-upload="handleCoverUpload" :show-file-list="false" accept="image/*">
                   <div class="upload-tile">
@@ -943,20 +888,6 @@ onMounted(() => {
                   <span>支持本地图片上传，保存为当前商品主图。建议 800x800 或 1:1。</span>
                 </div>
               </div>
-              <el-form-item label="可售平台">
-                <el-checkbox-group v-model="form.availablePlatforms" class="platform-checks">
-                  <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value">
-                    {{ item.label }}
-                  </el-checkbox>
-                </el-checkbox-group>
-              </el-form-item>
-              <el-form-item label="不支持平台说明">
-                <el-checkbox-group v-model="form.forbiddenPlatforms" class="platform-checks">
-                  <el-checkbox v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value">
-                    {{ item.label }}
-                  </el-checkbox>
-                </el-checkbox-group>
-              </el-form-item>
             </section>
 
             <section v-else-if="activeGoodsModule === 'integration'" class="form-section module-panel integration-panel">
@@ -1009,18 +940,6 @@ onMounted(() => {
               </div>
             </section>
 
-            <section v-else class="form-section module-panel">
-              <h3>账号与补充规则</h3>
-              <el-form-item v-if="form.deliveryType !== 'CARD'" label="充值账号要求">
-                <el-checkbox v-model="form.requireRechargeAccount">要求用户填写充值账号</el-checkbox>
-                <el-checkbox-group v-if="form.requireRechargeAccount" v-model="form.accountTypes" class="platform-checks account-checks">
-                  <el-checkbox v-for="item in accountTypeOptions" :key="item.value" :label="item.label" :value="item.value">
-                    {{ item.label }}
-                  </el-checkbox>
-                </el-checkbox-group>
-              </el-form-item>
-              <div v-else class="rule-empty">卡密商品无需充值账号。切换为直充或代充后，可在这里配置手机号、QQ、微信等账号字段。</div>
-            </section>
           </section>
 
           <aside class="module-aside">
@@ -1116,7 +1035,7 @@ onMounted(() => {
     </template>
   </el-dialog>
 
-  <el-dialog v-model="importVisible" title="导入卡密" width="560px">
+  <el-dialog v-model="importVisible" title="导入卡密" width="560px" class="xiyiyun-glass-dialog">
     <p class="dialog-hint">{{ selectedGoods?.name }}，每行一条：卡号,密码</p>
     <el-input v-model="cardText" type="textarea" :rows="12" placeholder="CARD001,PASS001&#10;CARD002,PASS002" />
     <template #footer>
@@ -1126,7 +1045,7 @@ onMounted(() => {
     </template>
   </el-dialog>
 
-  <el-dialog v-model="cardsVisible" title="卡密库存" width="760px">
+  <el-dialog v-model="cardsVisible" title="卡密库存" width="760px" class="xiyiyun-glass-dialog">
     <el-table v-loading="cardLoading" :data="cards" height="420" style="width: 100%">
       <el-table-column prop="id" label="ID" width="90" />
       <el-table-column prop="cardNo" label="卡号" min-width="180" show-overflow-tooltip />
@@ -1136,7 +1055,7 @@ onMounted(() => {
     </el-table>
   </el-dialog>
 
-  <el-dialog v-model="channelsVisible" title="直充渠道配置" width="920px">
+  <el-dialog v-model="channelsVisible" title="直充渠道配置" width="920px" class="xiyiyun-glass-dialog">
     <p class="dialog-hint">{{ selectedGoods?.name }}，按优先级从小到大尝试上游渠道。</p>
 
     <el-form :model="channelForm" label-position="top" class="channel-form">
@@ -1359,15 +1278,14 @@ onMounted(() => {
 
 .editor-shell {
   display: block;
-  height: min(720px, calc(100vh - 190px));
-  min-height: 560px;
-  overflow: hidden;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
 }
 
 .editor-main {
   min-width: 0;
   padding: 10px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .editor-steps {
@@ -1422,12 +1340,12 @@ onMounted(() => {
 }
 
 .module-workbench {
-  height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 214px;
   gap: 10px;
-  overflow: hidden;
+  align-items: start;
+  overflow: visible;
 }
 
 .module-subnav {
@@ -1480,15 +1398,31 @@ onMounted(() => {
 
 .module-stage,
 .module-aside {
-  overflow: auto;
+  overflow: visible;
 }
 
 .module-panel {
-  min-height: 100%;
+  min-height: 0;
 }
 
 .module-panel.form-section {
   min-width: 0;
+}
+
+.merged-basic-panel {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.merged-section {
+  padding-bottom: 10px;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.075);
+}
+
+.merged-section:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .module-panel :deep(.el-form-item) {
@@ -1511,6 +1445,7 @@ onMounted(() => {
 }
 
 .module-aside {
+  align-self: start;
   padding: 12px;
   border-radius: 16px;
   background: linear-gradient(180deg, rgba(0, 255, 195, 0.08), rgba(255, 255, 255, 0.035));
@@ -1745,6 +1680,12 @@ onMounted(() => {
   margin-top: 8px;
 }
 
+.recharge-field-control {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+}
+
 .platform-checks :deep(.el-checkbox) {
   height: 26px;
   margin-right: 0;
@@ -1784,8 +1725,7 @@ onMounted(() => {
 }
 
 .integration-list {
-  height: calc(100% - 68px);
-  max-height: none;
+  max-height: min(360px, calc(100vh - 410px));
   overflow: auto;
   padding-right: 4px;
 }

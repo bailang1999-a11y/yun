@@ -32,7 +32,8 @@ const fallbackGoods: GoodsCard[] = [
     category: '影音会员',
     categoryId: 'video-vip',
     cover: 'CARD',
-    requireRechargeAccount: false
+    requireRechargeAccount: false,
+    accountTypes: []
   },
   {
     id: '1002',
@@ -44,7 +45,8 @@ const fallbackGoods: GoodsCard[] = [
     category: '游戏点卡',
     categoryId: 'game-hot',
     cover: 'API',
-    requireRechargeAccount: true
+    requireRechargeAccount: true,
+    accountTypes: ['game_uid']
   },
   {
     id: '1003',
@@ -56,7 +58,8 @@ const fallbackGoods: GoodsCard[] = [
     category: '代充专区',
     categoryId: 'agent-manual',
     cover: 'MAN',
-    requireRechargeAccount: true
+    requireRechargeAccount: true,
+    accountTypes: ['email']
   }
 ]
 

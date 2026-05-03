@@ -1,15 +1,35 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
-import { Activity, BarChart3, ChevronDown, FileSearch, Package, PlugZap, Settings, ShoppingCart, Users } from 'lucide-vue-next'
+import {
+  Activity,
+  BarChart3,
+  ChevronDown,
+  FileSearch,
+  Package,
+  PackageCheck,
+  PlugZap,
+  ScanLine,
+  Settings,
+  ShoppingCart,
+  UserRound,
+  Users,
+  WalletCards
+} from 'lucide-vue-next'
+import { fetchAdminMe } from '../api/auth'
+import type { AdminProfile } from '../types/operations'
+import { formatMoney as formatAmount } from '../utils/formatters'
 
 const route = useRoute()
 const router = useRouter()
+const profile = ref<AdminProfile | null>(null)
 
 const navItems = [
   { icon: BarChart3, label: '仪表盘', name: 'dashboard' },
   { icon: PlugZap, label: '供应商管理', name: 'suppliers' },
+  { icon: PackageCheck, label: '货源对接', name: 'source-connect' },
   { icon: Activity, label: '上游监控', name: 'upstream-monitor' },
+  { icon: ScanLine, label: '商品监控', name: 'goods-monitor' },
   { icon: Users, label: '用户与权限', name: 'users' },
   { icon: Settings, label: '系统设置', name: 'settings' },
   { icon: FileSearch, label: '审计开放', name: 'audit' },
@@ -20,17 +40,50 @@ const goodsChildren = [
   { label: '商品分类', name: 'categories' },
   { label: '商品列表', name: 'goods' },
   { label: '卡密仓库', name: 'card-warehouse' },
+  { label: '充值字段管理', name: 'recharge-fields' },
   { label: '价格模板配置', name: 'goods-price-templates' }
 ]
 
 const currentTitle = computed(() => String(route.meta.title || '运营管理后台'))
 const isGoodsActive = computed(() => goodsChildren.some((item) => item.name === route.name))
+const displayName = computed(() => profile.value?.nickname || profile.value?.username || '运营管理员')
+const displayAccount = computed(() => profile.value?.username || 'admin')
+
+onMounted(async () => {
+  try {
+    profile.value = await fetchAdminMe()
+  } catch {
+    profile.value = null
+  }
+})
+
+function formatMoney(value?: number | string) {
+  return formatAmount(value ?? 0, { fallback: '¥0.00' })
+}
 </script>
 
 <template>
   <main class="admin-shell">
     <aside class="sidebar liquid-admin-panel">
       <div class="brand">喜易云</div>
+      <section class="account-card" aria-label="当前登录账号">
+        <div class="account-main">
+          <div class="account-avatar">
+            <UserRound :size="18" />
+          </div>
+          <div class="account-copy">
+            <strong>{{ displayName }}</strong>
+            <span>{{ displayAccount }}</span>
+          </div>
+        </div>
+        <div class="account-balance">
+          <span>账户余额</span>
+          <strong>
+            <WalletCards :size="14" />
+            {{ formatMoney(profile?.balance) }}
+          </strong>
+        </div>
+      </section>
       <div class="nav-group" :class="{ open: isGoodsActive }">
         <button type="button" class="group-trigger" :class="{ active: isGoodsActive }" @click="router.push({ name: 'goods' })">
           <Package :size="18" />
@@ -101,6 +154,110 @@ const isGoodsActive = computed(() => goodsChildren.some((item) => item.name === 
   font-weight: 800;
   color: #fff;
   text-shadow: 0 0 26px rgba(0, 255, 195, 0.24);
+}
+
+.account-card {
+  position: relative;
+  display: grid;
+  gap: 12px;
+  margin: 4px 0 14px;
+  padding: 12px;
+  overflow: hidden;
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(0, 255, 195, 0.13), rgba(46, 160, 245, 0.08)),
+    rgba(255, 255, 255, 0.04);
+  border: 0.5px solid rgba(0, 255, 195, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 12px 30px rgba(0, 0, 0, 0.12);
+}
+
+.account-card::after {
+  content: '';
+  position: absolute;
+  right: -24px;
+  top: -34px;
+  width: 88px;
+  height: 88px;
+  border-radius: 999px;
+  background: rgba(46, 160, 245, 0.12);
+  pointer-events: none;
+}
+
+.account-main {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.account-avatar {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: #bdf8dc;
+  border-radius: 14px;
+  background: rgba(0, 255, 195, 0.13);
+  border: 0.5px solid rgba(0, 255, 195, 0.24);
+  box-shadow: 0 0 18px rgba(0, 255, 195, 0.1);
+}
+
+.account-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.account-copy strong,
+.account-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-copy strong {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.account-copy span {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+}
+
+.account-balance {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: rgba(3, 7, 18, 0.18);
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.account-balance > span {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+}
+
+.account-balance strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: #d9f99d;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .sidebar button {

@@ -7,7 +7,7 @@
 - `apps/h5`: 用户购买端，Vue 3 + Vite + Vant
 - `apps/admin`: 运营后台，Vue 3 + Vite + Element Plus
 - `backend`: Spring Boot 单体后端骨架
-- `db`: MySQL 初始化脚本
+- `db`: MySQL 初始化脚本和增量迁移脚本
 - `docs`: 产品、架构、数据库、API 和路线图文档
 
 ## 本地开发
@@ -26,5 +26,6 @@ npm run dev:admin
 
 飞牛 Docker 部署说明见 [docs/FNOS_DEPLOYMENT.md](docs/FNOS_DEPLOYMENT.md)。默认端口：
 
-- 前台 H5：`18080`
+- Web 前台：`18080`
+- 旧版 H5：`18081`
 - 管理后台：`18088`

@@ -21,7 +21,15 @@ mybatis-plus:
     map-underscore-to-camel-case: true
 
 xiyiyun:
+  admin:
+    username: ${XIYIYUN_ADMIN_USERNAME:admin}
+    password-bcrypt: ${XIYIYUN_ADMIN_PASSWORD_BCRYPT:$2y$10$nj5upOsCRbbEPg1csaQlcOyosbleuZVG7BfL45uh81kG5FpDYWCIq}
+    nickname: ${XIYIYUN_ADMIN_NICKNAME:运营管理员}
   order:
     payment-timeout-minutes: 15
+  payment:
+    callback-secret: ${XIYIYUN_PAYMENT_CALLBACK_SECRET:xiyiyun_mock_payment_secret}
+  card:
+    encryption-secret: ${XIYIYUN_CARD_ENCRYPTION_SECRET:xiyiyun_dev_card_secret}
   delivery:
     auto-refund-on-card-empty: false

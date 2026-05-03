@@ -4,15 +4,18 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Edit3, KeyRound, PackageCheck, PlugZap, Plus, RefreshCw, ShieldCheck, Trash2, WalletCards, X } from 'lucide-vue-next'
 import {
   createGoodsChannel,
+  fetchGoods
+} from '../api/goods'
+import {
   createSupplier,
   deleteSupplier,
-  fetchGoods,
   fetchSuppliers,
   refreshSupplierBalance,
   syncSupplierGoods,
   updateSupplier
-} from '../api/admin'
+} from '../api/suppliers'
 import type { Goods, RemoteGoods, RemoteGoodsSyncResult, Supplier, SupplierCreatePayload } from '../types/operations'
+import { formatDateTime, formatMoney } from '../utils/formatters'
 
 const KASUSHOU_BASE_URL = 'https://你的卡速售域名'
 
@@ -87,16 +90,8 @@ watch(
   }
 )
 
-function formatMoney(value: Supplier['balance']) {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) ? `¥${numberValue.toFixed(2)}` : '-'
-}
-
 function formatTime(value?: string) {
-  if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return formatDateTime(value)
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -317,7 +312,8 @@ async function removeSupplier(row: Supplier) {
     await ElMessageBox.confirm(`确定删除供应商「${row.name}」吗？关联的直充渠道也会一并移除。`, '删除供应商', {
       confirmButtonText: '删除',
       cancelButtonText: '取消',
-      type: 'warning'
+      type: 'warning',
+      customClass: 'xiyiyun-glass-message-box'
     })
     await runOperation(row, 'delete')
   } catch {
@@ -478,7 +474,7 @@ async function removeSupplier(row: Supplier) {
       </el-table>
     </article>
 
-    <el-dialog v-model="syncDialogVisible" class="sync-result-dialog" width="980px" align-center>
+    <el-dialog v-model="syncDialogVisible" class="xiyiyun-glass-dialog sync-result-dialog" width="980px" align-center>
       <template #header>
         <div class="sync-dialog-title">
           <PackageCheck :size="18" />

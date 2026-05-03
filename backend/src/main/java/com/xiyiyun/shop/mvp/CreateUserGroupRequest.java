@@ -4,6 +4,8 @@ public record CreateUserGroupRequest(
     String name,
     String description,
     Boolean defaultGroup,
-    String status
+    String status,
+    Boolean orderEnabled,
+    Boolean realNameRequiredForOrder
 ) {
 }

@@ -3,6 +3,7 @@ package com.xiyiyun.shop.realtime;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiyiyun.shop.mvp.OrderItem;
+import com.xiyiyun.shop.mvp.ProductMonitorLogItem;
 import java.io.IOException;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,14 +29,37 @@ public class OrderRealtimeBroadcaster {
     }
 
     public void publish(OrderItem order) {
+        publishEvent(OrderRealtimeEvent.updated(order));
+    }
+
+    public void publishProductMonitorLog(ProductMonitorLogItem log) {
+        publishEvent(OrderRealtimeEvent.productMonitor(log));
+    }
+
+    private void publishEvent(OrderRealtimeEvent event) {
         String payload;
         try {
-            payload = objectMapper.writeValueAsString(OrderRealtimeEvent.updated(order));
+            payload = objectMapper.writeValueAsString(event);
         } catch (JsonProcessingException ex) {
             return;
         }
 
-        sessions.removeIf(session -> !session.isOpen() || !send(session, payload));
+        sessions.removeIf(session -> !session.isOpen() || (canReceive(session, event) && !send(session, payload)));
+    }
+
+    private boolean canReceive(WebSocketSession session, OrderRealtimeEvent event) {
+        Object role = session.getAttributes().get("role");
+        if ("admin".equals(role)) {
+            return true;
+        }
+        if (!"h5".equals(role)) {
+            return false;
+        }
+        if (!"ORDER_UPDATED".equals(event.type()) || event.order() == null) {
+            return false;
+        }
+        Object userId = session.getAttributes().get("userId");
+        return userId instanceof Long id && id.equals(event.order().userId());
     }
 
     private boolean send(WebSocketSession session, String payload) {

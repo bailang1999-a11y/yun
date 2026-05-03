@@ -2,20 +2,34 @@
 import { onMounted, ref } from 'vue'
 import { LoaderCircle, LogOut, UserRound } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { fetchH5Me, loginH5 } from '../api/h5'
+import { fetchH5Me, fetchH5Settings, loginH5 } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
-import type { UserProfile } from '../types/h5'
+import type { H5SystemSetting, UserProfile } from '../types/h5'
 
 const tokenKey = 'xiyiyun_h5_token'
 const account = ref('13800000001')
+const code = ref('')
 const loading = ref(false)
 const errorMessage = ref('')
 const profile = ref<UserProfile | null>(null)
+const setting = ref<H5SystemSetting>({
+  registrationEnabled: true,
+  registrationType: 'MOBILE'
+})
 
 onMounted(() => {
+  void loadSettings()
   const token = localStorage.getItem(tokenKey)
   if (token) void loadProfile(token)
 })
+
+async function loadSettings() {
+  try {
+    setting.value = await fetchH5Settings()
+  } catch {
+    setting.value = { registrationEnabled: true, registrationType: 'MOBILE' }
+  }
+}
 
 async function loadProfile(token: string) {
   loading.value = true
@@ -35,7 +49,7 @@ async function login() {
   loading.value = true
   errorMessage.value = ''
   try {
-    const session = await loginH5(account.value.trim())
+    const session = await loginH5(account.value.trim(), code.value.trim())
     localStorage.setItem(tokenKey, session.token)
     profile.value = session.profile
   } catch (error) {
@@ -48,6 +62,22 @@ async function login() {
 function logout() {
   localStorage.removeItem(tokenKey)
   profile.value = null
+}
+
+function accountLabel() {
+  if (setting.value.registrationType === 'MOBILE') return '手机号'
+  if (setting.value.registrationType === 'EMAIL') return '邮箱'
+  return '手机号 / 邮箱 / 账号'
+}
+
+function accountPlaceholder() {
+  if (setting.value.registrationType === 'MOBILE') return '输入手机号'
+  if (setting.value.registrationType === 'EMAIL') return '输入邮箱'
+  return '输入账号'
+}
+
+function needCode() {
+  return setting.value.registrationType !== 'FREE'
 }
 </script>
 
@@ -62,11 +92,16 @@ function logout() {
     </section>
 
     <section v-if="!profile" class="login-panel liquid-surface">
+      <p v-if="!setting.registrationEnabled" class="notice danger">当前系统暂未开放新用户注册，已有用户仍可登录。</p>
       <label>
-        <span>手机号 / 邮箱</span>
-        <input v-model.trim="account" inputmode="email" autocomplete="username" placeholder="输入手机号或邮箱" />
+        <span>{{ accountLabel() }}</span>
+        <input v-model.trim="account" inputmode="email" autocomplete="username" :placeholder="accountPlaceholder()" />
       </label>
-      <button type="button" class="primary-action" :disabled="loading || !account.trim()" @click="login">
+      <label v-if="needCode()">
+        <span>验证码</span>
+        <input v-model.trim="code" inputmode="numeric" autocomplete="one-time-code" placeholder="演示验证码 123456" />
+      </label>
+      <button type="button" class="primary-action" :disabled="loading || !account.trim() || (needCode() && !code.trim())" @click="login">
         <LoaderCircle v-if="loading" class="spin" :size="16" />
         登录 / 注册
       </button>

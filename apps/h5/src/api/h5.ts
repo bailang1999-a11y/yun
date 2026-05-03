@@ -7,7 +7,9 @@ import type {
   GoodsType,
   H5Category,
   H5Order,
+  H5SystemSetting,
   OrderDelivery,
+  RechargeField,
   UserProfile
 } from '../types/h5'
 
@@ -98,8 +100,24 @@ function normalizeGoods(item: unknown, categories: H5Category[]): GoodsCard {
     categoryId,
     cover: text(record.cover ?? record.coverText, type === 'DIRECT' ? 'API' : type === 'MANUAL' ? 'MAN' : 'CARD'),
     requireRechargeAccount: Boolean(record.requireRechargeAccount ?? record.require_recharge_account),
+    accountTypes: stringArray(record.accountTypes ?? record.account_types),
     availablePlatforms: stringArray(record.availablePlatforms ?? record.available_platforms),
     forbiddenPlatforms: stringArray(record.forbiddenPlatforms ?? record.forbidden_platforms)
+  }
+}
+
+function normalizeRechargeField(item: unknown): RechargeField {
+  const record = isRecord(item) ? item : {}
+  return {
+    id: text(record.id),
+    code: text(record.code),
+    label: text(record.label),
+    placeholder: text(record.placeholder),
+    helpText: text(record.helpText),
+    inputType: text(record.inputType, 'text'),
+    required: Boolean(record.required),
+    sort: numberValue(record.sort, 10),
+    enabled: record.enabled !== false
   }
 }
 
@@ -177,7 +195,26 @@ export async function fetchH5Categories() {
   return [{ id: 'all', name: '全部' }, ...categories]
 }
 
-export async function loginH5(account: string, code = '000000') {
+export async function fetchH5RechargeFields() {
+  const response = await apiClient.get('/api/h5/recharge-fields')
+  return toArray(response.data)
+    .map(normalizeRechargeField)
+    .filter((item) => item.code && item.enabled)
+    .sort((left, right) => left.sort - right.sort)
+}
+
+export async function fetchH5Settings(): Promise<H5SystemSetting> {
+  const response = await apiClient.get('/api/h5/settings')
+  const setting = unwrap(response.data)
+  const record = isRecord(setting) ? setting : {}
+  return {
+    registrationEnabled: record.registrationEnabled !== false,
+    registrationType: text(record.registrationType, 'MOBILE'),
+    defaultUserGroupId: text(record.defaultUserGroupId)
+  }
+}
+
+export async function loginH5(account: string, code = '') {
   const response = await apiClient.post('/api/h5/auth/sms/login', { account, code })
   const session = normalizeAuthSession(unwrap(response.data))
   if (!session.token) {
