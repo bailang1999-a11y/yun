@@ -213,9 +213,17 @@ public class InMemoryShopRepository {
         if (persistent.isPresent()) {
             return persistent.get();
         }
-        return categories.values().stream()
+        List<CategoryItem> snapshot = categories.values().stream()
             .sorted(Comparator.comparing(CategoryItem::sort).thenComparing(CategoryItem::id))
-            .map(this::enrichCategory)
+            .toList();
+        Map<Long, CategoryItem> byId = snapshot.stream()
+            .collect(java.util.stream.Collectors.toMap(CategoryItem::id, item -> item, (left, right) -> left));
+        Set<Long> parentIds = snapshot.stream()
+            .map(CategoryItem::parentId)
+            .filter(parentId -> parentId != null && parentId != 0L)
+            .collect(java.util.stream.Collectors.toSet());
+        return snapshot.stream()
+            .map(item -> enrichCategory(item, byId, parentIds))
             .toList();
     }
 
@@ -3936,6 +3944,10 @@ public class InMemoryShopRepository {
     }
 
     private CategoryItem enrichCategory(CategoryItem item) {
+        return enrichCategory(item, null, null);
+    }
+
+    private CategoryItem enrichCategory(CategoryItem item, Map<Long, CategoryItem> categorySnapshot, Set<Long> parentIds) {
         boolean enabled = item.enabled() == null || item.enabled();
         return new CategoryItem(
             item.id(),
@@ -3948,8 +3960,8 @@ public class InMemoryShopRepository {
             item.sort(),
             enabled,
             categoryStatus(enabled),
-            categoryLevel(item.parentId()) + 1,
-            hasChildCategory(item.id())
+            categoryLevel(item.parentId(), categorySnapshot) + 1,
+            parentIds == null ? hasChildCategory(item.id()) : parentIds.contains(item.id())
         );
     }
 
@@ -4727,14 +4739,20 @@ public class InMemoryShopRepository {
     }
 
     private int categoryLevel(Long parentId) {
+        return categoryLevel(parentId, null);
+    }
+
+    private int categoryLevel(Long parentId, Map<Long, CategoryItem> categorySnapshot) {
         if (parentId == null || parentId == 0L) {
             return 0;
         }
-        CategoryItem parent = findCategorySnapshot(parentId).orElse(null);
+        CategoryItem parent = categorySnapshot == null
+            ? findCategorySnapshot(parentId).orElse(null)
+            : categorySnapshot.get(parentId);
         if (parent == null) {
             return 0;
         }
-        return categoryLevel(parent.parentId()) + 1;
+        return categoryLevel(parent.parentId(), categorySnapshot) + 1;
     }
 
     private void seedGoods() {

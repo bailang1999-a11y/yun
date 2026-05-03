@@ -27,7 +27,7 @@ services:
       context: ./backend
     restart: unless-stopped
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:?set mysql database}?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:?set mysql database}?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
       SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:?set mysql user}
       SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?set mysql password}
       SPRING_DATA_REDIS_HOST: redis
