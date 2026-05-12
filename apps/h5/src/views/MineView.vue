@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { LoaderCircle, LogOut, UserRound } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
 import { authH5, fetchH5CaptchaChallenge, fetchH5Me, fetchH5Settings, sendH5LoginSms } from '../api/h5'
@@ -7,6 +8,8 @@ import AppTabbar from '../components/AppTabbar.vue'
 import type { CaptchaChallenge, H5SystemSetting, UserProfile } from '../types/h5'
 
 const tokenKey = 'xiyiyun_h5_token'
+const route = useRoute()
+const router = useRouter()
 const account = ref('')
 const code = ref('')
 const password = ref('')
@@ -139,6 +142,7 @@ async function login() {
     })
     localStorage.setItem(tokenKey, session.token)
     profile.value = session.profile
+    await router.replace(String(route.query.redirect || '/'))
   } catch (error) {
     resetCaptcha()
     errorMessage.value = getApiErrorMessage(error)
@@ -242,6 +246,7 @@ async function runTencentCaptcha(appId: string) {
 function logout() {
   localStorage.removeItem(tokenKey)
   profile.value = null
+  void router.replace({ name: 'login' })
 }
 
 function accountLabel() {
@@ -302,7 +307,7 @@ function startCountdown() {
 
 <template>
   <main class="page page-pad">
-    <section class="profile liquid-surface">
+    <section v-if="profile" class="profile liquid-surface">
       <div class="avatar">{{ profile?.nickname?.slice(0, 1) || '喜' }}</div>
       <div>
         <h1>{{ profile?.nickname || '游客用户' }}</h1>
@@ -360,7 +365,7 @@ function startCountdown() {
     </section>
 
     <p v-if="errorMessage" class="notice danger">{{ errorMessage }}</p>
-    <AppTabbar />
+    <AppTabbar v-if="profile" />
   </main>
 </template>
 

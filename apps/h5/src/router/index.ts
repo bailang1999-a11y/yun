@@ -12,6 +12,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'home', component: HomeView },
+    { path: '/login', name: 'login', component: MineView },
     { path: '/goods/:id', name: 'goods-detail', component: GoodsDetailView },
     { path: '/checkout/:orderNo', name: 'checkout', component: CheckoutView },
     { path: '/result/:orderNo', name: 'payment-result', component: PaymentResultView },
@@ -19,6 +20,17 @@ const router = createRouter({
     { path: '/cards', name: 'cards', component: CardsView },
     { path: '/mine', name: 'mine', component: MineView }
   ]
+})
+
+router.beforeEach((to) => {
+  const token = localStorage.getItem('xiyiyun_h5_token')
+  if (to.name !== 'login' && !token) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  if (to.name === 'login' && token) {
+    return String(to.query.redirect || '/')
+  }
+  return true
 })
 
 export default router
