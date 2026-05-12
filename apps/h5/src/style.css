@@ -46,11 +46,14 @@ textarea {
 
 .page {
   min-height: 100vh;
+  max-width: 430px;
+  margin: 0 auto;
   padding-bottom: 86px;
   background:
     linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
   background-size: 42px 42px;
+  box-shadow: 0 0 70px rgba(0, 0, 0, 0.42);
 }
 
 .page-pad {
@@ -99,11 +102,8 @@ textarea {
 }
 
 .metal-price {
-  background: linear-gradient(120deg, #fff 0%, #bcd7ff 28%, #00ffc3 52%, #fff5c7 76%, #fff 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  text-shadow: 0 18px 42px rgba(0, 255, 195, 0.16);
+  color: #d7fff6;
+  text-shadow: 0 12px 30px rgba(0, 255, 195, 0.2);
 }
 
 @keyframes amber-pulse {

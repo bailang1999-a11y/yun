@@ -1,21 +1,88 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { LoaderCircle, LogOut, UserRound } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { fetchH5Me, loginH5 } from '../api/h5'
+import { authH5, fetchH5CaptchaChallenge, fetchH5Me, fetchH5Settings, sendH5LoginSms } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
-import type { UserProfile } from '../types/h5'
+import type { CaptchaChallenge, H5SystemSetting, UserProfile } from '../types/h5'
 
 const tokenKey = 'xiyiyun_h5_token'
-const account = ref('13800000001')
+const account = ref('')
+const code = ref('')
+const password = ref('')
+const confirmPassword = ref('')
+const mode = ref<'login' | 'register' | 'forgot'>('login')
 const loading = ref(false)
+const codeSending = ref(false)
+const countdown = ref(0)
 const errorMessage = ref('')
+const codeMessage = ref('')
+const captchaDone = ref(false)
+const captchaTicket = ref('')
+const captchaRandstr = ref('')
+const captchaChallenge = ref<CaptchaChallenge>({ enabled: false, provider: 'TENCENT', appId: '' })
 const profile = ref<UserProfile | null>(null)
+const setting = ref<H5SystemSetting>({
+  registrationEnabled: true,
+  registrationType: 'MOBILE'
+})
+let countdownTimer: number | undefined
+
+declare global {
+  interface Window {
+    TencentCaptcha?: new (appId: string, callback: (res: { ret: number; ticket?: string; randstr?: string }) => void, options?: Record<string, unknown>) => { show: () => void }
+  }
+}
+
+const modeTitle = computed(() => {
+  if (mode.value === 'register') return '注册账号'
+  if (mode.value === 'forgot') return '找回密码'
+  return '登录账号'
+})
+
+const modeHint = computed(() => {
+  if (mode.value === 'register') return '按后台注册设置创建会员账号。'
+  if (mode.value === 'forgot') return '通过短信验证码确认身份并设置新密码。'
+  return '登录后查看订单、卡密记录和账户余额。'
+})
+
+const codeRequiredForSubmit = computed(() =>
+  mode.value === 'forgot'
+    || (mode.value === 'register' && setting.value.registrationType === 'MOBILE')
+    || (mode.value === 'login' && !password.value.trim())
+)
 
 onMounted(() => {
+  void loadSettings()
+  void loadCaptchaChallenge()
   const token = localStorage.getItem(tokenKey)
   if (token) void loadProfile(token)
+  window.addEventListener('focus', refreshProfile)
+  document.addEventListener('visibilitychange', refreshWhenVisible)
 })
+
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', refreshProfile)
+  document.removeEventListener('visibilitychange', refreshWhenVisible)
+  if (countdownTimer) window.clearInterval(countdownTimer)
+})
+
+function refreshProfile() {
+  const token = localStorage.getItem(tokenKey)
+  if (token) void loadProfile(token)
+}
+
+function refreshWhenVisible() {
+  if (document.visibilityState === 'visible') refreshProfile()
+}
+
+async function loadSettings() {
+  try {
+    setting.value = await fetchH5Settings()
+  } catch {
+    setting.value = { registrationEnabled: true, registrationType: 'MOBILE' }
+  }
+}
 
 async function loadProfile(token: string) {
   loading.value = true
@@ -31,23 +98,205 @@ async function loadProfile(token: string) {
 }
 
 async function login() {
-  if (!account.value.trim() || loading.value) return
+  const cleanAccount = account.value.trim()
+  if (!cleanAccount || loading.value) return
+  if (mode.value === 'register' && !setting.value.registrationEnabled) {
+    errorMessage.value = '当前系统暂未开放新用户注册'
+    return
+  }
+  if (captchaChallenge.value.enabled && !captchaDone.value) {
+    errorMessage.value = '请先完成人机验证'
+    return
+  }
+  if (mode.value === 'register' && password.value && password.value !== confirmPassword.value) {
+    errorMessage.value = '两次输入的密码不一致'
+    return
+  }
+  if (mode.value === 'forgot' && (!password.value || password.value !== confirmPassword.value)) {
+    errorMessage.value = '请填写并确认新密码'
+    return
+  }
+  if (mode.value === 'login' && !password.value.trim() && !code.value.trim()) {
+    errorMessage.value = '请输入登录密码或短信验证码'
+    return
+  }
+  if (needCode() && codeRequiredForSubmit.value && !code.value.trim()) {
+    errorMessage.value = '请输入短信验证码'
+    return
+  }
   loading.value = true
   errorMessage.value = ''
   try {
-    const session = await loginH5(account.value.trim())
+    const session = await authH5({
+      account: cleanAccount,
+      password: password.value,
+      confirmPassword: confirmPassword.value,
+      code: code.value.trim(),
+      terminal: 'h5',
+      captchaTicket: captchaTicket.value,
+      captchaRandstr: captchaRandstr.value,
+      mode: mode.value
+    })
     localStorage.setItem(tokenKey, session.token)
     profile.value = session.profile
   } catch (error) {
+    resetCaptcha()
     errorMessage.value = getApiErrorMessage(error)
   } finally {
     loading.value = false
   }
 }
 
+function switchMode(next: 'login' | 'register' | 'forgot') {
+  if (next === 'register' && !setting.value.registrationEnabled) {
+    errorMessage.value = '当前系统暂未开放新用户注册'
+    return
+  }
+  mode.value = next
+  errorMessage.value = ''
+  codeMessage.value = ''
+  resetCaptcha()
+}
+
+async function completeCaptcha() {
+  try {
+    if (!captchaChallenge.value.enabled) {
+      captchaDone.value = true
+      errorMessage.value = ''
+      return true
+    }
+    if (captchaChallenge.value.provider !== 'TENCENT' || !captchaChallenge.value.appId) {
+      errorMessage.value = '人机验证未配置完整'
+      return false
+    }
+    const result = await runTencentCaptcha(captchaChallenge.value.appId)
+    captchaTicket.value = result.ticket
+    captchaRandstr.value = result.randstr
+    captchaDone.value = true
+    errorMessage.value = ''
+    return true
+  } catch (error) {
+    resetCaptcha()
+    errorMessage.value = getApiErrorMessage(error)
+    return false
+  }
+}
+
+function resetCaptcha() {
+  captchaDone.value = false
+  captchaTicket.value = ''
+  captchaRandstr.value = ''
+}
+
+async function loadCaptchaChallenge() {
+  try {
+    captchaChallenge.value = await fetchH5CaptchaChallenge('h5')
+    if (!captchaChallenge.value.enabled) captchaDone.value = true
+  } catch {
+    captchaChallenge.value = { enabled: false, provider: 'TENCENT', appId: '' }
+    captchaDone.value = true
+  }
+}
+
+function loadTencentCaptchaScript() {
+  return new Promise<void>((resolve, reject) => {
+    if (window.TencentCaptcha) {
+      resolve()
+      return
+    }
+    const existing = document.querySelector<HTMLScriptElement>('script[data-tencent-captcha="true"]')
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), { once: true })
+      existing.addEventListener('error', () => reject(new Error('腾讯云验证码脚本加载失败')), { once: true })
+      return
+    }
+    const script = document.createElement('script')
+    script.src = 'https://turing.captcha.qcloud.com/TJCaptcha.js'
+    script.async = true
+    script.dataset.tencentCaptcha = 'true'
+    script.onload = () => resolve()
+    script.onerror = () => reject(new Error('腾讯云验证码脚本加载失败'))
+    document.head.appendChild(script)
+  })
+}
+
+async function runTencentCaptcha(appId: string) {
+  await loadTencentCaptchaScript()
+  return new Promise<{ ticket: string; randstr: string }>((resolve, reject) => {
+    const Captcha = window.TencentCaptcha
+    if (!Captcha) {
+      reject(new Error('腾讯云验证码脚本未就绪'))
+      return
+    }
+    const captcha = new Captcha(appId, (res: { ret: number; ticket?: string; randstr?: string }) => {
+      if (res.ret === 0 && res.ticket && res.randstr) {
+        resolve({ ticket: res.ticket, randstr: res.randstr })
+      } else {
+        reject(new Error('人机验证已取消或未通过'))
+      }
+    })
+    captcha.show()
+  })
+}
+
 function logout() {
   localStorage.removeItem(tokenKey)
   profile.value = null
+}
+
+function accountLabel() {
+  if (mode.value !== 'register') return '手机号 / 邮箱 / 账号'
+  if (setting.value.registrationType === 'MOBILE') return '手机号'
+  if (setting.value.registrationType === 'EMAIL') return '邮箱'
+  return '手机号 / 邮箱 / 账号'
+}
+
+function accountPlaceholder() {
+  if (mode.value !== 'register') return '输入手机号、邮箱或账号'
+  if (setting.value.registrationType === 'MOBILE') return '输入手机号'
+  if (setting.value.registrationType === 'EMAIL') return '输入邮箱'
+  return '输入账号'
+}
+
+function needCode() {
+  return mode.value === 'forgot' || mode.value === 'login' || (mode.value === 'register' && setting.value.registrationType === 'MOBILE')
+}
+
+async function sendCode() {
+  if (!account.value.trim() || codeSending.value || countdown.value > 0) return
+  if (mode.value !== 'login' && !/^1[3-9]\d{9}$/.test(account.value.trim())) {
+    errorMessage.value = '短信验证码仅支持手机号'
+    return
+  }
+  if (captchaChallenge.value.enabled && !captchaDone.value) {
+    const passed = await completeCaptcha()
+    if (!passed) return
+  }
+  codeSending.value = true
+  errorMessage.value = ''
+  codeMessage.value = ''
+  try {
+    codeMessage.value = await sendH5LoginSms(account.value.trim(), captchaTicket.value, captchaRandstr.value, mode.value)
+    resetCaptcha()
+    startCountdown()
+  } catch (error) {
+    resetCaptcha()
+    errorMessage.value = getApiErrorMessage(error)
+  } finally {
+    codeSending.value = false
+  }
+}
+
+function startCountdown() {
+  countdown.value = 60
+  if (countdownTimer) window.clearInterval(countdownTimer)
+  countdownTimer = window.setInterval(() => {
+    countdown.value -= 1
+    if (countdown.value <= 0 && countdownTimer) {
+      window.clearInterval(countdownTimer)
+      countdownTimer = undefined
+    }
+  }, 1000)
 }
 </script>
 
@@ -62,13 +311,46 @@ function logout() {
     </section>
 
     <section v-if="!profile" class="login-panel liquid-surface">
+      <div class="login-head">
+        <div>
+          <h2>{{ modeTitle }}</h2>
+          <p>{{ modeHint }}</p>
+        </div>
+      </div>
+      <div class="mode-tabs">
+        <button type="button" :class="{ active: mode === 'login' }" @click="switchMode('login')">登录</button>
+        <button type="button" :class="{ active: mode === 'register' }" :disabled="!setting.registrationEnabled" @click="switchMode('register')">注册</button>
+        <button type="button" :class="{ active: mode === 'forgot' }" @click="switchMode('forgot')">找回</button>
+      </div>
+      <p v-if="!setting.registrationEnabled" class="notice danger">当前系统暂未开放新用户注册，已有用户仍可登录。</p>
       <label>
-        <span>手机号 / 邮箱</span>
-        <input v-model.trim="account" inputmode="email" autocomplete="username" placeholder="输入手机号或邮箱" />
+        <span>{{ accountLabel() }}</span>
+        <input v-model.trim="account" inputmode="email" autocomplete="username" :placeholder="accountPlaceholder()" />
       </label>
-      <button type="button" class="primary-action" :disabled="loading || !account.trim()" @click="login">
+      <label>
+        <span>{{ mode === 'forgot' ? '新密码' : '登录密码' }}</span>
+        <input v-model="password" type="password" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'" :placeholder="mode === 'login' ? '请输入登录密码' : '至少 6 位密码'" />
+      </label>
+      <label v-if="mode === 'register' || mode === 'forgot'">
+        <span>{{ mode === 'forgot' ? '确认新密码' : '确认密码' }}</span>
+        <input v-model="confirmPassword" type="password" autocomplete="new-password" placeholder="请再次输入密码" />
+      </label>
+      <label v-if="needCode()">
+        <span>短信验证码</span>
+        <div class="code-entry">
+          <input v-model.trim="code" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入短信验证码" />
+          <button type="button" :disabled="codeSending || countdown > 0 || !account.trim()" @click="sendCode">
+            {{ countdown > 0 ? `${countdown}s` : codeSending ? '获取中' : '获取验证码' }}
+          </button>
+        </div>
+      </label>
+      <button type="button" class="slider-check" :class="{ done: captchaDone }" @click="completeCaptcha">
+        {{ captchaDone ? '人机验证完成' : captchaChallenge.enabled ? '点击完成人机验证' : '人机验证未启用' }}
+      </button>
+      <p v-if="codeMessage" class="notice success">{{ codeMessage }}</p>
+      <button type="button" class="primary-action" :disabled="loading || !account.trim() || (mode === 'register' && !setting.registrationEnabled) || (needCode() && codeRequiredForSubmit && !code.trim())" @click="login">
         <LoaderCircle v-if="loading" class="spin" :size="16" />
-        登录 / 注册
+        {{ mode === 'register' ? '注册并登录' : mode === 'forgot' ? '验证身份' : '登录' }}
       </button>
     </section>
 
@@ -109,6 +391,12 @@ h1 {
   font-size: 20px;
 }
 
+h2 {
+  margin: 0 0 6px;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 20px;
+}
+
 p {
   margin: 0;
   color: rgba(255, 255, 255, 0.55);
@@ -121,6 +409,35 @@ p {
   margin-top: 12px;
   padding: 16px;
   border-radius: 24px;
+}
+
+.login-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 4px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.mode-tabs button {
+  height: 36px;
+  color: rgba(255, 255, 255, 0.68);
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+}
+
+.mode-tabs button.active {
+  color: #06100e;
+  background: rgba(223, 255, 246, 0.92);
+  font-weight: 800;
 }
 
 label {
@@ -139,6 +456,28 @@ input {
   outline: none;
 }
 
+.code-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.code-entry button {
+  height: 44px;
+  padding: 0 12px;
+  color: #06100e;
+  border: 0;
+  border-radius: 16px;
+  background: rgba(223, 255, 246, 0.92);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.code-entry button:disabled {
+  opacity: 0.62;
+}
+
 .primary-action,
 .menu-row {
   min-height: 44px;
@@ -154,6 +493,20 @@ input {
   color: #06100e;
   background: linear-gradient(135deg, #00ffc3, #dffff6);
   font-weight: 700;
+}
+
+.slider-check {
+  min-height: 44px;
+  color: rgba(255, 255, 255, 0.72);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.slider-check.done {
+  color: #b9ffe9;
+  border-color: rgba(0, 255, 195, 0.35);
+  background: rgba(0, 255, 195, 0.12);
 }
 
 .menu-row {
@@ -174,6 +527,10 @@ input {
 
 .notice.danger {
   color: #ff8d86;
+}
+
+.notice.success {
+  color: #00ffc3;
 }
 
 .spin {

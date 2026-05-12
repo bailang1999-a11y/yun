@@ -2,19 +2,16 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus, Save, Trash2 } from 'lucide-vue-next'
-import { fetchUserGroups } from '../api/admin'
+import { fetchUserGroups } from '../api/users'
 import type { UserGroup } from '../types/operations'
-import { loadPriceTemplates, savePriceTemplates, type PriceGroupRate, type PriceTemplate } from '../utils/priceTemplates'
+import { fetchPriceTemplates, savePriceTemplates } from '../api/priceTemplates'
+import { type PriceGroupRate, type PriceTemplate } from '../utils/priceTemplates'
 
 const rateColors = ['#ffb300', '#3aa5ff', '#12a594', '#0d9488', '#8b5cf6', '#f97316', '#22c55e']
-const fallbackGroups: UserGroup[] = [
-  { id: 'retail', name: '默认会员', rules: [] },
-  { id: 'vip', name: '渠道 VIP', rules: [] },
-  { id: 'limited', name: '受限会员', rules: [] }
-]
 
-const templates = ref<PriceTemplate[]>(loadPriceTemplates())
+const templates = ref<PriceTemplate[]>([])
 const userGroups = ref<UserGroup[]>([])
+const loading = ref(false)
 const form = reactive<PriceTemplate>({
   id: '',
   name: '',
@@ -24,7 +21,7 @@ const form = reactive<PriceTemplate>({
   enabled: true
 })
 
-const activeGroups = computed(() => (userGroups.value.length ? userGroups.value : fallbackGroups))
+const activeGroups = computed(() => userGroups.value)
 const preview = computed(() =>
   form.groupRates.map((rate) => ({
     ...rate,
@@ -35,14 +32,19 @@ const preview = computed(() =>
 )
 
 onMounted(async () => {
+  loading.value = true
   try {
-    userGroups.value = await fetchUserGroups()
-  } catch {
-    userGroups.value = fallbackGroups
+    const [groups, remoteTemplates] = await Promise.all([fetchUserGroups(), fetchPriceTemplates()])
+    userGroups.value = groups
+    templates.value = remoteTemplates.map((item) => ({ ...item, groupRates: ratesFromGroups(groups, item.groupRates) }))
+    form.groupRates = ratesFromGroups(groups, form.groupRates)
+  } catch (error) {
+    userGroups.value = []
+    templates.value = []
+    ElMessage.error(error instanceof Error ? error.message : '价格模板加载失败')
+  } finally {
+    loading.value = false
   }
-  form.groupRates = ratesFromGroups(activeGroups.value, form.groupRates)
-  templates.value = templates.value.map((item) => ({ ...item, groupRates: ratesFromGroups(activeGroups.value, item.groupRates) }))
-  savePriceTemplates(templates.value)
 })
 
 function defaultRate(index: number) {
@@ -69,7 +71,11 @@ function resetForm() {
   form.enabled = true
 }
 
-function saveTemplate() {
+async function saveTemplate() {
+  if (!activeGroups.value.length) {
+    ElMessage.warning('请先创建或加载会员组后再配置价格模板')
+    return
+  }
   if (!form.name.trim()) {
     ElMessage.warning('请填写模板标题')
     return
@@ -85,7 +91,7 @@ function saveTemplate() {
   const index = templates.value.findIndex((item) => item.id === next.id)
   if (index >= 0) templates.value.splice(index, 1, next)
   else templates.value.push(next)
-  savePriceTemplates(templates.value)
+  templates.value = await savePriceTemplates(templates.value)
   resetForm()
   ElMessage.success('价格模板已保存')
 }
@@ -99,15 +105,15 @@ function editTemplate(row: PriceTemplate) {
   form.enabled = row.enabled
 }
 
-function removeTemplate(row: PriceTemplate) {
+async function removeTemplate(row: PriceTemplate) {
   templates.value = templates.value.filter((item) => item.id !== row.id)
-  savePriceTemplates(templates.value)
+  templates.value = await savePriceTemplates(templates.value)
   ElMessage.success('价格模板已删除')
 }
 </script>
 
 <template>
-  <section class="template-shell">
+  <section class="template-shell" v-loading="loading">
     <article class="template-card">
       <div class="template-form-line">
         <label>模板标题</label>
@@ -117,8 +123,8 @@ function removeTemplate(row: PriceTemplate) {
       <div class="template-form-line">
         <label>加/减价方式</label>
         <el-radio-group v-model="form.adjustMode">
-          <el-radio label="fixed">按固定金额</el-radio>
-          <el-radio label="percent">按百分比</el-radio>
+          <el-radio value="fixed">按固定金额</el-radio>
+          <el-radio value="percent">按百分比</el-radio>
         </el-radio-group>
       </div>
 

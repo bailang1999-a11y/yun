@@ -3,18 +3,23 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink, useRoute } from 'vue-router'
 import { CheckCircle2, LoaderCircle } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { fetchH5Order } from '../api/h5'
+import { fetchH5GoodsDetail, fetchH5Order } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
-import type { H5Order } from '../types/h5'
+import { useCatalogStore } from '../stores/catalog'
+import type { GoodsCard, H5Order } from '../types/h5'
+import { formatOrderProcessingDuration } from '../utils/orderDuration'
 
 const route = useRoute()
+const catalog = useCatalogStore()
 const order = ref<H5Order | null>(null)
+const orderGoods = ref<GoodsCard | null>(null)
 const loading = ref(false)
 const errorMessage = ref('')
 const pollEnded = ref(false)
 const payMethod = String(route.query.method ?? '支付')
 const terminalStatuses = new Set(['DELIVERED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED'])
 let pollTimer: number | undefined
+let durationTimer: number | undefined
 let pollStartedAt = 0
 const statusLabel: Record<string, string> = {
   UNPAID: '待支付',
@@ -54,23 +59,46 @@ function formatStatus(status: string) {
 
 onMounted(() => {
   pollStartedAt = Date.now()
+  if (!catalog.categories.length) void catalog.loadCatalog()
+  durationTimer = window.setInterval(() => {
+    if (order.value) order.value = { ...order.value }
+  }, 1000)
   void loadOrder({ keepPolling: true })
 })
 
-onBeforeUnmount(stopPolling)
+onBeforeUnmount(() => {
+  stopPolling()
+  if (durationTimer) window.clearInterval(durationTimer)
+})
 
 async function loadOrder(options: { keepPolling?: boolean } = {}) {
   loading.value = !order.value
   errorMessage.value = ''
 
   try {
-    order.value = await fetchH5Order(String(route.params.orderNo))
+    const nextOrder = await fetchH5Order(String(route.params.orderNo))
+    order.value = nextOrder
+    await loadOrderGoods(nextOrder)
     if (options.keepPolling) scheduleNextPoll()
   } catch (error) {
     errorMessage.value = getApiErrorMessage(error)
     stopPolling()
   } finally {
     loading.value = false
+  }
+}
+
+async function loadOrderGoods(nextOrder = order.value) {
+  if (!nextOrder?.goodsId) {
+    orderGoods.value = null
+    return
+  }
+
+  try {
+    if (!catalog.categories.length) await catalog.loadCatalog()
+    orderGoods.value = await fetchH5GoodsDetail(nextOrder.goodsId, catalog.categories)
+  } catch {
+    orderGoods.value = null
   }
 }
 
@@ -92,6 +120,23 @@ function stopPolling() {
   window.clearTimeout(pollTimer)
   pollTimer = undefined
 }
+
+function platformLabel(value: string) {
+  const labels: Record<string, string> = {
+    douyin: '抖音',
+    taobao: '淘宝',
+    pdd: '拼多多',
+    xianyu: '咸鱼',
+    xiaohongshu: '小红书',
+    private: '私域',
+    h5: '移动 H5',
+    web: 'Web',
+    pc: 'PC 端',
+    api: 'API',
+    miniapp: '微信小程序'
+  }
+  return labels[value] || value
+}
 </script>
 
 <template>
@@ -112,7 +157,24 @@ function stopPolling() {
     <section v-if="order" class="order-mini liquid-surface">
       <div><span>订单号</span><strong>{{ order.orderNo }}</strong></div>
       <div><span>商品</span><strong>{{ order.goodsName }}</strong></div>
+      <div v-if="orderGoods" class="tags-line">
+        <span>权益标签</span>
+        <div class="goods-tags">
+          <span v-for="tag in orderGoods.tags || []" :key="`custom-${tag}`" class="tag tag-custom">{{ tag }}</span>
+          <span v-for="duration in orderGoods.benefitDurations || []" :key="`duration-${duration}`" class="tag tag-time">{{ duration }}</span>
+          <span v-if="orderGoods.benefitType" class="tag tag-type">{{ orderGoods.benefitType }}</span>
+          <span v-if="orderGoods.benefitBrand" class="tag tag-brand">{{ orderGoods.benefitBrand }}</span>
+          <span v-if="orderGoods.priceLimitText" class="tag tag-limit">限价 {{ orderGoods.priceLimitText }}</span>
+          <span v-for="platform in orderGoods.availablePlatforms || []" :key="`sale-${platform}`" class="tag tag-sale">
+            {{ platformLabel(platform) }}
+          </span>
+          <span v-for="platform in orderGoods.forbiddenPlatforms || []" :key="`deny-${platform}`" class="tag tag-deny">
+            禁 {{ platformLabel(platform) }}
+          </span>
+        </div>
+      </div>
       <div><span>状态</span><strong>{{ formatStatus(order.status) }}</strong></div>
+      <div><span>订单处理耗时</span><strong>{{ formatOrderProcessingDuration(order) }}</strong></div>
       <div><span>金额</span><strong class="metal-price">¥{{ order.totalAmount.toFixed(2) }}</strong></div>
     </section>
 
@@ -199,6 +261,72 @@ function stopPolling() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.order-mini .tags-line {
+  align-items: flex-start;
+}
+
+.goods-tags {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 72%;
+}
+
+.tag {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+}
+
+.tag-time {
+  color: #c9fff4;
+  background: rgba(0, 214, 178, 0.14);
+  border-color: rgba(0, 229, 190, 0.28);
+}
+
+.tag-type {
+  color: #e4ddff;
+  background: rgba(122, 92, 255, 0.16);
+  border-color: rgba(148, 121, 255, 0.3);
+}
+
+.tag-brand {
+  color: #d6f0ff;
+  background: rgba(46, 152, 235, 0.15);
+  border-color: rgba(84, 180, 255, 0.3);
+}
+
+.tag-custom {
+  color: #e6fbff;
+  background: rgba(20, 184, 166, 0.15);
+  border-color: rgba(45, 212, 191, 0.3);
+}
+
+.tag-limit {
+  color: #fff3d2;
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(251, 191, 36, 0.34);
+}
+
+.tag-sale {
+  color: #eaf7ff;
+  background: rgba(68, 134, 255, 0.16);
+  border-color: rgba(106, 164, 255, 0.32);
+}
+
+.tag-deny {
+  color: #ffe1e1;
+  background: rgba(236, 77, 93, 0.14);
+  border-color: rgba(255, 112, 126, 0.3);
 }
 
 .order-mini strong {

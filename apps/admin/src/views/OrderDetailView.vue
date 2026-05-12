@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, CheckCircle2, RefreshCw, RotateCcw, Undo2 } from 'lucide-vue-next'
-import { completeManualOrder, fetchGoodsChannels, fetchOrderDetail, refundOrder, retryOrder, retryOrderWithChannel } from '../api/admin'
-import type { GoodsChannel, Order } from '../types/operations'
+import { fetchGoodsChannels } from '../api/goods'
+import { completeManualOrder, fetchOrderDetail, refreshOrderCallback, refundOrder, retryOrder, retryOrderWithChannel } from '../api/orders'
+import type { ChannelAttempt, GoodsChannel, Order } from '../types/operations'
+import {
+  formatDateTime,
+  formatDeliveryType,
+  formatDurationFromOrder,
+  formatMoney,
+  formatOrderSource as formatOrderSourceLabel,
+  formatOrderStatus,
+  formatPaymentMethod
+} from '../utils/formatters'
 
 const route = useRoute()
 const router = useRouter()
@@ -13,37 +23,114 @@ const channels = ref<GoodsChannel[]>([])
 const selectedChannelId = ref('')
 const loading = ref(false)
 const operating = ref('')
+const callbackRefreshing = ref(false)
+const nowTick = ref(Date.now())
+let durationTimer: ReturnType<typeof setInterval> | undefined
 
 const orderNo = computed(() => String(route.params.orderNo || ''))
 const canCompleteManual = computed(() => order.value?.status === 'WAITING_MANUAL')
 const canRetry = computed(() => ['FAILED', 'PROCURING'].includes(order.value?.status || ''))
 const canRefund = computed(() => Boolean(order.value && !['REFUNDED', 'CANCELLED'].includes(order.value.status)))
-const statusLabel: Record<string, string> = {
-  UNPAID: '待支付',
-  PROCURING: '采购中',
-  WAITING_MANUAL: '待人工处理',
-  DELIVERED: '已发货',
-  FAILED: '处理失败',
-  REFUNDED: '已退款',
-  CANCELLED: '已取消'
-}
+const integrationAttempts = computed<ChannelAttempt[]>(() => {
+  if (order.value?.channelAttempts?.length) return order.value.channelAttempts
+  if (!order.value?.supplierName && !order.value?.supplierGoodsId && !order.value?.supplierGoodsName) return []
 
-onMounted(loadOrder)
+  return [
+    {
+      supplierName: order.value.supplierName || '-',
+      supplierGoodsId: order.value.supplierGoodsId || '-',
+      supplierGoodsName: order.value.supplierGoodsName,
+      supplierPrice: order.value.unitPrice,
+      priority: 0,
+      status: order.value.status,
+      message: order.value.deliveryMessage || ''
+    }
+  ]
+})
+onMounted(() => {
+  loadOrder()
+  durationTimer = setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
+})
 
-function formatMoney(value?: number | string) {
-  const numberValue = Number(value)
-  return Number.isFinite(numberValue) ? `¥${numberValue.toFixed(2)}` : '-'
-}
+onBeforeUnmount(() => {
+  if (durationTimer) clearInterval(durationTimer)
+})
 
 function formatTime(value?: string) {
-  if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN')
+  return formatDateTime(value)
 }
 
-function formatStatus(status: string) {
-  return statusLabel[status] ?? status
+function formatOrderSource(value?: Order) {
+  if (!value) return '-'
+  return formatOrderSourceLabel(value.orderSource, value.requestId, value.platform)
+}
+
+function formatDuration(value?: Order) {
+  nowTick.value
+  if (!value) return '-'
+  const terminalStatuses = ['DELIVERED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED']
+  const endAt = terminalStatuses.includes(value.status) ? value.deliveredAt : undefined
+  return formatDurationFromOrder(value.createdAt, endAt)
+}
+
+function sourceGoods(value?: Order) {
+  if (!value) return '-'
+  if (value.supplierGoodsName || value.supplierGoodsId) {
+    return [value.supplierName, value.supplierGoodsName || value.supplierGoodsId].filter(Boolean).join(' · ')
+  }
+
+  const successAttempt = value.channelAttempts?.find((attempt) => attempt.status === 'SUCCESS') || value.channelAttempts?.[0]
+  if (!successAttempt) return '-'
+  return [successAttempt.supplierName, successAttempt.supplierGoodsId].filter(Boolean).join(' · ')
+}
+
+function integrationStatusLabel(status?: string) {
+  const map: Record<string, string> = {
+    SUCCESS: '对接成功',
+    DELIVERED: '对接成功',
+    FAILED: '对接失败',
+    ERROR: '对接异常',
+    TIMEOUT: '上游超时',
+    PENDING: '等待处理',
+    PROCESSING: '上游处理中',
+    PROCURING: '采购中',
+    WAITING_MANUAL: '待人工处理',
+    CANCELLED: '上游已取消',
+    REFUNDED: '上游已退款',
+    UNPAID: '上游未支付',
+    UNKNOWN: '上游状态未知'
+  }
+
+  return status ? map[status] ?? status : '未知状态'
+}
+
+function integrationStatusType(status?: string) {
+  if (['SUCCESS', 'DELIVERED'].includes(status || '')) return 'success'
+  if (['FAILED', 'ERROR', 'TIMEOUT'].includes(status || '')) return 'danger'
+  if (['PROCURING', 'PROCESSING', 'PENDING'].includes(status || '')) return 'primary'
+  return 'warning'
+}
+
+function plainIntegrationMessage(attempt: ChannelAttempt) {
+  const message = attempt.callbackMessage || attempt.message || ''
+  if (['SUCCESS', 'DELIVERED'].includes(attempt.status)) return message || '上游已经返回成功，系统已完成该订单处理。'
+  if (/余额不足/.test(message)) return '上游账户余额不足，系统无法继续向该渠道下单，请先给对应供应商充值或切换渠道。'
+  if (/不存在|not found/i.test(message)) return '系统没有找到这个上游渠道或上游商品，请检查货源对接配置是否还有效。'
+  if (/停用|disabled/i.test(message)) return '该上游供应商或渠道已停用，订单没有继续提交到这个渠道。'
+  if (/超时|timeout/i.test(message)) return '请求上游时等待时间过长，上游没有在规定时间内返回结果。'
+  if (/没有可用上游渠道/.test(message)) return '当前商品没有可用的上游对接渠道，需要先配置并启用货源渠道。'
+  if (['FAILED', 'ERROR'].includes(attempt.status)) return message ? `上游处理失败：${message}` : '上游处理失败，但接口没有返回具体原因。'
+  return message || '上游订单已提交，正在等待上游处理结果。'
+}
+
+function callbackStateLabel(attempt: ChannelAttempt) {
+  const status = attempt.upstreamStatus || attempt.status
+  if (['DELIVERED', 'FAILED', 'ERROR', 'CANCELLED', 'REFUNDED', 'UNPAID'].includes(status || '')) {
+    return '已通过订单详情同步'
+  }
+  return attempt.callbackStatus ? '未收到异步回调' : '未配置/未收到异步回调'
 }
 
 async function loadOrder() {
@@ -70,6 +157,21 @@ async function loadChannels() {
   }
 }
 
+async function refreshCallbackInfo() {
+  if (callbackRefreshing.value) return
+  callbackRefreshing.value = true
+  try {
+    order.value = await refreshOrderCallback(orderNo.value)
+    await loadChannels()
+    ElMessage.success('回调信息已刷新')
+  } catch (error) {
+    const message = error instanceof Error && error.message ? error.message : '回调信息刷新失败'
+    ElMessage.error(message)
+  } finally {
+    callbackRefreshing.value = false
+  }
+}
+
 async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund') {
   if (!order.value) return
   if (type === 'retry-channel' && !selectedChannelId.value) {
@@ -85,7 +187,10 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
   }[type]
 
   try {
-    await ElMessageBox.confirm(copy, '二次确认', { type: type === 'refund' ? 'warning' : 'info' })
+    await ElMessageBox.confirm(copy, '二次确认', {
+      type: type === 'refund' ? 'warning' : 'info',
+      customClass: 'xiyiyun-glass-message-box'
+    })
   } catch {
     return
   }
@@ -124,17 +229,20 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
             <h2>{{ order.orderNo }}</h2>
             <p>{{ order.goodsName }}</p>
           </div>
-          <strong>{{ formatStatus(order.status) }}</strong>
+          <strong>{{ formatOrderStatus(order.status) }}</strong>
         </div>
 
         <div class="info-grid">
           <section>
             <h3>基本信息</h3>
             <dl>
-              <dt>来源平台</dt><dd>{{ order.platform || '-' }}</dd>
+              <dt>下单来源</dt><dd>{{ formatOrderSource(order) }}</dd>
+              <dt>销售平台</dt><dd>{{ order.platform || '-' }}</dd>
               <dt>商品ID</dt><dd>{{ order.goodsId || '-' }}</dd>
+              <dt>货源商品</dt><dd>{{ sourceGoods(order) }}</dd>
               <dt>下单会员</dt><dd>{{ order.buyerAccount || order.userId || '-' }}</dd>
-              <dt>发货类型</dt><dd>{{ order.deliveryType || '-' }}</dd>
+              <dt>联系方式</dt><dd>{{ order.buyerContact || order.buyerMobile || order.buyerEmail || '-' }}</dd>
+              <dt>发货类型</dt><dd>{{ formatDeliveryType(order.deliveryType) }}</dd>
               <dt>充值账号</dt><dd>{{ order.rechargeAccount || '-' }}</dd>
               <dt>下单时间</dt><dd>{{ formatTime(order.createdAt) }}</dd>
             </dl>
@@ -146,10 +254,24 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
               <dt>单价</dt><dd>{{ formatMoney(order.unitPrice) }}</dd>
               <dt>数量</dt><dd>x{{ order.quantity || 1 }}</dd>
               <dt>实付金额</dt><dd class="amount">{{ formatMoney(order.amount) }}</dd>
-              <dt>支付方式</dt><dd>{{ order.payMethod || '-' }}</dd>
+              <dt>支付方式</dt><dd>{{ formatPaymentMethod(order.payMethod) }}</dd>
               <dt>支付流水</dt><dd>{{ order.paymentNo || '-' }}</dd>
               <dt>支付时间</dt><dd>{{ formatTime(order.paidAt) }}</dd>
               <dt>完成时间</dt><dd>{{ formatTime(order.deliveredAt) }}</dd>
+              <dt>订单处理耗时</dt><dd>{{ formatDuration(order) }}</dd>
+            </dl>
+          </section>
+
+          <section>
+            <h3>下单环境</h3>
+            <dl>
+              <dt>下单 IP</dt><dd>{{ order.orderIp || '-' }}</dd>
+              <dt>IP 归属地</dt><dd>{{ order.orderIpLocation || '-' }}</dd>
+              <dt>请求编号</dt><dd>{{ order.requestId || '-' }}</dd>
+              <dt>用户 ID</dt><dd>{{ order.userId || '-' }}</dd>
+              <dt>手机号</dt><dd>{{ order.buyerMobile || '-' }}</dd>
+              <dt>邮箱</dt><dd>{{ order.buyerEmail || '-' }}</dd>
+              <dt>买家备注</dt><dd>{{ order.buyerRemark || '-' }}</dd>
             </dl>
           </section>
         </div>
@@ -160,6 +282,60 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
           <div v-if="order.deliveryItems?.length" class="secret-list">
             <span v-for="item in order.deliveryItems" :key="item">{{ item }}</span>
           </div>
+        </section>
+
+        <section class="timeline integration-panel">
+          <div class="integration-panel-head">
+            <h3>对接详情</h3>
+            <el-button class="callback-refresh-button" :icon="RefreshCw" :loading="callbackRefreshing" @click="refreshCallbackInfo">
+              刷新回调信息
+            </el-button>
+          </div>
+          <div v-if="integrationAttempts.length" class="integration-list">
+            <article
+              v-for="attempt in integrationAttempts"
+              :key="`${attempt.channelId || attempt.supplierGoodsId}-${attempt.attemptedAt || attempt.status}`"
+              class="integration-card"
+              :data-status="attempt.status"
+            >
+              <div class="integration-head">
+                <div>
+                  <strong>{{ attempt.supplierName || '未指定供应商' }}</strong>
+                  <span>{{ formatTime(attempt.attemptedAt) }}</span>
+                </div>
+                <el-tag class="integration-status-badge" :type="integrationStatusType(attempt.status)" effect="dark">
+                  {{ integrationStatusLabel(attempt.callbackStatus || attempt.upstreamStatus || attempt.status) }}
+                </el-tag>
+              </div>
+              <div class="integration-summary">
+                <div>
+                  <span>上游状态</span>
+                  <strong>{{ integrationStatusLabel(attempt.upstreamStatus || attempt.status) }}</strong>
+                </div>
+                <div>
+                  <span>上游售价</span>
+                  <strong class="amount">{{ attempt.supplierPrice ? formatMoney(attempt.supplierPrice) : '接口暂未返回' }}</strong>
+                </div>
+                <div>
+                  <span>回调状态</span>
+                  <strong>{{ callbackStateLabel(attempt) }}</strong>
+                </div>
+              </div>
+              <div class="integration-body">
+                <div class="integration-goods">
+                  <span>上游商品</span>
+                  <strong>{{ attempt.supplierGoodsName || order.supplierGoodsName || '接口暂未返回' }}</strong>
+                  <small>编号 {{ attempt.supplierGoodsId || '-' }} · 优先级 {{ attempt.priority || '-' }}</small>
+                </div>
+                <p class="integration-message">{{ plainIntegrationMessage(attempt) }}</p>
+              </div>
+              <details v-if="attempt.rawResponse" class="raw-response">
+                <summary>查看上游原始响应</summary>
+                <pre>{{ attempt.rawResponse }}</pre>
+              </details>
+            </article>
+          </div>
+          <p v-else>该订单暂未产生上游对接记录，可能是本地货源、待支付订单，或还没有触发采购。</p>
         </section>
 
         <section v-if="order.channelAttempts?.length" class="timeline">
@@ -306,7 +482,7 @@ dt {
 
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
   margin-top: 14px;
 }
@@ -380,6 +556,196 @@ dd {
   gap: 10px;
 }
 
+.integration-list {
+  display: grid;
+  gap: 12px;
+}
+
+.integration-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.integration-panel-head h3 {
+  margin: 0;
+}
+
+.integration-panel-head :deep(.callback-refresh-button) {
+  height: 32px;
+  padding: 0 13px;
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.28);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.2), rgba(37, 99, 235, 0.1));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 8px 20px rgba(59, 130, 246, 0.1);
+}
+
+.integration-panel-head :deep(.callback-refresh-button:hover) {
+  color: #dbeafe;
+  border-color: rgba(147, 197, 253, 0.42);
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.28), rgba(37, 99, 235, 0.14));
+}
+
+.integration-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.5), rgba(30, 41, 59, 0.34));
+  border: 0.5px solid rgba(148, 163, 184, 0.16);
+}
+
+.integration-card[data-status="SUCCESS"],
+.integration-card[data-status="DELIVERED"] {
+  border-color: rgba(0, 255, 195, 0.18);
+}
+
+.integration-card[data-status="FAILED"],
+.integration-card[data-status="ERROR"],
+.integration-card[data-status="TIMEOUT"] {
+  border-color: rgba(248, 113, 113, 0.26);
+  background: rgba(127, 29, 29, 0.08);
+}
+
+.integration-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.integration-head strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 15px;
+}
+
+.integration-head span {
+  display: block;
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.44);
+  font-size: 12px;
+}
+
+.integration-head :deep(.integration-status-badge) {
+  height: 30px;
+  min-width: 82px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 13px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 8px 20px rgba(59, 130, 246, 0.12);
+}
+
+.integration-head :deep(.integration-status-badge.el-tag--primary),
+.integration-head :deep(.integration-status-badge.el-tag--warning) {
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.3);
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.24), rgba(37, 99, 235, 0.15));
+}
+
+.integration-head :deep(.integration-status-badge.el-tag--success) {
+  color: #99f6e4;
+  border-color: rgba(45, 212, 191, 0.28);
+  background: linear-gradient(180deg, rgba(20, 184, 166, 0.24), rgba(13, 148, 136, 0.14));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 8px 20px rgba(20, 184, 166, 0.12);
+}
+
+.integration-head :deep(.integration-status-badge.el-tag--danger) {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.32);
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.22), rgba(185, 28, 28, 0.12));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 8px 20px rgba(239, 68, 68, 0.1);
+}
+
+.integration-summary {
+  display: grid;
+  grid-template-columns: 1fr 0.8fr 1fr;
+  gap: 10px;
+}
+
+.integration-summary > div {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.2);
+  border: 0.5px solid rgba(255, 255, 255, 0.07);
+}
+
+.integration-summary span,
+.integration-goods span {
+  display: block;
+  margin-bottom: 6px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+}
+
+.integration-summary strong,
+.integration-goods strong {
+  display: block;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.integration-body {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.05fr) minmax(320px, 1.4fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.integration-goods {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.integration-goods small {
+  display: block;
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 12px;
+}
+
+.integration-message {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.1);
+  border: 0.5px solid rgba(59, 130, 246, 0.16);
+}
+
+.raw-response {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.raw-response summary {
+  cursor: pointer;
+  color: rgba(191, 219, 254, 0.9);
+  font-family: inherit;
+}
+
+.raw-response pre {
+  max-height: 120px;
+  margin: 10px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .attempt-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr) 180px;
@@ -421,5 +787,21 @@ dd {
   padding: 36px;
   color: rgba(255, 255, 255, 0.55);
   text-align: center;
+}
+
+@media (max-width: 1280px) {
+  .info-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 860px) {
+  .info-grid,
+  .integration-summary,
+  .integration-body,
+  .attempt-card,
+  .channel-picker > div {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

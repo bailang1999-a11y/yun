@@ -46,6 +46,8 @@ function realtimeUrl() {
     ? configuredBaseUrl
     : (import.meta.env.PROD ? window.location.origin : 'http://localhost:8080')
   const url = new URL('/ws/orders', base)
+  const token = localStorage.getItem('xiyiyun_h5_token')
+  if (token) url.searchParams.set('token', token)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }

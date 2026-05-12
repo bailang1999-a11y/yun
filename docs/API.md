@@ -121,10 +121,6 @@
 | `POST` | `/api/admin/auth/login` | 公开 | 管理员登录 |
 | `POST` | `/api/admin/auth/logout` | `admin:login` | 退出 |
 | `GET` | `/api/admin/auth/me` | `admin:login` | 当前管理员与权限 |
-| `GET` | `/api/admin/admins` | `admin:read` | 管理员列表 |
-| `POST` | `/api/admin/admins` | `admin:create` | 新增管理员 |
-| `PATCH` | `/api/admin/admins/{id}` | `admin:update` | 更新管理员 |
-| `PATCH` | `/api/admin/admins/{id}/status` | `admin:update` | 启用或禁用管理员 |
 
 ### 用户、分组与余额
 
@@ -132,13 +128,13 @@
 | --- | --- | --- | --- | --- |
 | `GET` | `/api/admin/users` | `user:read` | 否 | 用户列表 |
 | `GET` | `/api/admin/users/{id}` | `user:read` | 否 | 用户详情 |
-| `PATCH` | `/api/admin/users/{id}` | `user:update` | 否 | 修改用户资料、分组 |
-| `PATCH` | `/api/admin/users/{id}/status` | `user:update` | 是 | 启用、禁用、冻结 |
-| `POST` | `/api/admin/users/{id}/balance-adjustments` | `balance:adjust` | 是 | 余额调整，必须审计 |
-| `GET` | `/api/admin/group-rules` | `group-rule:read` | 否 | 分组规则列表 |
-| `POST` | `/api/admin/group-rules` | `group-rule:create` | 是 | 创建分组规则 |
-| `PATCH` | `/api/admin/group-rules/{id}` | `group-rule:update` | 否 | 更新分组规则 |
-| `DELETE` | `/api/admin/group-rules/{id}` | `group-rule:delete` | 是 | 删除分组规则 |
+| `POST` | `/api/admin/users/{id}/group` | `user:update` | 否 | 修改用户分组 |
+| `POST` | `/api/admin/users/{id}/credentials` | `user:update` | 否 | 修改用户登录凭据 |
+| `POST` | `/api/admin/users/{id}/funds` | `balance:adjust` | 是 | 余额调整，必须审计 |
+| `GET` | `/api/admin/user-groups` | `group-rule:read` | 否 | 用户组列表 |
+| `POST` | `/api/admin/user-groups` | `group-rule:create` | 是 | 创建用户组 |
+| `POST` | `/api/admin/user-groups/{groupId}/rules` | `group-rule:update` | 是 | 覆盖用户组规则 |
+| `POST` | `/api/admin/user-groups/{groupId}/order-permission` | `group-rule:update` | 是 | 更新用户组下单权限 |
 
 ### 商品、分类与卡密
 
@@ -146,16 +142,16 @@
 | --- | --- | --- | --- | --- |
 | `GET` | `/api/admin/categories` | `category:read` | 否 | 分类列表 |
 | `POST` | `/api/admin/categories` | `category:create` | 是 | 新增分类 |
-| `PATCH` | `/api/admin/categories/{id}` | `category:update` | 否 | 更新分类 |
-| `DELETE` | `/api/admin/categories/{id}` | `category:delete` | 是 | 删除分类 |
+| `POST` | `/api/admin/categories/{id}` | `category:update` | 否 | 更新分类 |
+| `POST` | `/api/admin/categories/{id}/enable` | `category:update` | 是 | 启用分类 |
+| `POST` | `/api/admin/categories/{id}/disable` | `category:update` | 是 | 禁用分类 |
+| `POST` | `/api/admin/categories/{id}/delete` | `category:delete` | 是 | 删除分类 |
 | `GET` | `/api/admin/goods` | `goods:read` | 否 | 商品列表 |
 | `POST` | `/api/admin/goods` | `goods:create` | 是 | 新增商品 |
-| `PATCH` | `/api/admin/goods/{id}` | `goods:update` | 否 | 更新商品 |
-| `PATCH` | `/api/admin/goods/{id}/status` | `goods:update` | 是 | 上架或下架 |
+| `POST` | `/api/admin/goods/{id}` | `goods:update` | 否 | 更新商品 |
+| `POST` | `/api/admin/goods/{id}/delete` | `goods:delete` | 是 | 删除商品 |
 | `POST` | `/api/admin/goods/{id}/cards/import` | `card:import` | 是 | 导入卡密，服务端加密入库 |
 | `GET` | `/api/admin/goods/{id}/cards` | `card:read` | 否 | 卡密列表，仅返回脱敏预览 |
-| `POST` | `/api/admin/goods/{id}/cards/export` | `card:export` | 是 | 创建卡密导出任务 |
-| `PATCH` | `/api/admin/cards/{cardId}/status` | `card:update` | 是 | 作废或恢复卡密 |
 
 卡密导入说明：
 
@@ -169,14 +165,18 @@
 | --- | --- | --- | --- | --- |
 | `GET` | `/api/admin/orders` | `order:read` | 否 | 订单列表，支持状态、商品、用户、时间筛选 |
 | `GET` | `/api/admin/orders/{orderNo}` | `order:read` | 否 | 订单详情 |
-| `PATCH` | `/api/admin/orders/{orderNo}/remark` | `order:update` | 否 | 修改后台备注 |
-| `POST` | `/api/admin/orders/{orderNo}/deliver` | `order:deliver` | 是 | 手动发货或补发 |
-| `POST` | `/api/admin/orders/{orderNo}/close` | `order:close` | 是 | 关闭订单 |
-| `POST` | `/api/admin/orders/{orderNo}/refunds` | `refund:create` | 是 | 发起退款 |
-| `GET` | `/api/admin/payment-records` | `payment:read` | 否 | 支付记录 |
-| `GET` | `/api/admin/refund-records` | `refund:read` | 否 | 退款记录 |
-| `GET` | `/api/admin/delivery-tasks` | `delivery-task:read` | 否 | 发货任务列表 |
-| `POST` | `/api/admin/delivery-tasks/{taskNo}/retry` | `delivery-task:update` | 是 | 重试发货任务 |
+| `GET` | `/api/admin/orders/export` | `order:read` | 否 | 导出订单 |
+| `POST` | `/api/admin/orders/{orderNo}/refresh-callback` | `order:update` | 是 | 刷新上游回调状态 |
+| `POST` | `/api/admin/orders/refresh-unfinished` | `order:update` | 是 | 批量刷新未完成订单 |
+| `POST` | `/api/admin/orders/{orderNo}/complete-manual` | `order:deliver` | 是 | 完成人工发货 |
+| `POST` | `/api/admin/orders/{orderNo}/retry` | `order:deliver` | 是 | 重试发货 |
+| `POST` | `/api/admin/orders/{orderNo}/retry-channel/{channelId}` | `order:deliver` | 是 | 指定通道重试发货 |
+| `POST` | `/api/admin/orders/{orderNo}/refund` | `refund:create` | 是 | 发起退款 |
+| `POST` | `/api/admin/orders/{orderNo}/manual-success` | `order:update` | 是 | 手动标记成功 |
+| `POST` | `/api/admin/orders/{orderNo}/manual-failed` | `order:update` | 是 | 手动标记失败 |
+| `POST` | `/api/admin/orders/{orderNo}/delete` | `order:delete` | 是 | 删除订单 |
+| `GET` | `/api/admin/payments` | `payment:read` | 否 | 支付记录 |
+| `GET` | `/api/admin/refunds` | `refund:read` | 否 | 退款记录 |
 
 ### 供应商与上游快照
 
@@ -184,13 +184,17 @@
 | --- | --- | --- | --- | --- |
 | `GET` | `/api/admin/suppliers` | `supplier:read` | 否 | 供应商列表 |
 | `POST` | `/api/admin/suppliers` | `supplier:create` | 是 | 新增供应商 |
-| `PATCH` | `/api/admin/suppliers/{id}` | `supplier:update` | 否 | 更新供应商 |
-| `PATCH` | `/api/admin/suppliers/{id}/status` | `supplier:update` | 是 | 启用或禁用 |
-| `GET` | `/api/admin/goods/{goodsId}/suppliers` | `goods-supplier:read` | 否 | 商品供应商映射 |
-| `POST` | `/api/admin/goods/{goodsId}/suppliers` | `goods-supplier:update` | 是 | 绑定供应商商品 |
-| `PATCH` | `/api/admin/goods/{goodsId}/suppliers/{mappingId}` | `goods-supplier:update` | 否 | 更新成本价、优先级 |
-| `GET` | `/api/admin/upstream-snapshots` | `upstream:read` | 否 | 上游库存、价格快照 |
-| `POST` | `/api/admin/suppliers/{id}/sync` | `upstream:sync` | 是 | 手动同步上游商品和库存 |
+| `POST` | `/api/admin/suppliers/{id}` | `supplier:update` | 否 | 更新供应商 |
+| `POST` | `/api/admin/suppliers/{id}/enable` | `supplier:update` | 是 | 启用供应商 |
+| `POST` | `/api/admin/suppliers/{id}/disable` | `supplier:update` | 是 | 禁用供应商 |
+| `POST` | `/api/admin/suppliers/{id}/delete` | `supplier:delete` | 是 | 删除供应商 |
+| `POST` | `/api/admin/suppliers/{id}/balance` | `supplier:read` | 否 | 刷新供应商余额 |
+| `POST` | `/api/admin/suppliers/{id}/test` | `supplier:read` | 否 | 测试供应商连通性 |
+| `POST` | `/api/admin/suppliers/{id}/sync-goods` | `supplier:update` | 是 | 同步供应商商品 |
+| `GET` | `/api/admin/suppliers/{id}/remote-goods` | `supplier:read` | 否 | 供应商远程商品 |
+| `GET` | `/api/admin/goods/{goodsId}/channels` | `goods-supplier:read` | 否 | 商品供货通道 |
+| `POST` | `/api/admin/goods/{goodsId}/channels` | `goods-supplier:update` | 是 | 绑定供货通道 |
+| `POST` | `/api/admin/goods/{goodsId}/channels/{channelId}/delete` | `goods-supplier:update` | 是 | 删除供货通道 |
 
 ### 导出任务
 

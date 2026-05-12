@@ -1,24 +1,31 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Check, LoaderCircle, QrCode } from 'lucide-vue-next'
+import { Check, CreditCard, LoaderCircle, QrCode } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { cancelH5Order, fetchH5Order, payH5Order } from '../api/h5'
+import { cancelH5Order, fetchH5GoodsDetail, fetchH5Order, fetchH5PaymentChannels, payH5Order } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
-import type { H5Order } from '../types/h5'
+import { useCatalogStore } from '../stores/catalog'
+import type { GoodsCard, H5Order, PaymentChannel } from '../types/h5'
 
 const route = useRoute()
 const router = useRouter()
+const catalog = useCatalogStore()
 const order = ref<H5Order | null>(null)
+const orderGoods = ref<GoodsCard | null>(null)
 const loading = ref(false)
 const paying = ref(false)
 const cancelling = ref(false)
 const errorMessage = ref('')
-const payMethod = ref('wechat')
+const payMethod = ref('balance')
+const paymentChannels = ref<PaymentChannel[]>([])
 const now = ref(Date.now())
 let timer: number | undefined
+let refreshTimer: number | undefined
 
-const methodLabel = computed(() => (payMethod.value === 'wechat' ? '微信支付' : '支付宝'))
+const methodLabel = computed(() => {
+  return paymentChannels.value.find((item) => item.code === payMethod.value)?.name || '支付'
+})
 const expiresAt = computed(() => {
   if (!order.value?.createdAt) return 0
   const createdAt = new Date(order.value.createdAt).getTime()
@@ -26,7 +33,7 @@ const expiresAt = computed(() => {
 })
 const remainingMs = computed(() => Math.max(expiresAt.value - now.value, 0))
 const expired = computed(() => Boolean(order.value?.status === 'UNPAID' && expiresAt.value && remainingMs.value <= 0))
-const canPay = computed(() => Boolean(order.value?.status === 'UNPAID' && !expired.value))
+const canPay = computed(() => Boolean(order.value?.status === 'UNPAID' && !expired.value && paymentChannels.value.length))
 const countdownText = computed(() => {
   const totalSeconds = Math.ceil(remainingMs.value / 1000)
   const minutes = Math.floor(totalSeconds / 60)
@@ -38,11 +45,17 @@ onMounted(() => {
   timer = window.setInterval(() => {
     now.value = Date.now()
   }, 1000)
+  refreshTimer = window.setInterval(() => {
+    if (!paying.value && !cancelling.value) void loadOrder()
+  }, 8000)
+  if (!catalog.categories.length) void catalog.loadCatalog()
+  void loadPaymentChannels()
   void loadOrder()
 })
 
 onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
+  if (refreshTimer) window.clearInterval(refreshTimer)
 })
 
 async function loadOrder() {
@@ -50,11 +63,40 @@ async function loadOrder() {
   errorMessage.value = ''
 
   try {
-    order.value = await fetchH5Order(String(route.params.orderNo))
+    const nextOrder = await fetchH5Order(String(route.params.orderNo))
+    order.value = nextOrder
+    await loadOrderGoods(nextOrder)
   } catch (error) {
     errorMessage.value = getApiErrorMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadPaymentChannels() {
+  try {
+    const channels = await fetchH5PaymentChannels('h5')
+    paymentChannels.value = channels
+    if (!channels.some((item) => item.code === payMethod.value)) {
+      payMethod.value = channels[0]?.code || ''
+    }
+  } catch (error) {
+    paymentChannels.value = []
+    errorMessage.value = getApiErrorMessage(error)
+  }
+}
+
+async function loadOrderGoods(nextOrder = order.value) {
+  if (!nextOrder?.goodsId) {
+    orderGoods.value = null
+    return
+  }
+
+  try {
+    if (!catalog.categories.length) await catalog.loadCatalog()
+    orderGoods.value = await fetchH5GoodsDetail(nextOrder.goodsId, catalog.categories)
+  } catch {
+    orderGoods.value = null
   }
 }
 
@@ -74,6 +116,10 @@ async function payNow() {
   }
 }
 
+function channelIconType(channel: PaymentChannel) {
+  return channel.type === 'BALANCE' ? CreditCard : QrCode
+}
+
 async function cancelOrder() {
   if (!order.value || cancelling.value || order.value.status !== 'UNPAID') return
   cancelling.value = true
@@ -87,6 +133,23 @@ async function cancelOrder() {
   } finally {
     cancelling.value = false
   }
+}
+
+function platformLabel(value: string) {
+  const labels: Record<string, string> = {
+    douyin: '抖音',
+    taobao: '淘宝',
+    pdd: '拼多多',
+    xianyu: '咸鱼',
+    xiaohongshu: '小红书',
+    private: '私域',
+    h5: '移动 H5',
+    web: 'Web',
+    pc: 'PC 端',
+    api: 'API',
+    miniapp: '微信小程序'
+  }
+  return labels[value] || value
 }
 </script>
 
@@ -112,6 +175,22 @@ async function cancelOrder() {
         <div>
           <span>商品</span>
           <strong>{{ order.goodsName }}</strong>
+        </div>
+        <div v-if="orderGoods" class="summary-tags-row">
+          <span>权益标签</span>
+          <div class="goods-tags">
+            <span v-for="tag in orderGoods.tags || []" :key="`custom-${tag}`" class="tag tag-custom">{{ tag }}</span>
+            <span v-for="duration in orderGoods.benefitDurations || []" :key="`duration-${duration}`" class="tag tag-time">{{ duration }}</span>
+            <span v-if="orderGoods.benefitType" class="tag tag-type">{{ orderGoods.benefitType }}</span>
+            <span v-if="orderGoods.benefitBrand" class="tag tag-brand">{{ orderGoods.benefitBrand }}</span>
+            <span v-if="orderGoods.priceLimitText" class="tag tag-limit">限价 {{ orderGoods.priceLimitText }}</span>
+            <span v-for="platform in orderGoods.availablePlatforms || []" :key="`sale-${platform}`" class="tag tag-sale">
+              {{ platformLabel(platform) }}
+            </span>
+            <span v-for="platform in orderGoods.forbiddenPlatforms || []" :key="`deny-${platform}`" class="tag tag-deny">
+              禁 {{ platformLabel(platform) }}
+            </span>
+          </div>
         </div>
         <div v-if="order.rechargeAccount">
           <span>充值账号</span>
@@ -139,15 +218,17 @@ async function cancelOrder() {
 
       <section class="glass-card pay-card">
         <h2>支付方式</h2>
-        <button type="button" :class="{ active: payMethod === 'wechat' }" @click="payMethod = 'wechat'">
-          <QrCode :size="18" />
-          微信支付
-          <Check v-if="payMethod === 'wechat'" :size="17" />
-        </button>
-        <button type="button" :class="{ active: payMethod === 'alipay' }" @click="payMethod = 'alipay'">
-          <QrCode :size="18" />
-          支付宝
-          <Check v-if="payMethod === 'alipay'" :size="17" />
+        <p v-if="!paymentChannels.length" class="pay-empty">暂无可用支付通道，请联系平台开启。</p>
+        <button
+          v-for="channel in paymentChannels"
+          :key="channel.code"
+          type="button"
+          :class="{ active: payMethod === channel.code }"
+          @click="payMethod = channel.code"
+        >
+          <component :is="channelIconType(channel)" :size="18" />
+          {{ channel.name }}
+          <Check v-if="payMethod === channel.code" :size="17" />
         </button>
       </section>
 
@@ -159,7 +240,7 @@ async function cancelOrder() {
         @click="payNow"
       >
         <span v-if="paying" class="blue-swirl" />
-        {{ expired ? '订单已超时' : paying ? '支付中' : `使用${methodLabel}` }}
+        {{ expired ? '订单已超时' : !paymentChannels.length ? '暂无可用支付方式' : paying ? '支付中' : `使用${methodLabel}` }}
       </button>
       <button v-if="order.status === 'UNPAID'" class="cancel-action" type="button" :disabled="cancelling" @click="cancelOrder">
         {{ cancelling ? '取消中' : '取消订单' }}
@@ -220,6 +301,72 @@ h2 {
   gap: 14px;
 }
 
+.summary-card .summary-tags-row {
+  align-items: flex-start;
+}
+
+.goods-tags {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 72%;
+}
+
+.tag {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+}
+
+.tag-time {
+  color: #c9fff4;
+  background: rgba(0, 214, 178, 0.14);
+  border-color: rgba(0, 229, 190, 0.28);
+}
+
+.tag-type {
+  color: #e4ddff;
+  background: rgba(122, 92, 255, 0.16);
+  border-color: rgba(148, 121, 255, 0.3);
+}
+
+.tag-brand {
+  color: #d6f0ff;
+  background: rgba(46, 152, 235, 0.15);
+  border-color: rgba(84, 180, 255, 0.3);
+}
+
+.tag-custom {
+  color: #e6fbff;
+  background: rgba(20, 184, 166, 0.15);
+  border-color: rgba(45, 212, 191, 0.3);
+}
+
+.tag-limit {
+  color: #fff3d2;
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(251, 191, 36, 0.34);
+}
+
+.tag-sale {
+  color: #eaf7ff;
+  background: rgba(68, 134, 255, 0.16);
+  border-color: rgba(106, 164, 255, 0.32);
+}
+
+.tag-deny {
+  color: #ffe1e1;
+  background: rgba(236, 77, 93, 0.14);
+  border-color: rgba(255, 112, 126, 0.3);
+}
+
 .summary-card strong {
   min-width: 0;
   color: rgba(255, 255, 255, 0.86);
@@ -249,6 +396,15 @@ h2 {
 
 .countdown-card[data-expired="true"] strong {
   color: #ffab00;
+}
+
+.pay-empty {
+  margin: 0;
+  padding: 12px;
+  border-radius: 16px;
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.06);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
 }
 
 .pay-card button {

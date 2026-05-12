@@ -8,12 +8,20 @@ export interface Goods {
   status?: string
   stock?: number
   deliveryType?: string
+  cardKindId?: number | string
+  cardKindName?: string
+  cardKindStock?: number
   platform?: string
   subTitle?: string
   coverUrl?: string
   detailImages?: string[]
   detailBlocks?: GoodsDetailBlock[]
   benefitDurations?: string[]
+  benefitType?: string
+  benefitBrand?: string
+  tags?: string[]
+  priceLimited?: boolean
+  priceLimitText?: string
   integrations?: GoodsIntegration[]
   pollingEnabled?: boolean
   monitoringEnabled?: boolean
@@ -58,12 +66,18 @@ export interface GoodsCreatePayload {
   originalPrice?: number
   status: string
   deliveryType: string
+  cardKindId?: number | string
   platform?: string
   subTitle?: string
   coverUrl?: string
   detailImages?: string[]
   detailBlocks?: GoodsDetailBlock[]
   benefitDurations?: string[]
+  benefitType?: string
+  benefitBrand?: string
+  tags?: string[]
+  priceLimited?: boolean
+  priceLimitText?: string
   integrations?: GoodsIntegration[]
   pollingEnabled?: boolean
   monitoringEnabled?: boolean
@@ -83,6 +97,11 @@ export interface GoodsCreatePayload {
 export interface Category {
   id: number | string
   name: string
+  nickname?: string
+  icon?: string
+  iconKey?: string
+  iconUrl?: string
+  customIconUrl?: string
   parentId?: number | string
   sort?: number
   enabled?: boolean
@@ -93,9 +112,17 @@ export interface Category {
 export interface CategoryCreatePayload {
   parentId?: number | string
   name: string
+  nickname?: string
+  icon?: string
+  iconKey?: string
+  iconUrl?: string
+  customIconUrl?: string
+  level?: number
   sort?: number
   enabled?: boolean
 }
+
+export interface CategoryUpdatePayload extends CategoryCreatePayload {}
 
 export interface Supplier {
   id: number | string
@@ -103,20 +130,172 @@ export interface Supplier {
   baseUrl: string
   appKey: string
   appSecretMasked: string
+  platformType?: SupplierPlatformType | string
+  userId?: string
+  appId?: string
+  apiKeyMasked?: string
+  callbackUrl?: string
+  timeoutSeconds?: number
   balance: number | string
   status: string
   remark?: string
   lastSyncAt?: string
 }
 
+export type SupplierPlatformType = 'CUSTOM' | 'KASUSHOU_2' | 'KAKAYUN' | 'FULU' | 'FENGZHUSHOU' | 'CHENGQUAN' | 'FANCHEN_RJ' | 'JINGZHAO'
+
 export interface SupplierCreatePayload {
   name: string
   baseUrl: string
   appKey: string
   appSecret: string
+  platformType?: SupplierPlatformType
+  userId?: string
+  appId?: string
+  apiKey?: string
+  callbackUrl?: string
+  timeoutSeconds?: number
   balance?: number
   status?: string
   remark?: string
+}
+
+export interface RechargeField {
+  id: number | string
+  code: string
+  label: string
+  placeholder: string
+  helpText: string
+  inputType: string
+  required: boolean
+  sort: number
+  enabled: boolean
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface RechargeFieldPayload {
+  code: string
+  label: string
+  placeholder?: string
+  helpText?: string
+  inputType: string
+  required: boolean
+  sort: number
+  enabled: boolean
+}
+
+export interface PaymentChannel {
+  id: number | string
+  code: string
+  name: string
+  type: string
+  terminals: string[]
+  status: string
+  sort: number
+  config?: Record<string, string>
+  remark?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface PaymentChannelPayload {
+  code: string
+  name: string
+  type: string
+  terminals: string[]
+  status: string
+  sort: number
+  config?: Record<string, string>
+  remark?: string
+}
+
+export interface RemoteGoodsSyncPayload {
+  page: number
+  limit: number
+  cateId: number | string
+  keyword: string
+}
+
+export interface RemoteGoods {
+  supplierGoodsId: string
+  name: string
+  type: string
+  typeLabel: string
+  categoryId?: number | string
+  categoryName?: string
+  price: number | string
+  faceValue?: number | string
+  stock?: number | string
+  status: string
+  connected: boolean
+  localGoodsId?: number | string
+  localGoodsName?: string
+  channelId?: number | string
+  availablePlatforms: string[]
+  forbiddenPlatforms: string[]
+}
+
+export interface RemoteGoodsSyncResult {
+  syncedAt: string
+  total: number
+  goods: RemoteGoods[]
+  categories: RemoteCategory[]
+}
+
+export interface RemoteCategory {
+  id: number | string
+  name: string
+  pid?: number | string
+  level: number
+  children: RemoteCategory[]
+}
+
+export interface SourceCloneConfig {
+  supplierGoodsId: string
+  name: string
+  categoryId?: number | string
+  price: number
+  originalPrice?: number
+  stock: number
+  status: string
+  benefitDurations?: string[]
+  coverUrl?: string
+  description?: string
+  accountTypes: string[]
+  requireRechargeAccount: boolean
+  priceTemplateId?: string
+  priceMode?: string
+  priceCoefficient?: number
+  priceFixedAdd?: number
+  availablePlatforms?: string[]
+  forbiddenPlatforms?: string[]
+  priority: number
+  timeoutSeconds: number
+}
+
+export interface SourceClonePayload {
+  supplierGoodsIds?: string[]
+  items?: SourceCloneConfig[]
+  categoryId?: number | string
+  priority?: number
+  timeoutSeconds?: number
+}
+
+export interface SourceCloneItem {
+  supplierGoodsId: string
+  supplierGoodsName: string
+  status: string
+  goodsId?: number | string
+  channelId?: number | string
+  message: string
+}
+
+export interface SourceCloneResult {
+  createdCount: number
+  skippedCount: number
+  failedCount: number
+  items: SourceCloneItem[]
 }
 
 export interface GoodsChannel {
@@ -139,24 +318,94 @@ export interface GoodsChannelCreatePayload {
   status: string
 }
 
+export interface ProductMonitorItem {
+  channelId: number | string
+  goodsId: number | string
+  goodsName: string
+  supplierId: number | string
+  supplierName: string
+  supplierGoodsId: string
+  primaryChannel: boolean
+  status: string
+  lastScanAt?: string
+  nextScanAt?: string
+  lastResult: string
+  lastMessage: string
+  scanCount: number
+  changeCount: number
+}
+
+export interface ProductMonitorLog {
+  id: number | string
+  channelId: number | string
+  goodsId: number | string
+  goodsName: string
+  supplierId: number | string
+  supplierName: string
+  supplierGoodsId: string
+  result: string
+  message: string
+  changes: string[]
+  scannedAt?: string
+  nextScanAt?: string
+}
+
+export interface ProductMonitorOverview {
+  items: ProductMonitorItem[]
+  logs: ProductMonitorLog[]
+}
+
 export interface CardImportItem {
   cardNo: string
   password: string
 }
 
+export type CardKindType = 'ONCE' | 'REUSABLE'
+
+export interface CardKind {
+  id: number | string
+  name: string
+  type: CardKindType | string
+  cost: number | string
+  stock?: number
+  unusedCount?: number
+  usedCount?: number
+  totalCount?: number
+  createdAt?: string
+}
+
+export interface CardKindCreatePayload {
+  name: string
+  type: CardKindType
+  cost: number
+}
+
 export interface GoodsCard {
   id: number | string
+  goodsId?: number | string
+  cardKindId?: number | string
   cardNo?: string
   password?: string
+  content?: string
+  preview?: string
   status?: string
+  orderNo?: string
   usedAt?: string
   createdAt?: string
+}
+
+export interface CardKindImportResult {
+  importTotal?: number
+  successCount?: number
+  duplicateCount?: number
+  failedLines?: number[]
 }
 
 export interface Order {
   id?: number | string
   orderNo: string
   userId?: number | string
+  buyerNickname?: string
   buyerAccount?: string
   goodsId?: number | string
   goodsName?: string
@@ -167,9 +416,18 @@ export interface Order {
   status: string
   paymentNo?: string
   payMethod?: string
+  orderSource?: string
   deliveryType?: string
   platform?: string
   rechargeAccount?: string
+  orderIp?: string
+  orderIpLocation?: string
+  buyerContact?: string
+  buyerMobile?: string
+  buyerEmail?: string
+  supplierName?: string
+  supplierGoodsId?: string
+  supplierGoodsName?: string
   buyerRemark?: string
   requestId?: string
   deliveryItems?: string[]
@@ -186,11 +444,25 @@ export interface OrderQuery {
   goodsType?: string
 }
 
+export interface OrderRefreshResult {
+  total: number
+  refreshed: number
+  changed: number
+  failed: number
+  firstError?: string
+}
+
 export interface ChannelAttempt {
   channelId?: number | string
   supplierId?: number | string
   supplierName: string
   supplierGoodsId: string
+  supplierGoodsName?: string
+  supplierPrice?: number | string
+  upstreamStatus?: string
+  callbackStatus?: string
+  callbackMessage?: string
+  rawResponse?: string
   priority: number
   status: string
   message: string
@@ -216,6 +488,10 @@ export interface UserGroup {
   defaultGroup?: boolean
   userCount?: number
   status?: string
+  orderEnabled?: boolean
+  realNameRequiredForOrder?: boolean
+  priceLimitEnabled?: boolean
+  priceLimitNotice?: string
   rules: GroupRule[]
 }
 
@@ -224,6 +500,10 @@ export interface UserGroupCreatePayload {
   description?: string
   defaultGroup?: boolean
   status?: string
+  orderEnabled?: boolean
+  realNameRequiredForOrder?: boolean
+  priceLimitEnabled?: boolean
+  priceLimitNotice?: string
 }
 
 export interface UserAccount {
@@ -235,8 +515,29 @@ export interface UserAccount {
   groupId?: number | string
   groupName?: string
   balance?: number | string
+  deposit?: number | string
   status?: string
   createdAt?: string
+  lastLoginAt?: string
+  realNameType?: string
+  realName?: string
+  subjectName?: string
+  certificateNo?: string
+  verificationStatus?: string
+}
+
+export interface UserFundAdjustPayload {
+  accountType: 'balance' | 'deposit'
+  direction: 'increase' | 'decrease'
+  amount: number
+  remark?: string
+}
+
+export interface UserCredentialPayload {
+  account: string
+  nickname?: string
+  newPassword?: string
+  confirmPassword?: string
 }
 
 export interface GroupRulePatchPayload {
@@ -252,6 +553,7 @@ export interface AdminProfile {
   id: number | string
   username: string
   nickname: string
+  balance?: number | string
   permissions: string[]
 }
 
@@ -260,10 +562,33 @@ export interface AdminAuthSession {
   profile: AdminProfile
 }
 
+export interface AdminStaff {
+  id: number | string
+  account: string
+  nickname: string
+  status: string
+  permissions: string[]
+  createdAt?: string
+  updatedAt?: string
+}
+
+export interface AdminStaffPayload {
+  account: string
+  nickname: string
+  password?: string
+  confirmPassword?: string
+  status: string
+  permissions: string[]
+}
+
 export interface SystemSetting {
   siteName: string
   logoUrl?: string
   customerService?: string
+  companyName?: string
+  icpRecordNo?: string
+  policeRecordNo?: string
+  disclaimer?: string
   paymentMode: string
   autoRefundEnabled: boolean
   smsProvider: string
@@ -271,6 +596,9 @@ export interface SystemSetting {
   upstreamSyncSeconds: number
   autoShelfEnabled: boolean
   autoPriceEnabled: boolean
+  registrationEnabled: boolean
+  registrationType: string
+  defaultUserGroupId?: number | string
   notificationReceivers: Record<string, string>
 }
 
@@ -309,6 +637,43 @@ export interface SmsLog {
   createdAt?: string
 }
 
+export interface SmsLoginSetting {
+  enabled: boolean
+  adminLoginEnabled: boolean
+  h5LoginEnabled: boolean
+  webLoginEnabled: boolean
+  provider: string
+  adminMobile: string
+  codeLength: number
+  ttlSeconds: number
+  cooldownSeconds: number
+  maxAttempts: number
+  genericConfig: Record<string, string>
+  tencentConfig: Record<string, string>
+  aliyunConfig: Record<string, string>
+}
+
+export interface SmsLoginSettingPayload extends SmsLoginSetting {}
+
+export interface CaptchaSetting {
+  enabled: boolean
+  adminLoginEnabled: boolean
+  h5LoginEnabled: boolean
+  webLoginEnabled: boolean
+  provider: string
+  tencentConfig: Record<string, string>
+  genericConfig: Record<string, string>
+}
+
+export interface CaptchaSettingPayload extends CaptchaSetting {}
+
+export interface CaptchaChallenge {
+  enabled: boolean
+  provider: string
+  appId: string
+  scene?: string
+}
+
 export interface OperationLog {
   id: number | string
   operator?: string
@@ -329,6 +694,15 @@ export interface MemberApiCredential {
   dailyLimit: number
   createdAt?: string
   lastUsedAt?: string
+}
+
+export interface MemberApiCredentialPayload {
+  enabled: boolean
+  appKey: string
+  appSecret?: string
+  resetSecret?: boolean
+  ipWhitelist: string[]
+  dailyLimit: number
 }
 
 export interface OpenApiLog {

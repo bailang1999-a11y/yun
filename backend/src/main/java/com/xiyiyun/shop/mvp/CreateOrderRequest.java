@@ -5,6 +5,16 @@ public record CreateOrderRequest(
     Integer quantity,
     String rechargeAccount,
     String buyerRemark,
-    String requestId
+    String requestId,
+    String terminal
 ) {
+    public CreateOrderRequest(
+        Long goodsId,
+        Integer quantity,
+        String rechargeAccount,
+        String buyerRemark,
+        String requestId
+    ) {
+        this(goodsId, quantity, rechargeAccount, buyerRemark, requestId, null);
+    }
 }

@@ -8,20 +8,36 @@ spring:
   application:
     name: xiyiyun-backend
   datasource:
-    url: jdbc:mysql://localhost:3306/xiyiyun?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://localhost:3306/xiyiyun?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
     username: xiyiyun
     password: xiyiyun_pwd
   data:
     redis:
       host: localhost
       port: 6379
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 12MB
 
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
 
 xiyiyun:
+  cors:
+    allowed-origins: ${XIYIYUN_CORS_ALLOWED_ORIGINS:*}
+  admin:
+    username: ${XIYIYUN_ADMIN_USERNAME:admin}
+    password-bcrypt: ${XIYIYUN_ADMIN_PASSWORD_BCRYPT:$2y$10$nj5upOsCRbbEPg1csaQlcOyosbleuZVG7BfL45uh81kG5FpDYWCIq}
+    nickname: ${XIYIYUN_ADMIN_NICKNAME:运营管理员}
   order:
     payment-timeout-minutes: 15
+  payment:
+    callback-secret: ${XIYIYUN_PAYMENT_CALLBACK_SECRET:xiyiyun_mock_payment_secret}
+  card:
+    encryption-secret: ${XIYIYUN_CARD_ENCRYPTION_SECRET:xiyiyun_dev_card_secret}
   delivery:
     auto-refund-on-card-empty: false
+  upload:
+    dir: ${XIYIYUN_UPLOAD_DIR:uploads}

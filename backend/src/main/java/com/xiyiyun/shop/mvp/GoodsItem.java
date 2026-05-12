@@ -14,6 +14,10 @@ public record GoodsItem(
     String subTitle,
     String description,
     List<String> benefitDurations,
+    String benefitType,
+    String benefitBrand,
+    Boolean priceLimited,
+    String priceLimitText,
     String coverUrl,
     List<String> detailImages,
     List<GoodsDetailBlock> detailBlocks,
@@ -38,7 +42,8 @@ public record GoodsItem(
     OffsetDateTime createdAt,
     OffsetDateTime updatedAt,
     List<String> availablePlatforms,
-    List<String> forbiddenPlatforms
+    List<String> forbiddenPlatforms,
+    Long cardKindId
 ) {
     public GoodsItem withStock(Integer nextStock) {
         return new GoodsItem(
@@ -50,6 +55,10 @@ public record GoodsItem(
             subTitle,
             description,
             benefitDurations,
+            benefitType,
+            benefitBrand,
+            priceLimited,
+            priceLimitText,
             coverUrl,
             detailImages,
             detailBlocks,
@@ -74,7 +83,51 @@ public record GoodsItem(
             createdAt,
             OffsetDateTime.now(),
             availablePlatforms,
-            forbiddenPlatforms
+            forbiddenPlatforms,
+            cardKindId
+        );
+    }
+
+    public GoodsItem withIntegrations(List<GoodsIntegrationItem> nextIntegrations) {
+        return new GoodsItem(
+            id,
+            categoryId,
+            categoryName,
+            goodsName,
+            name,
+            subTitle,
+            description,
+            benefitDurations,
+            benefitType,
+            benefitBrand,
+            priceLimited,
+            priceLimitText,
+            coverUrl,
+            detailImages,
+            detailBlocks,
+            nextIntegrations,
+            pollingEnabled,
+            monitoringEnabled,
+            type,
+            platform,
+            price,
+            originalPrice,
+            maxBuy,
+            requireRechargeAccount,
+            accountTypes,
+            priceTemplateId,
+            priceMode,
+            priceCoefficient,
+            priceFixedAdd,
+            stock,
+            sales,
+            status,
+            tags,
+            createdAt,
+            updatedAt,
+            availablePlatforms,
+            forbiddenPlatforms,
+            cardKindId
         );
     }
 }

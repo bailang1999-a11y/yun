@@ -4,14 +4,22 @@ import AdminLayout from '../components/AdminLayout.vue'
 const LoginView = () => import('../views/LoginView.vue')
 const DashboardView = () => import('../views/DashboardView.vue')
 const GoodsView = () => import('../views/GoodsView.vue')
+const GoodsMonitorView = () => import('../views/GoodsMonitorView.vue')
+const CardWarehouseView = () => import('../views/CardWarehouseView.vue')
 const PriceTemplatesView = () => import('../views/PriceTemplatesView.vue')
+const RechargeFieldsView = () => import('../views/RechargeFieldsView.vue')
 const CategoriesView = () => import('../views/CategoriesView.vue')
 const SuppliersView = () => import('../views/SuppliersView.vue')
+const SourceConnectView = () => import('../views/SourceConnectView.vue')
 const UpstreamMonitorView = () => import('../views/UpstreamMonitorView.vue')
+const PaymentChannelsView = () => import('../views/PaymentChannelsView.vue')
 const OrdersView = () => import('../views/OrdersView.vue')
 const OrderDetailView = () => import('../views/OrderDetailView.vue')
 const UsersView = () => import('../views/UsersView.vue')
+const StaffView = () => import('../views/StaffView.vue')
 const SettingsView = () => import('../views/SettingsView.vue')
+const SmsLoginSettingsView = () => import('../views/SmsLoginSettingsView.vue')
+const CaptchaSettingsView = () => import('../views/CaptchaSettingsView.vue')
 const AuditView = () => import('../views/AuditView.vue')
 
 const router = createRouter({
@@ -24,12 +32,21 @@ const router = createRouter({
       children: [
         { path: '', name: 'dashboard', component: DashboardView, meta: { title: '实时业务看板' } },
         { path: 'goods', name: 'goods', component: GoodsView, meta: { title: '商品管理' } },
+        { path: 'goods-monitor', name: 'goods-monitor', component: GoodsMonitorView, meta: { title: '商品监控' } },
+        { path: 'goods/monitor', redirect: { name: 'goods-monitor' } },
+        { path: 'goods/card-warehouse', name: 'card-warehouse', component: CardWarehouseView, meta: { title: '卡密仓库' } },
+        { path: 'goods/recharge-fields', name: 'recharge-fields', component: RechargeFieldsView, meta: { title: '充值字段管理' } },
         { path: 'goods/price-templates', name: 'goods-price-templates', component: PriceTemplatesView, meta: { title: '价格模板配置' } },
         { path: 'categories', name: 'categories', component: CategoriesView, meta: { title: '分类管理' } },
         { path: 'suppliers', name: 'suppliers', component: SuppliersView, meta: { title: '供应商管理' } },
+        { path: 'source-connect', name: 'source-connect', component: SourceConnectView, meta: { title: '货源对接' } },
         { path: 'upstream-monitor', name: 'upstream-monitor', component: UpstreamMonitorView, meta: { title: '上游监控看板' } },
+        { path: 'payment-channels', name: 'payment-channels', component: PaymentChannelsView, meta: { title: '支付通道管理' } },
         { path: 'users', name: 'users', component: UsersView, meta: { title: '用户与权限' } },
+        { path: 'staff', name: 'staff', component: StaffView, meta: { title: '员工账号' } },
         { path: 'settings', name: 'settings', component: SettingsView, meta: { title: '系统设置' } },
+        { path: 'sms-login-settings', name: 'sms-login-settings', component: SmsLoginSettingsView, meta: { title: '短信验证登录' } },
+        { path: 'captcha-settings', name: 'captcha-settings', component: CaptchaSettingsView, meta: { title: '人机验证配置' } },
         { path: 'audit', name: 'audit', component: AuditView, meta: { title: '审计与开放平台' } },
         { path: 'orders', name: 'orders', component: OrdersView, meta: { title: '订单管理' } },
         { path: 'orders/:orderNo', name: 'order-detail', component: OrderDetailView, meta: { title: '订单详情' } }

@@ -2,8 +2,8 @@ import { chromium } from 'playwright'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
-const h5Url = process.env.H5_URL || 'http://localhost:5173'
-const adminUrl = process.env.ADMIN_URL || 'http://localhost:5174'
+const h5Url = process.env.H5_URL || 'http://localhost:5174'
+const adminUrl = process.env.ADMIN_URL || 'http://localhost:5175'
 const outputDir = path.resolve('artifacts/browser-check')
 
 async function expectVisible(page, text, label) {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { LoaderCircle, Search } from 'lucide-vue-next'
 import AppTabbar from '../components/AppTabbar.vue'
@@ -19,8 +19,23 @@ const goods = computed(() => catalog.visibleGoods)
 const progressWidth = computed(() => `${Math.max(catalog.depthProgress, catalog.activePath.length ? 0.18 : 0.06) * 100}%`)
 const layerLabel = computed(() => (catalog.activePath.length ? `第 ${catalog.activePath.length + 1} 层类目` : '一级类目'))
 
-onMounted(() => {
+function refreshWhenVisible() {
+  if (document.visibilityState === 'visible') void catalog.loadCatalog()
+}
+
+function refreshCatalog() {
   void catalog.loadCatalog()
+}
+
+onMounted(() => {
+  refreshCatalog()
+  window.addEventListener('focus', refreshCatalog)
+  document.addEventListener('visibilitychange', refreshWhenVisible)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', refreshCatalog)
+  document.removeEventListener('visibilitychange', refreshWhenVisible)
 })
 
 function openGoods(item: GoodsCard) {
@@ -28,10 +43,27 @@ function openGoods(item: GoodsCard) {
 }
 
 function stockTone(item: GoodsCard) {
+  if (item.soldOut || !item.canBuy) return 'out'
   const label = item.stockLabel
-  if (/售罄|缺货|排队/.test(label)) return 'out'
+  if (/售罄|缺货|排队|库存 0/.test(label)) return 'out'
   if (/仅剩|紧张|告急|库存 0|库存 1|库存 2|库存 3/.test(label)) return 'low'
   return 'full'
+}
+
+function platformLabel(value: string) {
+  const labels: Record<string, string> = {
+    douyin: '抖音',
+    taobao: '淘宝',
+    pdd: '拼多多',
+    xianyu: '咸鱼',
+    xiaohongshu: '小红书',
+    private: '私域',
+    h5: 'H5',
+    web: 'Web',
+    pc: 'PC',
+    api: 'API'
+  }
+  return labels[value] || value
 }
 </script>
 
@@ -39,7 +71,7 @@ function stockTone(item: GoodsCard) {
   <main class="page">
     <header class="hero liquid-surface">
       <div>
-        <p class="eyebrow">X-Platform-Code: {{ catalog.platformCode }}</p>
+        <p class="eyebrow">实时同步后台商品</p>
         <h1>喜易云</h1>
         <p>卡密自动发货、直充秒到账、代充可追踪。</p>
       </div>
@@ -88,7 +120,7 @@ function stockTone(item: GoodsCard) {
       </div>
 
       <section v-if="catalog.errorMessage" class="notice warn">
-        {{ catalog.errorMessage }} 当前展示本地示例商品。
+        {{ catalog.errorMessage }} 请稍后重试。
       </section>
 
       <div class="section-title">
@@ -103,17 +135,36 @@ function stockTone(item: GoodsCard) {
       <section v-else-if="!goods.length" class="empty-state">暂无可售商品，请稍后再来。</section>
 
       <article v-for="item in goods" :key="item.id" class="goods-card liquid-surface" :data-stock="stockTone(item)">
-        <div class="cover" :data-type="item.type">{{ item.cover }}</div>
+        <div class="cover" :data-type="item.type">
+          <img v-if="item.coverUrl" :src="item.coverUrl" :alt="item.name" loading="lazy" />
+          <span v-else>{{ item.cover }}</span>
+        </div>
         <div class="goods-main">
           <div class="goods-head">
             <h2>{{ item.name }}</h2>
             <span>{{ typeLabel[item.type] }}</span>
           </div>
           <p class="muted">{{ item.faceValue }} · {{ item.stockLabel }}</p>
+          <div class="goods-tags">
+            <span v-for="tag in item.tags || []" :key="`custom-${tag}`" class="tag tag-custom">{{ tag }}</span>
+            <span v-for="duration in item.benefitDurations || []" :key="`duration-${duration}`" class="tag tag-time">{{ duration }}</span>
+            <span v-if="item.benefitType" class="tag tag-type">{{ item.benefitType }}</span>
+            <span v-if="item.benefitBrand" class="tag tag-brand">{{ item.benefitBrand }}</span>
+            <span v-if="item.priceLimitText" class="tag tag-limit">限价 {{ item.priceLimitText }}</span>
+            <span v-for="platform in item.availablePlatforms || []" :key="`sale-${platform}`" class="tag tag-sale">
+              {{ platformLabel(platform) }}
+            </span>
+            <span v-for="platform in item.forbiddenPlatforms || []" :key="`deny-${platform}`" class="tag tag-deny">
+              禁 {{ platformLabel(platform) }}
+            </span>
+            <span v-if="item.soldOut" class="tag tag-deny">已售罄</span>
+          </div>
           <div class="goods-foot">
             <strong class="metal-price">¥{{ item.price.toFixed(2) }}</strong>
             <del v-if="item.originalPrice">¥{{ item.originalPrice.toFixed(2) }}</del>
-            <button type="button" @click="openGoods(item)">购买</button>
+            <button type="button" :disabled="!item.canBuy" @click="openGoods(item)">
+              {{ item.canBuy ? '购买' : '暂不可买' }}
+            </button>
           </div>
         </div>
       </article>
@@ -136,16 +187,57 @@ function stockTone(item: GoodsCard) {
 
 <style scoped>
 .hero {
+  position: relative;
   min-height: 184px;
   padding: 26px 18px;
   display: flex;
   align-items: flex-end;
-  color: #fff;
+  color: #f8fbff;
   overflow: hidden;
   border-radius: 0 0 34px 34px;
   background:
-    linear-gradient(135deg, rgba(7, 14, 27, 0.58), rgba(8, 67, 72, 0.3)),
-    url("https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=1200&q=80") center/cover;
+    linear-gradient(135deg, rgba(7, 14, 27, 0.96), rgba(8, 67, 72, 0.72)),
+    repeating-linear-gradient(112deg, rgba(255, 255, 255, 0.11) 0 1px, transparent 1px 18px),
+    linear-gradient(145deg, #08111f, #0a3436 58%, #07111a);
+}
+
+.hero::before,
+.hero::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.hero::before {
+  width: 168px;
+  height: 108px;
+  right: -18px;
+  bottom: 22px;
+  border: 1px solid rgba(215, 255, 246, 0.2);
+  border-radius: 22px;
+  background:
+    linear-gradient(90deg, rgba(215, 255, 246, 0.08) 0 30%, transparent 30%),
+    linear-gradient(180deg, rgba(0, 255, 195, 0.2), rgba(88, 166, 255, 0.08));
+  box-shadow: -26px 20px 0 rgba(255, 255, 255, 0.045), 0 22px 48px rgba(0, 0, 0, 0.28);
+  transform: rotate(-8deg);
+}
+
+.hero::after {
+  width: 86px;
+  height: 86px;
+  right: 84px;
+  bottom: -22px;
+  border: 1px solid rgba(215, 255, 246, 0.18);
+  border-radius: 24px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.16), transparent 42%),
+    rgba(0, 255, 195, 0.09);
+  transform: rotate(14deg);
+}
+
+.hero > div {
+  position: relative;
+  z-index: 1;
 }
 
 .hero h1 {
@@ -311,13 +403,18 @@ function stockTone(item: GoodsCard) {
 .goods-card {
   position: relative;
   display: grid;
-  grid-template-columns: 82px 1fr;
-  gap: 12px;
-  padding: 14px;
-  margin-bottom: 12px;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 112px;
+  padding: 9px;
+  margin-bottom: 9px;
   overflow: hidden;
-  border-radius: 26px;
-  transition: transform 180ms ease, filter 180ms ease, box-shadow 180ms ease;
+  border-radius: 16px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.035)),
+    rgba(255, 255, 255, 0.05);
+  box-shadow: 0 14px 34px rgba(1, 8, 18, 0.2);
+  transition: transform 180ms ease, filter 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
 }
 
 .goods-card:active {
@@ -327,30 +424,30 @@ function stockTone(item: GoodsCard) {
 .goods-card::before {
   content: "";
   position: absolute;
-  top: 16px;
-  right: 16px;
+  top: 10px;
+  right: 10px;
   z-index: 1;
-  width: 9px;
-  height: 9px;
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
 }
 
 .goods-card[data-stock="full"] {
-  box-shadow: 0 0 42px rgba(0, 255, 195, 0.14);
+  box-shadow: 0 14px 34px rgba(1, 8, 18, 0.2), 0 0 28px rgba(0, 255, 195, 0.08);
 }
 
 .goods-card[data-stock="full"]::before {
   background: #00ffc3;
-  box-shadow: 0 0 20px #00ffc3;
+  box-shadow: 0 0 14px #00ffc3;
 }
 
 .goods-card[data-stock="low"] {
-  animation: amber-pulse 1.8s ease-in-out infinite;
+  box-shadow: 0 14px 34px rgba(1, 8, 18, 0.2), 0 0 24px rgba(255, 171, 0, 0.12);
 }
 
 .goods-card[data-stock="low"]::before {
   background: #ffab00;
-  box-shadow: 0 0 20px #ffab00;
+  box-shadow: 0 0 14px #ffab00;
 }
 
 .goods-card[data-stock="out"] {
@@ -363,16 +460,33 @@ function stockTone(item: GoodsCard) {
 }
 
 .cover {
-  width: 82px;
-  height: 82px;
-  border-radius: 24px;
+  width: 92px;
+  height: 92px;
+  align-self: center;
+  border-radius: 13px;
+  position: relative;
+  overflow: hidden;
   display: grid;
   place-items: center;
   color: #fff;
   font-weight: 800;
   background: linear-gradient(135deg, rgba(0, 255, 195, 0.68), rgba(10, 77, 80, 0.82));
-  box-shadow: inset 0 1px 18px rgba(255, 255, 255, 0.2), 0 14px 30px rgba(0, 0, 0, 0.22);
+  box-shadow: inset 0 1px 16px rgba(255, 255, 255, 0.18), 0 10px 22px rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(24px);
+}
+
+.cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.cover span {
+  position: relative;
+  z-index: 1;
 }
 
 .cover[data-type="DIRECT"] {
@@ -385,48 +499,132 @@ function stockTone(item: GoodsCard) {
 
 .goods-main {
   min-width: 0;
+  display: grid;
+  align-content: center;
 }
 
 .goods-head {
   display: flex;
-  gap: 8px;
+  gap: 7px;
   align-items: flex-start;
   justify-content: space-between;
+  padding-right: 11px;
 }
 
 .goods-head h2 {
   margin: 0;
   color: rgba(255, 255, 255, 0.92);
-  font-size: 15px;
-  line-height: 1.35;
-  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.32;
+  font-weight: 650;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   transition: font-weight 180ms ease;
 }
 
 .goods-card:focus-within .goods-head h2,
 .goods-card:hover .goods-head h2 {
-  font-weight: 600;
+  color: rgba(255, 255, 255, 0.98);
 }
 
 .goods-head span {
   flex: 0 0 auto;
-  padding: 3px 6px;
+  padding: 2px 6px;
   border-radius: 4px;
   color: #00ffc3;
   background: rgba(0, 255, 195, 0.1);
   border: 0.5px solid rgba(0, 255, 195, 0.16);
-  font-size: 11px;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.goods-main > .muted {
+  margin: 3px 0 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goods-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 42px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.tag {
+  min-height: 19px;
+  display: inline-flex;
+  align-items: center;
+  max-width: 82px;
+  padding: 2px 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+}
+
+.tag-time {
+  color: #c9fff4;
+  background: rgba(0, 214, 178, 0.14);
+  border-color: rgba(0, 229, 190, 0.28);
+}
+
+.tag-type {
+  color: #e4ddff;
+  background: rgba(122, 92, 255, 0.16);
+  border-color: rgba(148, 121, 255, 0.3);
+}
+
+.tag-brand {
+  color: #d6f0ff;
+  background: rgba(46, 152, 235, 0.15);
+  border-color: rgba(84, 180, 255, 0.3);
+}
+
+.tag-custom {
+  color: #e6fbff;
+  background: rgba(20, 184, 166, 0.15);
+  border-color: rgba(45, 212, 191, 0.3);
+}
+
+.tag-limit {
+  color: #fff3d2;
+  background: rgba(245, 158, 11, 0.18);
+  border-color: rgba(251, 191, 36, 0.34);
+}
+
+.tag-sale {
+  color: #eaf7ff;
+  background: rgba(68, 134, 255, 0.16);
+  border-color: rgba(106, 164, 255, 0.32);
+}
+
+.tag-deny {
+  color: #ffe1e1;
+  background: rgba(236, 77, 93, 0.14);
+  border-color: rgba(255, 112, 126, 0.3);
 }
 
 .goods-foot {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 10px;
+  gap: 6px;
+  margin-top: 7px;
 }
 
 .goods-foot strong {
-  font-size: 26px;
+  font-size: 21px;
   line-height: 1;
 }
 
@@ -437,9 +635,9 @@ function stockTone(item: GoodsCard) {
 
 .goods-foot button {
   margin-left: auto;
-  height: 36px;
-  min-width: 74px;
-  padding: 0 14px;
+  height: 30px;
+  min-width: 64px;
+  padding: 0 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -447,9 +645,11 @@ function stockTone(item: GoodsCard) {
   color: #fff;
   border: 0.5px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
+  background: linear-gradient(135deg, rgba(88, 166, 255, 0.86), rgba(122, 92, 255, 0.78));
+  box-shadow: 0 10px 24px rgba(64, 82, 220, 0.28);
   backdrop-filter: blur(22px);
+  font-size: 12px;
+  font-weight: 800;
   transition: transform 180ms ease;
 }
 

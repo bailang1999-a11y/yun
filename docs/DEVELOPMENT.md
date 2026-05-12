@@ -13,15 +13,17 @@
 ```bash
 npm install
 npm run dev:infra
+npm run dev:web
 npm run dev:h5
 npm run dev:admin
 ```
 
 访问地址：
 
-- 用户端 H5: `http://localhost:5173`
-- 管理后台: `http://localhost:5174`
-- Liquid Glass 原型: `http://localhost:5177`
+- Web 用户端: `http://localhost:5173`
+- 用户端 H5: `http://localhost:5174`
+- 管理后台: `http://localhost:5175`
+- Liquid Glass 原型: `http://localhost:5177`，仅用于本地设计探索，不属于生产发布范围
 - 后端健康检查: `http://localhost:8080/api/health`
 
 ## 常用命令
@@ -29,17 +31,24 @@ npm run dev:admin
 ```bash
 npm run build:h5
 npm run build:admin
-npm run build:liquid
 npm run build:backend
 npm run check
 npm run logs:backend
 ```
 
-Liquid Glass 原型独立放在 `apps/liquid-next`：
+Liquid Glass 原型独立放在 `apps/liquid-next`，不属于根 workspace；首次运行前在原型目录单独安装依赖：
+
+```bash
+cd apps/liquid-next
+npm install
+cd ../..
+```
 
 - `/`: 响应式总览，桌面显示多列，移动显示抽屉
 - `/web`: Web 端 Spatial Miller Columns
 - `/h5`: H5 端 Liquid Drawer
+
+原型可用 `npm run build:liquid` 单独验证，但生产 Compose、上线包和 `npm run check` 只覆盖 `apps/h5`、`apps/web`、`apps/admin` 与 `backend`。
 
 如果当前目录包含中文导致 Compose 自动项目名异常，请始终使用脚本或显式加 `-p xiyiyun`。
 

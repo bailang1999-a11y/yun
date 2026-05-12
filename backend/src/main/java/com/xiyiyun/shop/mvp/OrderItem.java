@@ -14,6 +14,8 @@ public record OrderItem(
     String goodsName,
     GoodsType goodsType,
     String platform,
+    String orderIp,
+    String orderIpLocation,
     Integer quantity,
     BigDecimal unitPrice,
     BigDecimal payAmount,
@@ -30,7 +32,60 @@ public record OrderItem(
     OffsetDateTime paidAt,
     OffsetDateTime deliveredAt
 ) {
+    public OrderItem(
+        String orderNo,
+        Long userId,
+        String buyerAccount,
+        Long goodsId,
+        String goodsName,
+        GoodsType goodsType,
+        String platform,
+        Integer quantity,
+        BigDecimal unitPrice,
+        BigDecimal payAmount,
+        OrderStatus status,
+        String rechargeAccount,
+        String buyerRemark,
+        String requestId,
+        String paymentNo,
+        String payMethod,
+        List<String> deliveryItems,
+        List<ChannelAttemptItem> channelAttempts,
+        String deliveryMessage,
+        OffsetDateTime createdAt,
+        OffsetDateTime paidAt,
+        OffsetDateTime deliveredAt
+    ) {
+        this(
+            orderNo,
+            userId,
+            buyerAccount,
+            goodsId,
+            goodsName,
+            goodsType,
+            platform,
+            "",
+            "",
+            quantity,
+            unitPrice,
+            payAmount,
+            status,
+            rechargeAccount,
+            buyerRemark,
+            requestId,
+            paymentNo,
+            payMethod,
+            deliveryItems,
+            channelAttempts,
+            deliveryMessage,
+            createdAt,
+            paidAt,
+            deliveredAt
+        );
+    }
+
     public OrderItem withStatus(OrderStatus nextStatus, String nextDeliveryMessage, OffsetDateTime nextDeliveredAt) {
+        OffsetDateTime resolvedDeliveredAt = resolveTerminalTime(nextStatus, nextDeliveredAt);
         return new OrderItem(
             orderNo,
             userId,
@@ -39,6 +94,8 @@ public record OrderItem(
             goodsName,
             goodsType,
             platform,
+            orderIp,
+            orderIpLocation,
             quantity,
             unitPrice,
             payAmount,
@@ -53,7 +110,7 @@ public record OrderItem(
             nextDeliveryMessage,
             createdAt,
             paidAt,
-            nextDeliveredAt
+            resolvedDeliveredAt
         );
     }
 
@@ -65,6 +122,7 @@ public record OrderItem(
         OffsetDateTime nextPaidAt,
         OffsetDateTime nextDeliveredAt
     ) {
+        OffsetDateTime resolvedDeliveredAt = resolveTerminalTime(nextStatus, nextDeliveredAt);
         return new OrderItem(
             orderNo,
             userId,
@@ -73,6 +131,8 @@ public record OrderItem(
             goodsName,
             goodsType,
             platform,
+            orderIp,
+            orderIpLocation,
             quantity,
             unitPrice,
             payAmount,
@@ -87,8 +147,18 @@ public record OrderItem(
             nextDeliveryMessage,
             createdAt,
             nextPaidAt,
-            nextDeliveredAt
+            resolvedDeliveredAt
         );
+    }
+
+    private static OffsetDateTime resolveTerminalTime(OrderStatus status, OffsetDateTime deliveredAt) {
+        if (deliveredAt != null || status == null) {
+            return deliveredAt;
+        }
+        return switch (status) {
+            case DELIVERED, FAILED, REFUNDED, CANCELLED, CLOSED -> OffsetDateTime.now();
+            default -> null;
+        };
     }
 
     public OrderItem withPayment(String nextPaymentNo, String nextPayMethod) {
@@ -100,6 +170,8 @@ public record OrderItem(
             goodsName,
             goodsType,
             platform,
+            orderIp,
+            orderIpLocation,
             quantity,
             unitPrice,
             payAmount,

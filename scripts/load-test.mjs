@@ -1,6 +1,9 @@
 const baseUrl = process.env.API_BASE_URL || 'http://localhost:8080'
 const concurrency = Number(process.env.CONCURRENCY || 12)
 const rounds = Number(process.env.ROUNDS || 20)
+const allowMutatingRemoteTest = process.env.ALLOW_MUTATING_REMOTE_TEST === '1'
+
+guardMutatingBaseUrl()
 
 async function json(path, options = {}) {
   const start = performance.now()
@@ -34,6 +37,16 @@ async function worker(index) {
     }))
   }
   return durations
+}
+
+function guardMutatingBaseUrl() {
+  const parsed = new URL(baseUrl)
+  const hostname = parsed.hostname.toLowerCase()
+  const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
+  if (!isLocal && !allowMutatingRemoteTest) {
+    throw new Error('load-test creates login sessions and orders, so it is blocked for non-local API_BASE_URL. Set ALLOW_MUTATING_REMOTE_TEST=1 only for an isolated staging environment.')
+  }
+  console.warn(`load-test: mutating demo load against ${baseUrl}`)
 }
 
 const startedAt = performance.now()

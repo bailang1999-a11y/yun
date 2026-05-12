@@ -26,5 +26,6 @@ export function getApiErrorMessage(error: unknown) {
     if (error.code === 'ECONNABORTED') return '接口响应超时，请稍后重试。'
     if (error.response?.status) return `请求失败（${error.response.status}）`
   }
+  if (error instanceof Error && error.message) return error.message
   return '请求失败，请稍后重试。'
 }

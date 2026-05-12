@@ -32,10 +32,12 @@ services:
       - maven-cache:/root/.m2
     command: mvn spring-boot:run
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/xiyiyun?useUnicode=true&characterEncoding=utf8mb4&serverTimezone=Asia/Shanghai
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/xiyiyun?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
       SPRING_DATASOURCE_USERNAME: xiyiyun
       SPRING_DATASOURCE_PASSWORD: xiyiyun_pwd
       SPRING_DATA_REDIS_HOST: redis
+      XIYIYUN_PAYMENT_CALLBACK_SECRET: ${XIYIYUN_PAYMENT_CALLBACK_SECRET:-xiyiyun_mock_payment_secret}
+      XIYIYUN_CARD_ENCRYPTION_SECRET: ${XIYIYUN_CARD_ENCRYPTION_SECRET:-xiyiyun_dev_card_secret}
     ports:
       - "8080:8080"
     depends_on:

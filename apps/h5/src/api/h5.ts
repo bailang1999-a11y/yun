@@ -1,13 +1,18 @@
 import { apiClient } from './client'
 import type {
   AuthSession,
+  CaptchaChallenge,
+  AuthPayload,
   CreateOrderPayload,
   DeliveryCard,
   GoodsCard,
   GoodsType,
   H5Category,
   H5Order,
+  H5SystemSetting,
   OrderDelivery,
+  PaymentChannel,
+  RechargeField,
   UserProfile
 } from '../types/h5'
 
@@ -15,6 +20,9 @@ type AnyRecord = Record<string, unknown>
 
 function unwrap(data: unknown): unknown {
   if (!isRecord(data)) return data
+  if ('code' in data && Number(data.code) !== 0) {
+    throw new Error(text(data.message ?? data.msg ?? data.error, '请求失败，请稍后重试。'))
+  }
   if ('data' in data) return unwrap(data.data)
   if ('result' in data) return unwrap(data.result)
   return data
@@ -48,8 +56,76 @@ function numberValue(value: unknown, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function optionalNumberValue(value: unknown) {
+  if (value === undefined || value === null || value === '') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function positiveInteger(value: unknown, fallback: number) {
+  const parsed = optionalNumberValue(value)
+  return parsed === undefined ? fallback : Math.max(1, Math.floor(parsed))
+}
+
 function stringArray(value: unknown) {
   return Array.isArray(value) ? value.map((item) => text(item)).filter(Boolean) : []
+}
+
+function mediaUrl(value: unknown) {
+  const url = text(value).trim()
+  if (!url) return undefined
+  if (/^(https?:|data:|blob:)/i.test(url)) return url
+  if (url.startsWith('/')) {
+    const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL
+    const baseUrl = import.meta.env.PROD
+      ? window.location.origin
+      : (configuredBaseUrl && configuredBaseUrl !== '/api' ? configuredBaseUrl : 'http://localhost:8080')
+    return `${baseUrl.replace(/\/$/, '')}${url}`
+  }
+  return url
+}
+
+function normalizePlatformList(value: unknown) {
+  return stringArray(value).map((item) => item.toLowerCase())
+}
+
+function normalizeTagList(value: unknown) {
+  const legacySystemTags = new Set(['new', 'api-source'])
+  const source = Array.isArray(value) ? stringArray(value) : text(value).split(/[,，]/)
+  const seen = new Set<string>()
+  return source
+    .map((item) => item.trim())
+    .filter((item) => {
+      if (!item || seen.has(item) || legacySystemTags.has(item.toLowerCase())) return false
+      seen.add(item)
+      return true
+    })
+}
+
+const SALE_TERMINAL_PLATFORMS = new Set(['all', 'h5', 'web', 'pc', 'api', 'private'])
+
+function hasSaleTerminalRestriction(platforms: string[]) {
+  return platforms.some((item) => SALE_TERMINAL_PLATFORMS.has(item))
+}
+
+function deriveStockLabel(stock: number | undefined, label: string) {
+  if (label) return label
+  if (stock === undefined) return '库存充足'
+  return `库存 ${stock}`
+}
+
+function deriveSoldOut(stock: number | undefined, stockLabel: string) {
+  if (stock !== undefined) return stock <= 0
+  return /售罄|缺货|无货|库存\s*0|库存：0|库存不足|仅剩\s*0|剩余\s*0|^\s*0\s*$/.test(stockLabel)
+}
+
+function canBuyOnH5(record: AnyRecord, soldOut: boolean, availablePlatforms: string[], forbiddenPlatforms: string[]) {
+  if (soldOut) return false
+  if (forbiddenPlatforms.includes('h5')) return false
+  if (hasSaleTerminalRestriction(availablePlatforms) && !availablePlatforms.includes('all') && !availablePlatforms.includes('h5')) return false
+  const status = text(record.status ?? record.saleStatus ?? record.sale_status).toUpperCase()
+  if (['OFF', 'OFFLINE', 'OFF_SALE', 'DISABLED', 'DISABLE', 'SOLD_OUT', 'CLOSED'].includes(status)) return false
+  return true
 }
 
 function mapGoodsType(value: unknown): GoodsType {
@@ -80,8 +156,17 @@ function normalizeGoods(item: unknown, categories: H5Category[]): GoodsCard {
     record.categoryName ?? category.name ?? categories.find((item) => item.id === categoryId)?.name,
     '未分类'
   )
-  const stock = record.stockLabel ?? record.stockCount ?? record.stock ?? record.inventory
+  const rawStock = record.stockCount ?? record.stock ?? record.inventory ?? record.stockNum ?? record.stock_num
+  const stock = optionalNumberValue(rawStock)
+  const stockLabel = deriveStockLabel(stock, text(record.stockLabel ?? record.stock_label))
+  const soldOut = deriveSoldOut(stock, stockLabel)
+  const maxBuy = positiveInteger(record.maxBuy ?? record.max_buy ?? record.maxQty ?? record.max_qty, 9)
+  const availablePlatforms = normalizePlatformList(record.availablePlatforms ?? record.available_platforms)
+  const forbiddenPlatforms = normalizePlatformList(record.forbiddenPlatforms ?? record.forbidden_platforms)
   const id = text(record.id ?? record.goodsId)
+
+  const priceLimitText = text(record.priceLimitText ?? record.price_limit_text)
+  const hasPriceLimit = Boolean(priceLimitText || (record.priceLimited ?? record.price_limited))
 
   return {
     id,
@@ -93,13 +178,40 @@ function normalizeGoods(item: unknown, categories: H5Category[]): GoodsCard {
         ? undefined
         : numberValue(record.originalPrice ?? record.original_price),
     type,
-    stockLabel: stock === undefined ? '库存充足' : `库存 ${text(stock)}`,
+    stock,
+    stockLabel,
+    maxBuy,
+    soldOut,
+    canBuy: canBuyOnH5(record, soldOut, availablePlatforms, forbiddenPlatforms),
     category: categoryName,
     categoryId,
     cover: text(record.cover ?? record.coverText, type === 'DIRECT' ? 'API' : type === 'MANUAL' ? 'MAN' : 'CARD'),
+    coverUrl: mediaUrl(record.coverUrl ?? record.cover_url ?? record.imageUrl ?? record.image_url),
     requireRechargeAccount: Boolean(record.requireRechargeAccount ?? record.require_recharge_account),
-    availablePlatforms: stringArray(record.availablePlatforms ?? record.available_platforms),
-    forbiddenPlatforms: stringArray(record.forbiddenPlatforms ?? record.forbidden_platforms)
+    accountTypes: stringArray(record.accountTypes ?? record.account_types),
+    benefitDurations: stringArray(record.benefitDurations ?? record.benefit_durations),
+    benefitType: text(record.benefitType ?? record.benefit_type) || undefined,
+    benefitBrand: text(record.benefitBrand ?? record.benefit_brand) || undefined,
+    tags: normalizeTagList(record.tags ?? record.goodsTags ?? record.goods_tags),
+    priceLimited: hasPriceLimit,
+    priceLimitText: priceLimitText || (hasPriceLimit ? '限价' : undefined),
+    availablePlatforms,
+    forbiddenPlatforms
+  }
+}
+
+function normalizeRechargeField(item: unknown): RechargeField {
+  const record = isRecord(item) ? item : {}
+  return {
+    id: text(record.id),
+    code: text(record.code),
+    label: text(record.label),
+    placeholder: text(record.placeholder),
+    helpText: text(record.helpText),
+    inputType: text(record.inputType, 'text'),
+    required: Boolean(record.required),
+    sort: numberValue(record.sort, 10),
+    enabled: record.enabled !== false
   }
 }
 
@@ -122,6 +234,20 @@ function normalizeOrder(item: unknown): H5Order {
     createdAt: text(record.createdAt ?? record.created_at) || undefined,
     paidAt: text(record.paidAt ?? record.paid_at) || undefined,
     deliveredAt: text(record.deliveredAt ?? record.delivered_at) || undefined
+  }
+}
+
+function normalizePaymentChannel(item: unknown): PaymentChannel {
+  const record = isRecord(item) ? item : {}
+  return {
+    id: text(record.id),
+    code: text(record.code),
+    name: text(record.name, '支付方式'),
+    type: text(record.type, 'CUSTOM'),
+    terminals: stringArray(record.terminals),
+    status: text(record.status, 'ENABLED'),
+    sort: numberValue(record.sort, 10),
+    remark: text(record.remark) || undefined
   }
 }
 
@@ -177,13 +303,62 @@ export async function fetchH5Categories() {
   return [{ id: 'all', name: '全部' }, ...categories]
 }
 
-export async function loginH5(account: string, code = '000000') {
-  const response = await apiClient.post('/api/h5/auth/sms/login', { account, code })
+export async function fetchH5RechargeFields() {
+  const response = await apiClient.get('/api/h5/recharge-fields')
+  return toArray(response.data)
+    .map(normalizeRechargeField)
+    .filter((item) => item.code && item.enabled)
+    .sort((left, right) => left.sort - right.sort)
+}
+
+export async function fetchH5Settings(): Promise<H5SystemSetting> {
+  const response = await apiClient.get('/api/h5/settings')
+  const setting = unwrap(response.data)
+  const record = isRecord(setting) ? setting : {}
+  return {
+    registrationEnabled: record.registrationEnabled !== false,
+    registrationType: text(record.registrationType, 'MOBILE'),
+    defaultUserGroupId: text(record.defaultUserGroupId)
+  }
+}
+
+export async function loginH5(account: string, code = '') {
+  const response = await apiClient.post('/api/h5/auth/sms/login', { account, code, terminal: 'h5' })
   const session = normalizeAuthSession(unwrap(response.data))
   if (!session.token) {
     throw new Error('login failed')
   }
   return session
+}
+
+export async function authH5(payload: AuthPayload) {
+  const response = await apiClient.post('/api/h5/auth', payload)
+  const session = normalizeAuthSession(unwrap(response.data))
+  if (!session.token) {
+    throw new Error('auth failed')
+  }
+  return session
+}
+
+export async function createH5SliderToken() {
+  const response = await apiClient.post('/api/h5/auth/slider', { terminal: 'h5' })
+  return text(unwrap(response.data))
+}
+
+export async function fetchH5CaptchaChallenge(terminal: 'h5' | 'web' = 'h5'): Promise<CaptchaChallenge> {
+  const response = await apiClient.get('/api/h5/auth/captcha-config', { params: { terminal } })
+  const record = isRecord(unwrap(response.data)) ? (unwrap(response.data) as AnyRecord) : {}
+  return {
+    enabled: Boolean(record.enabled),
+    provider: text(record.provider, 'TENCENT'),
+    appId: text(record.appId),
+    scene: text(record.scene, 'login')
+  }
+}
+
+export async function sendH5LoginSms(account: string, captchaTicket = '', captchaRandstr = '', mode: 'login' | 'register' | 'forgot' = 'login') {
+  const response = await apiClient.post('/api/h5/auth/sms/send', { account, terminal: 'h5', captchaTicket, captchaRandstr, mode })
+  return text(unwrap(response.data), '验证码已发送')
 }
 
 export async function fetchH5Me(token: string) {
@@ -198,7 +373,7 @@ export async function fetchH5Goods(
   query: { categoryId?: string; search?: string; platform?: string; page?: number; pageSize?: number } = {}
 ) {
   const response = await apiClient.get('/api/h5/goods', {
-    params: cleanParams(query)
+    params: cleanParams({ platform: 'h5', ...query })
   })
   return toArray(response.data).map((item) => normalizeGoods(item, categories)).filter((item) => item.id)
 }
@@ -208,7 +383,7 @@ export async function fetchH5GoodsPage(
   query: { categoryId?: string; search?: string; platform?: string; page: number; pageSize: number }
 ) {
   const response = await apiClient.get('/api/h5/goods', {
-    params: cleanParams(query)
+    params: cleanParams({ platform: 'h5', ...query })
   })
   const value = unwrap(response.data)
   if (!isRecord(value)) {
@@ -229,7 +404,9 @@ export async function fetchH5GoodsPage(
 }
 
 export async function fetchH5GoodsDetail(goodsId: string, categories: H5Category[] = []) {
-  const response = await apiClient.get(`/api/h5/goods/${encodeURIComponent(goodsId)}`)
+  const response = await apiClient.get(`/api/h5/goods/${encodeURIComponent(goodsId)}`, {
+    params: { terminal: 'h5', platform: 'h5' }
+  })
   return normalizeGoods(unwrap(response.data), categories)
 }
 
@@ -244,6 +421,13 @@ export async function payH5Order(orderNo: string, payMethod = 'wechat') {
     terminal: 'h5'
   })
   return normalizeOrder(unwrap(response.data))
+}
+
+export async function fetchH5PaymentChannels(terminal: 'h5' | 'web' | 'api' = 'h5') {
+  const response = await apiClient.get('/api/h5/payment-channels', { params: { terminal } })
+  return toArray(response.data)
+    .map(normalizePaymentChannel)
+    .filter((item) => item.code && item.status === 'ENABLED')
 }
 
 export async function cancelH5Order(orderNo: string) {

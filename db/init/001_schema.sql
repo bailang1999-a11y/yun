@@ -31,18 +31,59 @@ CREATE TABLE IF NOT EXISTS sales_platforms (
   KEY idx_sales_platforms_status_sort (status, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
+CREATE TABLE IF NOT EXISTS system_settings (
+  setting_key VARCHAR(128) PRIMARY KEY,
+  setting_value TEXT NULL,
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS user_groups (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
   name VARCHAR(128) NOT NULL,
   description VARCHAR(500) NULL,
   is_default TINYINT(1) NOT NULL DEFAULT 0,
   status VARCHAR(32) NOT NULL DEFAULT 'ENABLED',
+  order_enabled TINYINT(1) NOT NULL DEFAULT 1,
+  real_name_required_for_order TINYINT(1) NOT NULL DEFAULT 0,
+  price_limit_enabled TINYINT(1) NOT NULL DEFAULT 1,
+  price_limit_notice VARCHAR(500) NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   deleted_at DATETIME(3) NULL,
   version INT UNSIGNED NOT NULL DEFAULT 0,
   UNIQUE KEY uk_user_groups_name (name),
   KEY idx_user_groups_default_status (is_default, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS card_kinds (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  type VARCHAR(32) NOT NULL DEFAULT 'TEXT',
+  cost DECIMAL(18,4) NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  deleted_at DATETIME(3) NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_card_kinds_name (name),
+  KEY idx_card_kinds_type (type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS recharge_fields (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  code VARCHAR(64) NOT NULL,
+  label VARCHAR(128) NOT NULL,
+  placeholder VARCHAR(255) NULL,
+  help_text VARCHAR(500) NULL,
+  input_type VARCHAR(32) NOT NULL DEFAULT 'text',
+  is_required TINYINT(1) NOT NULL DEFAULT 0,
+  sort_no INT NOT NULL DEFAULT 0,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  deleted_at DATETIME(3) NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_recharge_fields_code (code),
+  KEY idx_recharge_fields_enabled_sort (enabled, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -82,6 +123,53 @@ CREATE TABLE IF NOT EXISTS group_goods_rules (
   UNIQUE KEY uk_group_goods_rule (group_id, rule_type, target_key),
   KEY idx_group_goods_rules_group_type (group_id, rule_type),
   KEY idx_group_goods_rules_target (rule_type, target_id, target_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS suppliers (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL,
+  platform_type VARCHAR(64) NOT NULL DEFAULT 'CUSTOM',
+  base_url VARCHAR(500) NOT NULL,
+  app_key VARCHAR(128) NULL,
+  app_secret_masked VARCHAR(128) NULL,
+  user_id VARCHAR(128) NULL,
+  app_id VARCHAR(128) NULL,
+  api_key VARCHAR(255) NULL,
+  api_key_ciphertext VARBINARY(1024) NULL,
+  api_key_nonce VARBINARY(32) NULL,
+  api_key_key_version VARCHAR(32) NULL,
+  api_key_hash CHAR(64) NULL,
+  api_key_masked VARCHAR(128) NULL,
+  callback_url VARCHAR(500) NULL,
+  timeout_seconds INT NOT NULL DEFAULT 30,
+  balance DECIMAL(18,4) NOT NULL DEFAULT 0,
+  status VARCHAR(32) NOT NULL DEFAULT 'ENABLED',
+  remark VARCHAR(500) NULL,
+  last_sync_at DATETIME(3) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  deleted_at DATETIME(3) NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_suppliers_name (name),
+  KEY idx_suppliers_status_type (status, platform_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS goods_channels (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  goods_id BIGINT UNSIGNED NOT NULL,
+  supplier_id BIGINT UNSIGNED NOT NULL,
+  supplier_name VARCHAR(128) NOT NULL,
+  supplier_goods_id VARCHAR(128) NOT NULL,
+  priority INT NOT NULL DEFAULT 10,
+  timeout_seconds INT NOT NULL DEFAULT 30,
+  status VARCHAR(32) NOT NULL DEFAULT 'ENABLED',
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  deleted_at DATETIME(3) NULL,
+  version INT UNSIGNED NOT NULL DEFAULT 0,
+  UNIQUE KEY uk_goods_channel_supplier_goods (goods_id, supplier_id, supplier_goods_id),
+  KEY idx_goods_channels_goods_priority (goods_id, priority, id),
+  KEY idx_goods_channels_supplier (supplier_id, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS goods (
@@ -139,7 +227,8 @@ CREATE TABLE IF NOT EXISTS goods_forbidden_platform (
 
 CREATE TABLE IF NOT EXISTS cards (
   id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
-  goods_id BIGINT UNSIGNED NOT NULL,
+  goods_id BIGINT UNSIGNED NULL,
+  card_kind_id BIGINT UNSIGNED NULL,
   batch_no VARCHAR(64) NOT NULL,
   card_ciphertext VARBINARY(4096) NOT NULL,
   card_nonce VARBINARY(32) NOT NULL,
@@ -155,7 +244,9 @@ CREATE TABLE IF NOT EXISTS cards (
   deleted_at DATETIME(3) NULL,
   version INT UNSIGNED NOT NULL DEFAULT 0,
   UNIQUE KEY uk_cards_goods_hash (goods_id, card_hash),
+  UNIQUE KEY uk_cards_kind_hash (card_kind_id, card_hash),
   KEY idx_cards_goods_status (goods_id, status),
+  KEY idx_cards_kind_status (card_kind_id, status),
   KEY idx_cards_locked_order (locked_order_id),
   KEY idx_cards_sold_order (sold_order_id),
   KEY idx_cards_batch (batch_no)
@@ -170,6 +261,8 @@ CREATE TABLE IF NOT EXISTS orders (
   goods_id BIGINT UNSIGNED NOT NULL,
   goods_name VARCHAR(200) NOT NULL,
   goods_type VARCHAR(32) NOT NULL,
+  order_ip VARCHAR(64) NULL,
+  order_ip_location VARCHAR(128) NULL,
   quantity INT NOT NULL,
   unit_price DECIMAL(18,4) NOT NULL,
   total_amount DECIMAL(18,4) NOT NULL,
@@ -177,6 +270,9 @@ CREATE TABLE IF NOT EXISTS orders (
   cost_amount DECIMAL(18,4) NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'CREATED',
   delivery_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+  delivery_message MEDIUMTEXT NULL,
+  delivery_items_json JSON NULL,
+  channel_attempts_json JSON NULL,
   recharge_account VARCHAR(255) NULL,
   buyer_remark VARCHAR(500) NULL,
   admin_remark VARCHAR(500) NULL,
@@ -232,6 +328,22 @@ CREATE TABLE IF NOT EXISTS payment_records (
   KEY idx_payment_order (order_id),
   KEY idx_payment_user_created (user_id, created_at),
   KEY idx_payment_status_created (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS payment_callback_logs (
+  id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,
+  provider VARCHAR(64) NOT NULL,
+  payment_no VARCHAR(64) NULL,
+  order_no VARCHAR(64) NULL,
+  callback_status VARCHAR(32) NULL,
+  channel_trade_no VARCHAR(128) NULL,
+  result VARCHAR(32) NOT NULL,
+  message VARCHAR(1000) NULL,
+  raw_payload JSON NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_payment_callback_payment (payment_no, created_at),
+  KEY idx_payment_callback_order (order_no, created_at),
+  KEY idx_payment_callback_result (result, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 CREATE TABLE IF NOT EXISTS refund_records (
@@ -341,14 +453,6 @@ CREATE TABLE IF NOT EXISTS open_api_logs (
   KEY idx_open_api_status_time (status, created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
-INSERT IGNORE INTO categories (id, parent_id, name, sort_no, status) VALUES
-  (1001, NULL, '视频会员', 10, 'ON_SALE'),
-  (1002, NULL, '游戏点卡', 20, 'ON_SALE'),
-  (1003, NULL, '话费充值', 30, 'ON_SALE'),
-  (1101, 1001, '爱奇艺会员', 11, 'ON_SALE'),
-  (1102, 1001, '腾讯视频会员', 12, 'ON_SALE'),
-  (1201, 1002, 'Steam 钱包', 21, 'ON_SALE');
-
 INSERT IGNORE INTO sales_platforms (id, platform_code, platform_name, platform_type, status, sort_no, config) VALUES
   (2001, 'douyin', '抖音', 'MARKETPLACE', 'NORMAL', 10, JSON_OBJECT('entry', 'douyin')),
   (2002, 'taobao', '淘宝', 'MARKETPLACE', 'NORMAL', 20, JSON_OBJECT('entry', 'taobao')),
@@ -358,67 +462,4 @@ INSERT IGNORE INTO sales_platforms (id, platform_code, platform_name, platform_t
   (2006, 'private', '私域', 'SELF', 'NORMAL', 60, JSON_OBJECT('entry', 'private'));
 
 INSERT IGNORE INTO user_groups (id, name, description, is_default, status) VALUES
-  (7001, '默认会员', '注册后自动归入的基础用户组', 1, 'ENABLED'),
-  (7002, '渠道 VIP', '仅开放 H5，屏蔽人工代充类目', 0, 'ENABLED'),
-  (7003, '受限会员', '风控观察组，限制游戏直充和 PC 端购买', 0, 'ENABLED');
-
-INSERT IGNORE INTO users (id, mobile, email, nickname, group_id, balance, status) VALUES
-  (8001, '13800000001', 'alpha@example.com', 'Alpha 买家', 7001, 128.6600, 'NORMAL'),
-  (8002, '13800000002', 'vip@example.com', '渠道 VIP', 7002, 888.0000, 'NORMAL'),
-  (8003, '13800000003', 'risk@example.com', '受限会员', 7003, 12.3000, 'FROZEN');
-
-INSERT IGNORE INTO group_goods_rules (id, group_id, rule_type, target_id, target_code, permission) VALUES
-  (9001, 7002, 'CATEGORY', 1003, NULL, 'DENY'),
-  (9002, 7002, 'PLATFORM', NULL, 'pc', 'DENY'),
-  (9003, 7003, 'CATEGORY', 1002, NULL, 'DENY'),
-  (9004, 7003, 'PLATFORM', NULL, 'pc', 'DENY');
-
-INSERT IGNORE INTO goods (
-  id, category_id, name, goods_type, status, face_value, sale_price, cost_price,
-  stock_mode, stock_count, min_qty, max_qty, delivery_template, sort_no, description
-) VALUES
-  (
-    3001, 1101, '爱奇艺黄金 VIP 月卡', 'CARD', 'ON_SALE', 25.0000, 19.9000, 15.0000,
-    'LOCAL', 6, 1, 3,
-    JSON_OBJECT('delivery_type', 'CARD', 'auto_delivery', true),
-    10, '本地卡密自动发货，适合 MVP 验证购买和发货流程。'
-  ),
-  (
-    3002, 1201, 'Steam 钱包 50 元充值卡', 'CARD', 'ON_SALE', 50.0000, 48.8000, 45.0000,
-    'LOCAL', 4, 1, 2,
-    JSON_OBJECT('delivery_type', 'CARD', 'auto_delivery', true),
-    20, 'Steam 钱包充值卡，支付成功后自动展示卡密。'
-  ),
-  (
-    3003, 1003, '手机话费 100 元直充', 'DIRECT_RECHARGE', 'ON_SALE', 100.0000, 99.0000, 97.0000,
-    'API', 9999, 1, 1,
-    JSON_OBJECT('delivery_type', 'DIRECT_RECHARGE', 'account_required', true, 'account_label', '手机号'),
-    30, '直充商品示例，用于验证充值账号和发货任务流程。'
-  );
-
-INSERT IGNORE INTO goods_available_platform (id, goods_id, platform_id, status) VALUES
-  (4001, 3001, 2001, 'NORMAL'),
-  (4002, 3001, 2002, 'NORMAL'),
-  (4003, 3002, 2001, 'NORMAL'),
-  (4004, 3002, 2002, 'NORMAL'),
-  (4005, 3003, 2001, 'NORMAL'),
-  (4006, 3003, 2002, 'NORMAL');
-
-INSERT IGNORE INTO goods_forbidden_platform (id, goods_id, platform_id, reason) VALUES
-  (5001, 3001, 2003, '暂不支持微信小程序使用'),
-  (5002, 3002, 2003, '暂不支持微信小程序使用'),
-  (5003, 3003, 2003, '暂不支持微信小程序使用');
-
-INSERT IGNORE INTO cards (
-  id, goods_id, batch_no, card_ciphertext, card_nonce, card_key_version, card_hash, card_preview, status
-) VALUES
-  (6001, 3001, 'MVP-IQIYI-202604', UNHEX('6d76702d69716979692d6369706865722d30303031'), UNHEX('000000000000000000000001'), 'mvp-v1', '8a6a81ff0d6b24c234889934d20b46d91637e1cb1064c2713a6d8e81bb9e0011', 'IQY1****0001', 'UNSOLD'),
-  (6002, 3001, 'MVP-IQIYI-202604', UNHEX('6d76702d69716979692d6369706865722d30303032'), UNHEX('000000000000000000000002'), 'mvp-v1', '8a6a81ff0d6b24c234889934d20b46d91637e1cb1064c2713a6d8e81bb9e0012', 'IQY1****0002', 'UNSOLD'),
-  (6003, 3001, 'MVP-IQIYI-202604', UNHEX('6d76702d69716979692d6369706865722d30303033'), UNHEX('000000000000000000000003'), 'mvp-v1', '8a6a81ff0d6b24c234889934d20b46d91637e1cb1064c2713a6d8e81bb9e0013', 'IQY1****0003', 'UNSOLD'),
-  (6004, 3001, 'MVP-IQIYI-202604', UNHEX('6d76702d69716979692d6369706865722d30303034'), UNHEX('000000000000000000000004'), 'mvp-v1', '8a6a81ff0d6b24c234889934d20b46d91637e1cb1064c2713a6d8e81bb9e0014', 'IQY1****0004', 'UNSOLD'),
-  (6005, 3001, 'MVP-IQIYI-202604', UNHEX('6d76702d69716979692d6369706865722d30303035'), UNHEX('000000000000000000000005'), 'mvp-v1', '8a6a81ff0d6b24c234889934d20b46d91637e1cb1064c2713a6d8e81bb9e0015', 'IQY1****0005', 'UNSOLD'),
-  (6006, 3001, 'MVP-IQIYI-202604', UNHEX('6d76702d69716979692d6369706865722d30303036'), UNHEX('000000000000000000000006'), 'mvp-v1', '8a6a81ff0d6b24c234889934d20b46d91637e1cb1064c2713a6d8e81bb9e0016', 'IQY1****0006', 'UNSOLD'),
-  (6101, 3002, 'MVP-STEAM-202604', UNHEX('6d76702d737465616d2d6369706865722d30303031'), UNHEX('000000000000000000001001'), 'mvp-v1', '45f14da922c2396ceea643bcbf1d6ae5353e54dc15652ce197ef145fd1fe1001', 'STM5****0001', 'UNSOLD'),
-  (6102, 3002, 'MVP-STEAM-202604', UNHEX('6d76702d737465616d2d6369706865722d30303032'), UNHEX('000000000000000000001002'), 'mvp-v1', '45f14da922c2396ceea643bcbf1d6ae5353e54dc15652ce197ef145fd1fe1002', 'STM5****0002', 'UNSOLD'),
-  (6103, 3002, 'MVP-STEAM-202604', UNHEX('6d76702d737465616d2d6369706865722d30303033'), UNHEX('000000000000000000001003'), 'mvp-v1', '45f14da922c2396ceea643bcbf1d6ae5353e54dc15652ce197ef145fd1fe1003', 'STM5****0003', 'UNSOLD'),
-  (6104, 3002, 'MVP-STEAM-202604', UNHEX('6d76702d737465616d2d6369706865722d30303034'), UNHEX('000000000000000000001004'), 'mvp-v1', '45f14da922c2396ceea643bcbf1d6ae5353e54dc15652ce197ef145fd1fe1004', 'STM5****0004', 'UNSOLD');
+  (1, '默认会员', '注册后自动归入的基础用户组', 1, 'ENABLED');

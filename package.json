@@ -1,32 +1,41 @@
 {
   "name": "xiyiyun-platform",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "workspaces": [
     "apps/h5",
     "apps/admin",
-    "apps/liquid-next"
+    "apps/web"
   ],
   "scripts": {
     "dev:h5": "npm --workspace apps/h5 run dev",
     "dev:admin": "npm --workspace apps/admin run dev",
-    "dev:liquid": "npm --workspace apps/liquid-next run dev -- --port 5177",
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:liquid": "npm --prefix apps/liquid-next run dev -- --port 5177",
     "dev:db": "docker compose -p xiyiyun up -d mysql redis",
     "dev:backend": "docker compose -p xiyiyun up -d backend",
     "dev:infra": "docker compose -p xiyiyun up -d mysql redis backend",
     "logs:backend": "docker compose -p xiyiyun logs -f backend",
     "build:h5": "npm --workspace apps/h5 run build",
     "build:admin": "npm --workspace apps/admin run build",
-    "build:liquid": "npm --workspace apps/liquid-next run build",
+    "build:web": "npm --workspace apps/web run build",
+    "build:liquid": "npm --prefix apps/liquid-next run build",
     "build:backend": "docker compose -p xiyiyun run --rm backend mvn -q -DskipTests package",
-    "typecheck": "npm --workspace apps/h5 run build && npm --workspace apps/admin run build",
+    "test:backend": "docker compose -p xiyiyun run --rm backend mvn -q test",
+    "typecheck": "npm --workspace apps/h5 run build && npm --workspace apps/web run build && npm --workspace apps/admin run build",
     "smoke": "node scripts/smoke-test.mjs",
+    "schema:check": "node scripts/schema-check.mjs",
+    "prod:preflight": "node scripts/prod-preflight.mjs",
+    "launch:verify": "node scripts/launch-verify.mjs",
     "load:test": "node scripts/load-test.mjs",
     "browser:check": "node scripts/browser-check.mjs",
-    "check": "npm run typecheck && npm run build:backend && npm run smoke"
+    "check": "npm run schema:check && npm run typecheck && npm run test:backend && npm run smoke"
   },
   "overrides": {
-    "postcss": "^8.5.10"
+    "postcss": "^8.5.10",
+    "next": {
+      "postcss": "^8.5.10"
+    }
   },
   "devDependencies": {
     "playwright": "^1.59.1"

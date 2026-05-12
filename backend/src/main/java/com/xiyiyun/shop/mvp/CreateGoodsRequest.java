@@ -11,6 +11,10 @@ public record CreateGoodsRequest(
     String subTitle,
     String description,
     List<String> benefitDurations,
+    String benefitType,
+    String benefitBrand,
+    Boolean priceLimited,
+    String priceLimitText,
     String coverUrl,
     List<String> detailImages,
     List<GoodsDetailBlock> detailBlocks,
@@ -32,6 +36,7 @@ public record CreateGoodsRequest(
     String status,
     List<String> tags,
     List<String> availablePlatforms,
-    List<String> forbiddenPlatforms
+    List<String> forbiddenPlatforms,
+    Long cardKindId
 ) {
 }

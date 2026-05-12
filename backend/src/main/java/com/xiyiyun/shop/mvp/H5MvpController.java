@@ -1,6 +1,7 @@
 package com.xiyiyun.shop.mvp;
 
 import com.xiyiyun.shop.ApiResponse;
+import jakarta.servlet.http.HttpServletRequest;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -25,22 +26,71 @@ public class H5MvpController {
         return ApiResponse.ok(repository.listCategories());
     }
 
+    @GetMapping("/recharge-fields")
+    public ApiResponse<List<RechargeFieldItem>> rechargeFields() {
+        return ApiResponse.ok(repository.listRechargeFields(true));
+    }
+
+    @GetMapping("/settings")
+    public ApiResponse<SystemSettingItem> settings() {
+        return ApiResponse.ok(repository.systemSetting());
+    }
+
+    @GetMapping("/payment-channels")
+    public ApiResponse<List<PaymentChannelItem>> paymentChannels(@RequestParam(required = false) String terminal) {
+        return ApiResponse.ok(repository.listEnabledPaymentChannels(terminal));
+    }
+
     @PostMapping("/auth/login")
-    public ApiResponse<AuthSession<UserItem>> login(@RequestBody LoginRequest request) {
+    public ApiResponse<AuthSession<UserItem>> login(@RequestBody LoginRequest request, HttpServletRequest servletRequest) {
         try {
-            return ApiResponse.ok(repository.loginUser(request));
+            return ApiResponse.ok(repository.loginUser(request, clientIp(servletRequest)));
         } catch (IllegalArgumentException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
     }
 
     @PostMapping("/auth/sms/login")
-    public ApiResponse<AuthSession<UserItem>> smsLogin(@RequestBody LoginRequest request) {
+    public ApiResponse<AuthSession<UserItem>> smsLogin(@RequestBody LoginRequest request, HttpServletRequest servletRequest) {
         try {
-            return ApiResponse.ok(repository.loginUser(request));
+            return ApiResponse.ok(repository.loginUser(request, clientIp(servletRequest)));
         } catch (IllegalArgumentException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
+    }
+
+    @PostMapping("/auth")
+    public ApiResponse<AuthSession<UserItem>> auth(@RequestBody UserAuthRequest request, HttpServletRequest servletRequest) {
+        try {
+            return ApiResponse.ok(repository.authenticateUser(request, clientIp(servletRequest)));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @GetMapping("/auth/captcha-config")
+    public ApiResponse<CaptchaChallengeItem> captchaConfig(@RequestParam(required = false) String terminal) {
+        return ApiResponse.ok(repository.captchaChallenge(terminal));
+    }
+
+    @PostMapping("/auth/slider")
+    public ApiResponse<String> slider(@RequestBody(required = false) SendSmsCodeRequest request) {
+        return ApiResponse.ok(repository.createSliderToken(request == null ? "h5" : request.terminal()));
+    }
+
+    @PostMapping("/auth/sms/send")
+    public ApiResponse<String> sendSmsCode(@RequestBody SendSmsCodeRequest request, HttpServletRequest servletRequest) {
+        try {
+            return ApiResponse.ok(repository.sendUserLoginSmsCode(request, clientIp(servletRequest)));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/auth/logout")
+    public ApiResponse<String> logout(@RequestHeader(value = "Authorization", required = false) String token) {
+        repository.logoutUser(token);
+        return ApiResponse.ok("ok");
     }
 
     @GetMapping("/users/me")
@@ -50,8 +100,55 @@ public class H5MvpController {
             .orElseGet(() -> ApiResponse.fail("unauthorized"));
     }
 
+    @GetMapping("/member-api")
+    public ApiResponse<MemberApiCredentialItem> memberApi(@RequestHeader(value = "Authorization", required = false) String token) {
+        return repository.findUserByToken(token)
+            .map(user -> ApiResponse.ok(repository.memberCredentialForUser(user.id())))
+            .orElseGet(() -> ApiResponse.fail("unauthorized"));
+    }
+
+    @PostMapping("/member-api")
+    public ApiResponse<MemberApiCredentialItem> saveMemberApi(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @RequestBody MemberApiCredentialRequest request
+    ) {
+        try {
+            Long userId = repository.findUserByToken(token).map(UserItem::id).orElseThrow(() -> new IllegalArgumentException("unauthorized"));
+            return ApiResponse.ok(repository.saveMemberCredential(userId, request));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/users/me/password")
+    public ApiResponse<UserItem> changePassword(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @RequestBody PasswordChangeRequest request
+    ) {
+        try {
+            Long userId = repository.findUserByToken(token).map(UserItem::id).orElseThrow(() -> new IllegalArgumentException("unauthorized"));
+            return ApiResponse.ok(repository.changeUserPassword(userId, request));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
+    @PostMapping("/recharge-requests")
+    public ApiResponse<RechargeRequestResult> createRechargeRequest(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @RequestBody RechargeRequest request
+    ) {
+        try {
+            Long userId = repository.findUserByToken(token).map(UserItem::id).orElseThrow(() -> new IllegalArgumentException("unauthorized"));
+            return ApiResponse.ok(repository.createRechargeRequest(userId, request));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @GetMapping("/goods")
     public ApiResponse<?> goods(
+        @RequestHeader(value = "Authorization", required = false) String token,
         @RequestParam(required = false) Long categoryId,
         @RequestParam(required = false) String search,
         @RequestParam(required = false) String platform,
@@ -59,7 +156,8 @@ public class H5MvpController {
         @RequestParam(required = false) Integer page,
         @RequestParam(required = false) Integer pageSize
     ) {
-        List<GoodsItem> goods = repository.listGoods(categoryId, search, platform, userGroupId, false);
+        Long effectiveUserGroupId = repository.findUserByToken(token).map(UserItem::groupId).orElse(userGroupId);
+        List<GoodsItem> goods = repository.listGoods(categoryId, search, platform, effectiveUserGroupId, false);
         if (page == null && pageSize == null) {
             return ApiResponse.ok(goods);
         }
@@ -72,8 +170,13 @@ public class H5MvpController {
     }
 
     @GetMapping("/goods/{id}")
-    public ApiResponse<GoodsItem> goodsDetail(@PathVariable Long id) {
-        return repository.findGoods(id)
+    public ApiResponse<GoodsItem> goodsDetail(
+        @PathVariable Long id,
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @RequestParam(required = false) Long userGroupId
+    ) {
+        Long effectiveUserGroupId = repository.findUserByToken(token).map(UserItem::groupId).orElse(userGroupId);
+        return repository.findGoods(id, effectiveUserGroupId, false)
             .map(ApiResponse::ok)
             .orElseGet(() -> ApiResponse.fail("goods not found"));
     }
@@ -81,11 +184,12 @@ public class H5MvpController {
     @PostMapping("/orders")
     public ApiResponse<OrderItem> createOrder(
         @RequestHeader(value = "Authorization", required = false) String token,
-        @RequestBody CreateOrderRequest request
+        @RequestBody CreateOrderRequest request,
+        HttpServletRequest servletRequest
     ) {
         try {
             Long userId = repository.findUserByToken(token).map(UserItem::id).orElseThrow(() -> new IllegalArgumentException("unauthorized"));
-            return ApiResponse.ok(repository.createOrder(request, userId));
+            return ApiResponse.ok(repository.createOrder(request, userId, clientIp(servletRequest), "h5"));
         } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
@@ -164,5 +268,17 @@ public class H5MvpController {
         } catch (IllegalArgumentException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
+    }
+
+    private String clientIp(HttpServletRequest request) {
+        String forwarded = request.getHeader("X-Forwarded-For");
+        if (forwarded != null && !forwarded.isBlank()) {
+            return forwarded.split(",")[0].trim();
+        }
+        String realIp = request.getHeader("X-Real-IP");
+        if (realIp != null && !realIp.isBlank()) {
+            return realIp.trim();
+        }
+        return request.getRemoteAddr();
     }
 }

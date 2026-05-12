@@ -6,6 +6,10 @@ public record UpdateSystemSettingRequest(
     String siteName,
     String logoUrl,
     String customerService,
+    String companyName,
+    String icpRecordNo,
+    String policeRecordNo,
+    String disclaimer,
     String paymentMode,
     Boolean autoRefundEnabled,
     String smsProvider,
@@ -13,5 +17,8 @@ public record UpdateSystemSettingRequest(
     Integer upstreamSyncSeconds,
     Boolean autoShelfEnabled,
     Boolean autoPriceEnabled,
+    Boolean registrationEnabled,
+    String registrationType,
+    Long defaultUserGroupId,
     Map<String, String> notificationReceivers
 ) {}

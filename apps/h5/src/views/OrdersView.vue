@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { RefreshCw } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
@@ -7,6 +7,7 @@ import { fetchH5Orders } from '../api/h5'
 import { subscribeOrderEvents } from '../api/realtime'
 import AppTabbar from '../components/AppTabbar.vue'
 import type { H5Order } from '../types/h5'
+import { formatOrderProcessingDuration } from '../utils/orderDuration'
 
 const route = useRoute()
 const orders = ref<H5Order[]>([])
@@ -14,8 +15,13 @@ const loading = ref(false)
 const syncing = ref(false)
 const lastSyncedAt = ref('')
 const errorMessage = ref('')
+const copyMessage = ref('')
+const copyFallback = ref<{ label: string; content: string } | null>(null)
+const fallbackTextarea = ref<HTMLTextAreaElement | null>(null)
 const activeStatus = ref('ALL')
 let refreshTimer: number | undefined
+let durationTimer: number | undefined
+let copyTimer: number | undefined
 let unsubscribeRealtime: (() => void) | undefined
 
 const activeOrderNo = computed(() => String(route.query.orderNo ?? ''))
@@ -57,6 +63,9 @@ onMounted(() => {
   refreshTimer = window.setInterval(() => {
     void loadOrders({ silent: true })
   }, 8000)
+  durationTimer = window.setInterval(() => {
+    orders.value = [...orders.value]
+  }, 1000)
   unsubscribeRealtime = subscribeOrderEvents((event) => {
     if (event.type === 'ORDER_UPDATED') void loadOrders({ silent: true })
   })
@@ -64,6 +73,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
+  if (durationTimer) window.clearInterval(durationTimer)
+  if (copyTimer) window.clearTimeout(copyTimer)
   unsubscribeRealtime?.()
 })
 
@@ -97,6 +108,61 @@ function formatTime(value?: string) {
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
+
+async function copyText(value: string | undefined, label: string) {
+  const content = (value || '').trim()
+  if (!content) return
+
+  try {
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(content)
+    } else {
+      copyWithTextarea(content)
+    }
+    copyMessage.value = `${label}已复制`
+    copyFallback.value = null
+  } catch {
+    showCopyFallback(label, content)
+  }
+
+  if (copyTimer) window.clearTimeout(copyTimer)
+  copyTimer = window.setTimeout(() => {
+    copyMessage.value = ''
+  }, 1800)
+}
+
+function copyWithTextarea(content: string) {
+  const textarea = document.createElement('textarea')
+  textarea.value = content
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '0'
+  textarea.style.left = '0'
+  textarea.style.width = '1px'
+  textarea.style.height = '1px'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.focus({ preventScroll: true })
+  textarea.select()
+  textarea.setSelectionRange(0, content.length)
+  const copied = document.execCommand('copy')
+  document.body.removeChild(textarea)
+  if (!copied) throw new Error('copy command failed')
+}
+
+function showCopyFallback(label: string, content: string) {
+  copyFallback.value = { label, content }
+  copyMessage.value = '当前浏览器限制自动复制，请长按下方内容复制。'
+  void nextTick(() => {
+    fallbackTextarea.value?.focus({ preventScroll: true })
+    fallbackTextarea.value?.select()
+    fallbackTextarea.value?.setSelectionRange(0, content.length)
+  })
+}
+
+function closeCopyFallback() {
+  copyFallback.value = null
+}
 </script>
 
 <template>
@@ -117,6 +183,7 @@ function formatTime(value?: string) {
     </section>
 
     <section v-if="errorMessage" class="notice danger" role="alert">{{ errorMessage }}</section>
+    <section v-if="copyMessage" class="notice success" role="status">{{ copyMessage }}</section>
     <section v-if="activeOrderNo" class="notice success">订单 {{ activeOrderNo }} 已创建，可在列表中查看处理状态。</section>
 
     <nav class="status-tabs" aria-label="订单状态筛选">
@@ -141,13 +208,23 @@ function formatTime(value?: string) {
       :class="{ active: order.orderNo === activeOrderNo, muted: ['CANCELLED', 'REFUNDED'].includes(order.status) }"
     >
       <div class="order-top">
-        <span>{{ order.orderNo }}</span>
+        <button class="copy-order-no" type="button" @click="copyText(order.orderNo, '订单号')">{{ order.orderNo }}</button>
         <strong>{{ formatStatus(order.status) }}</strong>
       </div>
       <h2>{{ order.goodsName }}</h2>
       <div class="order-meta">
         <span>数量 x{{ order.quantity }}</span>
         <span>{{ formatTime(order.createdAt) }}</span>
+      </div>
+      <div class="duration-line">
+        <span>订单处理耗时</span>
+        <strong>{{ formatOrderProcessingDuration(order) }}</strong>
+      </div>
+      <div class="account-line">
+        <span>充值账号</span>
+        <button type="button" :disabled="!order.rechargeAccount" @click="copyText(order.rechargeAccount, '充值账号')">
+          {{ order.rechargeAccount || '-' }}
+        </button>
       </div>
       <div class="order-foot">
         <span v-if="order.deliveryStatus">发货：{{ formatStatus(order.deliveryStatus) }}</span>
@@ -164,6 +241,28 @@ function formatTime(value?: string) {
         </RouterLink>
       </div>
     </article>
+
+    <Teleport to="body">
+      <div v-if="copyFallback" class="copy-sheet" role="dialog" aria-modal="true" aria-label="手动复制">
+        <div class="copy-sheet-card">
+          <div class="copy-sheet-head">
+            <div>
+              <span>{{ copyFallback.label }}</span>
+              <strong>长按复制</strong>
+            </div>
+            <button type="button" @click="closeCopyFallback">关闭</button>
+          </div>
+          <textarea
+            ref="fallbackTextarea"
+            readonly
+            :value="copyFallback.content"
+            aria-label="复制内容"
+            @click="fallbackTextarea?.select()"
+          />
+          <p>如果没有自动复制成功，请长按上方内容，选择复制。</p>
+        </div>
+      </div>
+    </Teleport>
 
     <AppTabbar />
   </main>
@@ -326,6 +425,19 @@ h1 {
   font-size: 12px;
 }
 
+.copy-order-no {
+  min-width: 0;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 12px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .order-top strong {
   color: #00ffc3;
   font-size: 13px;
@@ -340,6 +452,60 @@ h1 {
   color: rgba(255, 255, 255, 0.9);
   font-size: 16px;
   font-weight: 500;
+}
+
+.account-line {
+  margin-top: 10px;
+  padding: 10px 11px;
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.045);
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.duration-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 11px;
+  border-radius: 16px;
+  color: rgba(255, 255, 255, 0.52);
+  background: rgba(0, 255, 195, 0.055);
+  border: 0.5px solid rgba(0, 255, 195, 0.16);
+  font-size: 12px;
+}
+
+.duration-line strong {
+  color: #00ffc3;
+  font-size: 13px;
+}
+
+.account-line span {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12px;
+}
+
+.account-line button {
+  min-width: 0;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-line button:disabled {
+  color: rgba(255, 255, 255, 0.4);
 }
 
 .order-foot {
@@ -371,6 +537,76 @@ h1 {
 
 .order-actions a:first-child:last-child {
   grid-column: 1 / -1;
+}
+
+.copy-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, 0.46);
+  backdrop-filter: blur(14px);
+}
+
+.copy-sheet-card {
+  width: min(100%, 420px);
+  max-height: calc(100vh - 48px);
+  padding: 16px;
+  border-radius: 22px;
+  background: rgba(20, 32, 52, 0.92);
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.34);
+  overflow: auto;
+}
+
+.copy-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.copy-sheet-head span,
+.copy-sheet-card p {
+  display: block;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
+}
+
+.copy-sheet-head strong {
+  display: block;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 17px;
+}
+
+.copy-sheet-head button {
+  height: 34px;
+  padding: 0 13px;
+  color: #00ffc3;
+  border: 0.5px solid rgba(0, 255, 195, 0.24);
+  border-radius: 999px;
+  background: rgba(0, 255, 195, 0.09);
+}
+
+.copy-sheet-card textarea {
+  width: 100%;
+  min-height: 74px;
+  padding: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 15px;
+  line-height: 1.5;
+  resize: none;
+  border-radius: 16px;
+  border: 0.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.copy-sheet-card p {
+  margin: 10px 0 0;
 }
 
 .spin {

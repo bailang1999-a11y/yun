@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Copy, Search } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
@@ -16,13 +16,24 @@ const errorMessage = ref('')
 const copyMessage = ref('')
 const securityMessage = ref('')
 const rippleActive = ref(false)
+const repeatConfirmVisible = ref(false)
 const delivery = ref<OrderDelivery | null>(null)
 const viewedStorageKey = 'xiyiyun-viewed-card-orders'
+let refreshTimer: number | undefined
 
 onMounted(() => {
   orderNo.value = String(route.query.orderNo ?? '')
   void loadOrders()
   if (orderNo.value) void loadDelivery()
+  refreshTimer = window.setInterval(() => void loadOrders(), 8000)
+  window.addEventListener('focus', refreshCards)
+  document.addEventListener('visibilitychange', refreshWhenVisible)
+})
+
+onBeforeUnmount(() => {
+  if (refreshTimer) window.clearInterval(refreshTimer)
+  window.removeEventListener('focus', refreshCards)
+  document.removeEventListener('visibilitychange', refreshWhenVisible)
 })
 
 watch(
@@ -31,6 +42,14 @@ watch(
     orderNo.value = String(value ?? '')
   }
 )
+
+function refreshCards() {
+  void loadOrders()
+}
+
+function refreshWhenVisible() {
+  if (document.visibilityState === 'visible') refreshCards()
+}
 
 async function loadOrders() {
   loadingOrders.value = true
@@ -55,10 +74,23 @@ async function loadDelivery() {
   copyMessage.value = ''
   securityMessage.value = ''
   delivery.value = null
-  if (hasViewedOrder(currentOrderNo) && !window.confirm('该订单卡密已查看过。再次显示前，请确认周围环境安全。')) {
+  if (hasViewedOrder(currentOrderNo)) {
     loadingDelivery.value = false
+    repeatConfirmVisible.value = true
     return
   }
+
+  await loadDeliveryConfirmed(currentOrderNo)
+}
+
+async function loadDeliveryConfirmed(currentOrderNo = orderNo.value.trim()) {
+  if (!currentOrderNo) return
+  loadingDelivery.value = true
+  errorMessage.value = ''
+  copyMessage.value = ''
+  securityMessage.value = ''
+  delivery.value = null
+  repeatConfirmVisible.value = false
 
   try {
     delivery.value = await fetchH5OrderDelivery(currentOrderNo)
@@ -73,6 +105,10 @@ async function loadDelivery() {
   } finally {
     loadingDelivery.value = false
   }
+}
+
+function cancelRepeatConfirm() {
+  repeatConfirmVisible.value = false
 }
 
 async function copyCard(cardNo: string, secret?: string) {
@@ -172,6 +208,20 @@ function getViewedOrders() {
     </section>
 
     <section v-else class="empty">输入或选择订单号，即可查看卡号、密码和使用说明。</section>
+
+    <Teleport to="body">
+      <div v-if="repeatConfirmVisible" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="repeatCardTitle">
+        <div class="confirm-dialog-card">
+          <span>安全确认</span>
+          <strong id="repeatCardTitle">该订单卡密已查看过</strong>
+          <p>再次显示前，请确认周围环境安全，避免卡密被旁人看到。</p>
+          <div class="confirm-actions">
+            <button type="button" class="ghost" @click="cancelRepeatConfirm">取消</button>
+            <button type="button" @click="loadDeliveryConfirmed()">继续查看</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <AppTabbar />
   </main>
@@ -371,5 +421,72 @@ select {
   background: #00ffc3;
   border: 0;
   border-radius: 999px;
+}
+
+.confirm-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 8, 18, 0.66);
+  backdrop-filter: blur(14px);
+}
+
+.confirm-dialog-card {
+  width: min(420px, 100%);
+  padding: 26px;
+  color: rgba(255, 255, 255, 0.9);
+  text-align: center;
+  border-radius: 24px;
+  background: linear-gradient(145deg, rgba(11, 25, 45, 0.94), rgba(6, 35, 36, 0.9));
+  border: 1px solid rgba(0, 255, 195, 0.18);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+.confirm-dialog-card span {
+  display: inline-flex;
+  padding: 5px 12px;
+  color: #00ffc3;
+  border-radius: 999px;
+  background: rgba(0, 255, 195, 0.1);
+  border: 1px solid rgba(0, 255, 195, 0.2);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.confirm-dialog-card strong {
+  display: block;
+  margin-top: 14px;
+  font-size: 21px;
+}
+
+.confirm-dialog-card p {
+  margin: 12px 0 0;
+  color: rgba(214, 226, 240, 0.74);
+  line-height: 1.8;
+}
+
+.confirm-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.confirm-actions button {
+  height: 44px;
+  color: #04110e;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #00ffc3, #dffff6);
+  font-weight: 800;
+}
+
+.confirm-actions .ghost {
+  color: rgba(226, 236, 247, 0.84);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 </style>

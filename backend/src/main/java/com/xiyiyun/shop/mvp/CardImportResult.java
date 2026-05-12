@@ -7,6 +7,16 @@ public record CardImportResult(
     int importTotal,
     int successCount,
     int duplicateCount,
-    List<Integer> failedLines
+    List<Integer> failedLines,
+    Long cardKindId
 ) {
+    public CardImportResult(
+        Long goodsId,
+        int importTotal,
+        int successCount,
+        int duplicateCount,
+        List<Integer> failedLines
+    ) {
+        this(goodsId, importTotal, successCount, duplicateCount, failedLines, null);
+    }
 }

@@ -4,6 +4,8 @@ import java.math.BigDecimal;
 
 public record GoodsIntegrationItem(
     String id,
+    Long supplierId,
+    String supplierName,
     String platformCode,
     String supplierGoodsId,
     String supplierGoodsName,

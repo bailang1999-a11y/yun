@@ -66,7 +66,7 @@ public class MemberMvpController {
     ) {
         try {
             UserItem user = auth(appKey, timestamp, nonce, signature, request);
-            return ApiResponse.ok(repository.createMemberOrder(body, user.id()));
+            return ApiResponse.ok(repository.createMemberOrder(body, user.id(), clientIp(request)));
         } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
@@ -113,6 +113,18 @@ public class MemberMvpController {
     }
 
     private UserItem auth(String appKey, String timestamp, String nonce, String signature, HttpServletRequest request) {
-        return repository.authenticateMemberApi(appKey, timestamp, nonce, signature, request.getRequestURI());
+        return repository.authenticateMemberApi(appKey, timestamp, nonce, signature, request.getRequestURI(), clientIp(request));
+    }
+
+    private String clientIp(HttpServletRequest request) {
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        if (forwardedFor != null && !forwardedFor.isBlank()) {
+            return forwardedFor.split(",")[0].trim();
+        }
+        String realIp = request.getHeader("X-Real-IP");
+        if (realIp != null && !realIp.isBlank()) {
+            return realIp.trim();
+        }
+        return request.getRemoteAddr();
     }
 }

@@ -14,13 +14,54 @@ export interface GoodsCard {
   price: number
   originalPrice?: number
   type: GoodsType
+  stock?: number
   stockLabel: string
+  maxBuy: number
+  soldOut: boolean
+  canBuy: boolean
   category: string
   categoryId?: string
   cover: string
+  coverUrl?: string
   requireRechargeAccount: boolean
+  accountTypes: string[]
+  benefitDurations?: string[]
+  benefitType?: string
+  benefitBrand?: string
+  tags?: string[]
+  priceLimited?: boolean
+  priceLimitText?: string
   availablePlatforms?: string[]
   forbiddenPlatforms?: string[]
+}
+
+export interface RechargeField {
+  id: string
+  code: string
+  label: string
+  placeholder: string
+  helpText: string
+  inputType: string
+  required: boolean
+  sort: number
+  enabled: boolean
+}
+
+export interface PaymentChannel {
+  id: string
+  code: string
+  name: string
+  type: string
+  terminals: string[]
+  status: string
+  sort: number
+  remark?: string
+}
+
+export interface H5SystemSetting {
+  registrationEnabled: boolean
+  registrationType: string
+  defaultUserGroupId?: string
 }
 
 export interface H5Order {
@@ -48,6 +89,7 @@ export interface CreateOrderPayload {
   rechargeAccount?: string
   buyerRemark?: string
   requestId: string
+  terminal?: 'h5' | 'web' | 'api'
 }
 
 export interface DeliveryCard {
@@ -81,4 +123,23 @@ export interface UserProfile {
 export interface AuthSession {
   token: string
   profile: UserProfile
+}
+
+export interface AuthPayload {
+  account: string
+  password?: string
+  confirmPassword?: string
+  code?: string
+  terminal: 'h5' | 'web'
+  sliderToken?: string
+  captchaTicket?: string
+  captchaRandstr?: string
+  mode: 'login' | 'register' | 'forgot'
+}
+
+export interface CaptchaChallenge {
+  enabled: boolean
+  provider: string
+  appId: string
+  scene?: string
 }

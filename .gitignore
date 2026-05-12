@@ -1,11 +1,15 @@
 node_modules/
 dist/
+artifacts/
+.logs/
 .DS_Store
 .env
 .env.*
 !.env.example
 !.env.feiniu.example
 target/
+.next/
 *.log
+backend/uploads/
 .idea/
 .vscode/

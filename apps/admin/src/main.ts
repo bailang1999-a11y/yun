@@ -6,12 +6,16 @@ import {
   ElCheckbox,
   ElCheckboxGroup,
   ElDialog,
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
   ElForm,
   ElFormItem,
   ElInput,
   ElInputNumber,
   ElLoading,
   ElOption,
+  ElPagination,
   ElRadio,
   ElRadioGroup,
   ElSelect,
@@ -19,6 +23,7 @@ import {
   ElTable,
   ElTableColumn,
   ElTag,
+  ElTreeSelect,
   ElUpload
 } from 'element-plus'
 import 'element-plus/dist/index.css'
@@ -34,12 +39,16 @@ const app = createApp(App)
   ElCheckbox,
   ElCheckboxGroup,
   ElDialog,
+  ElDropdown,
+  ElDropdownItem,
+  ElDropdownMenu,
   ElForm,
   ElFormItem,
   ElInput,
   ElInputNumber,
   ElLoading,
   ElOption,
+  ElPagination,
   ElRadio,
   ElRadioGroup,
   ElSelect,
@@ -47,6 +56,7 @@ const app = createApp(App)
   ElTable,
   ElTableColumn,
   ElTag,
+  ElTreeSelect,
   ElUpload
 ].forEach((component) => {
   app.use(component)
