@@ -1,7 +1,7 @@
 import { apiClient } from './client'
 import { numberValue, stringArray, text } from './normalize'
 import { type ApiEnvelope, unwrapValue } from './response'
-import type { AdminAuthSession, AdminProfile } from '../types/operations'
+import type { AdminAuthSession, AdminCredentialPayload, AdminProfile } from '../types/operations'
 
 export async function loginAdmin(account: string, password: string, code = '', captchaTicket = '', captchaRandstr = '') {
   const { data } = await apiClient.post<unknown>('/api/admin/auth/login', { account, password, code, terminal: 'admin', captchaTicket, captchaRandstr })
@@ -21,6 +21,11 @@ export async function createAdminSliderToken() {
 export async function fetchAdminMe() {
   const { data } = await apiClient.get<unknown>('/api/admin/auth/me')
 
+  return normalizeAdminProfile(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function updateSuperAdminCredentials(payload: AdminCredentialPayload) {
+  const { data } = await apiClient.post<unknown>('/api/admin/auth/credentials', payload)
   return normalizeAdminProfile(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 

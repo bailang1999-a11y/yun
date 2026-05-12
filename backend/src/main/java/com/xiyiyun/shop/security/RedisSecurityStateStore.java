@@ -88,6 +88,17 @@ public class RedisSecurityStateStore {
         }
     }
 
+    public void deleteAdminSessions() {
+        try {
+            Set<String> keys = redisTemplate.keys(ADMIN_TOKEN_PREFIX + "*");
+            if (keys != null && !keys.isEmpty()) {
+                redisTemplate.delete(keys);
+            }
+        } catch (RuntimeException ex) {
+            log.warn("Redis admin session invalidation failed: {}", ex.getMessage());
+        }
+    }
+
     public void invalidateUserTokens(Long userId) {
         if (userId == null) {
             return;

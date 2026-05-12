@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import {
   Activity,
   BarChart3,
@@ -11,6 +12,7 @@ import {
   PlugZap,
   CreditCard,
   MessageSquareText,
+  KeyRound,
   ScanLine,
   ShieldCheck,
   Settings,
@@ -20,8 +22,8 @@ import {
   Users,
   WalletCards
 } from 'lucide-vue-next'
-import { fetchAdminMe } from '../api/auth'
-import type { AdminProfile } from '../types/operations'
+import { fetchAdminMe, updateSuperAdminCredentials } from '../api/auth'
+import type { AdminCredentialPayload, AdminProfile } from '../types/operations'
 import { formatMoney as formatAmount } from '../utils/formatters'
 
 const route = useRoute()
@@ -29,6 +31,15 @@ const router = useRouter()
 const profile = ref<AdminProfile | null>(null)
 const sessionReady = ref(false)
 const goodsMenuOpen = ref(false)
+const credentialDialogVisible = ref(false)
+const credentialSaving = ref(false)
+const credentialForm = reactive<AdminCredentialPayload>({
+  currentPassword: '',
+  account: '',
+  nickname: '',
+  newPassword: '',
+  confirmPassword: ''
+})
 
 const navItems = [
   { icon: BarChart3, label: '仪表盘', name: 'dashboard', permission: 'dashboard:read' },
@@ -60,6 +71,7 @@ const displayName = computed(() => profile.value?.nickname || profile.value?.use
 const displayAccount = computed(() => profile.value?.username || 'admin')
 const visibleNavItems = computed(() => navItems.filter((item) => hasPermission(item.permission)))
 const canUseGoodsMenu = computed(() => hasPermission('goods:manage'))
+const isSuperAdmin = computed(() => String(profile.value?.id || '') === '1')
 
 watch(
   () => route.name,
@@ -96,6 +108,54 @@ function hasPermission(permission: string) {
   if (!profile.value) return true
   return profile.value.permissions.includes(permission)
 }
+
+function openCredentialDialog() {
+  if (!profile.value) return
+  credentialForm.currentPassword = ''
+  credentialForm.account = profile.value.username || ''
+  credentialForm.nickname = profile.value.nickname || ''
+  credentialForm.newPassword = ''
+  credentialForm.confirmPassword = ''
+  credentialDialogVisible.value = true
+}
+
+async function submitSuperAdminCredentials() {
+  if (!credentialForm.currentPassword.trim()) {
+    ElMessage.warning('请输入当前密码')
+    return
+  }
+  if (!credentialForm.account.trim()) {
+    ElMessage.warning('请输入超级管理员账号')
+    return
+  }
+  if ((credentialForm.newPassword || credentialForm.confirmPassword) && (credentialForm.newPassword || '').length < 6) {
+    ElMessage.warning('新密码至少需要 6 位')
+    return
+  }
+  if ((credentialForm.newPassword || '') !== (credentialForm.confirmPassword || '')) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+
+  credentialSaving.value = true
+  try {
+    await updateSuperAdminCredentials({
+      currentPassword: credentialForm.currentPassword,
+      account: credentialForm.account.trim(),
+      nickname: credentialForm.nickname.trim(),
+      newPassword: credentialForm.newPassword || '',
+      confirmPassword: credentialForm.confirmPassword || ''
+    })
+    localStorage.removeItem('xiyiyun_admin_token')
+    ElMessage.success('超级管理员账号密码已更新，请重新登录')
+    credentialDialogVisible.value = false
+    void router.replace({ name: 'login' })
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '超级管理员账号密码更新失败')
+  } finally {
+    credentialSaving.value = false
+  }
+}
 </script>
 
 <template>
@@ -119,6 +179,10 @@ function hasPermission(permission: string) {
             {{ formatMoney(profile?.balance) }}
           </strong>
         </div>
+        <button v-if="isSuperAdmin" type="button" class="account-security" @click="openCredentialDialog">
+          <KeyRound :size="14" />
+          <span>修改超管账号密码</span>
+        </button>
       </section>
       <div v-if="canUseGoodsMenu" class="nav-group" :class="{ open: goodsMenuOpen, active: isGoodsActive }">
         <button
@@ -170,6 +234,33 @@ function hasPermission(permission: string) {
 
       <RouterView v-if="sessionReady" />
     </section>
+
+    <el-dialog v-model="credentialDialogVisible" title="修改超级管理员账号密码" width="620px" class="xiyiyun-glass-dialog admin-credential-dialog">
+      <el-form label-position="top" class="admin-credential-form">
+        <el-form-item label="当前密码">
+          <el-input v-model="credentialForm.currentPassword" type="password" show-password autocomplete="current-password" placeholder="请输入当前超级管理员密码" />
+        </el-form-item>
+        <div class="credential-grid">
+          <el-form-item label="超级管理员账号">
+            <el-input v-model.trim="credentialForm.account" autocomplete="username" placeholder="例如 admin" />
+          </el-form-item>
+          <el-form-item label="显示名称">
+            <el-input v-model.trim="credentialForm.nickname" placeholder="例如 运营管理员" />
+          </el-form-item>
+          <el-form-item label="新密码">
+            <el-input v-model="credentialForm.newPassword" type="password" show-password autocomplete="new-password" placeholder="留空则不修改密码" />
+          </el-form-item>
+          <el-form-item label="确认新密码">
+            <el-input v-model="credentialForm.confirmPassword" type="password" show-password autocomplete="new-password" placeholder="再次输入新密码" />
+          </el-form-item>
+        </div>
+        <p class="credential-hint">保存后会清理所有后台登录态，并要求使用新账号密码重新登录。</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="credentialDialogVisible = false">取消</el-button>
+        <el-button type="primary" :icon="KeyRound" :loading="credentialSaving" @click="submitSuperAdminCredentials">保存并重新登录</el-button>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -301,6 +392,31 @@ function hasPermission(permission: string) {
   font-size: 12px;
   font-weight: 800;
   white-space: nowrap;
+}
+
+.account-security {
+  position: relative;
+  z-index: 1;
+  justify-content: center;
+  height: 34px !important;
+  margin-top: 0 !important;
+  color: rgba(255, 255, 255, 0.76) !important;
+  border-color: rgba(0, 255, 195, 0.18) !important;
+  background: rgba(255, 255, 255, 0.055) !important;
+  font-size: 12px;
+}
+
+.credential-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+}
+
+.credential-hint {
+  margin: 2px 0 0;
+  color: rgba(226, 232, 240, 0.62);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 .sidebar button {

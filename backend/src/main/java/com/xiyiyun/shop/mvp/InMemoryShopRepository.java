@@ -71,6 +71,9 @@ public class InMemoryShopRepository {
     private static final String PAYMENT_CHANNEL_SETTING_KEY = "payment.channels";
     private static final String PRICE_TEMPLATE_SETTING_KEY = "price.templates";
     private static final String ADMIN_STAFF_SETTING_KEY = "admin.staff.accounts";
+    private static final String SUPER_ADMIN_USERNAME_KEY = "admin.super.username";
+    private static final String SUPER_ADMIN_PASSWORD_KEY = "admin.super.passwordHash";
+    private static final String SUPER_ADMIN_NICKNAME_KEY = "admin.super.nickname";
     private static final List<String> ALL_ADMIN_PERMISSIONS = List.of(
         "dashboard:read",
         "goods:manage",
@@ -219,9 +222,9 @@ public class InMemoryShopRepository {
     private final ConfigPersistenceStore configPersistenceStore;
     private final RedisSecurityStateStore securityStateStore;
     private final boolean prodProfile;
-    private final String adminUsername;
-    private final String adminPasswordBcrypt;
-    private final String adminNickname;
+    private volatile String adminUsername;
+    private volatile String adminPasswordBcrypt;
+    private volatile String adminNickname;
 
     public InMemoryShopRepository(
         OrderRealtimeBroadcaster realtimeBroadcaster,
@@ -293,6 +296,7 @@ public class InMemoryShopRepository {
         this.adminPasswordBcrypt = defaultText(adminPasswordBcrypt, DEFAULT_ADMIN_PASSWORD_BCRYPT);
         this.adminNickname = defaultText(adminNickname, "运营管理员");
         loadPersistentSystemSetting();
+        loadSuperAdminCredentials();
         loadSmsLoginSetting();
         loadCaptchaSetting();
         loadAdminStaff();
@@ -1031,6 +1035,57 @@ public class InMemoryShopRepository {
         if (securityStateStore != null) {
             securityStateStore.deleteAdminToken(cleanToken);
         }
+    }
+
+    private void logoutAllAdmins() {
+        adminTokens.clear();
+        adminTokenExpiresAt.clear();
+        if (securityStateStore != null) {
+            securityStateStore.deleteAdminSessions();
+        }
+    }
+
+    public synchronized AdminProfile updateSuperAdminCredentials(String token, AdminCredentialRequest request) {
+        String cleanToken = cleanBearerToken(token);
+        AdminProfile operator = findAdminByToken(cleanToken)
+            .orElseThrow(() -> new IllegalStateException("登录已失效，请重新登录"));
+        if (!Objects.equals(operator.id(), 1L)) {
+            throw new IllegalStateException("只有超级管理员可以修改超级管理员账号密码");
+        }
+
+        String currentPassword = defaultText(request == null ? "" : request.currentPassword(), "");
+        if (!ADMIN_PASSWORD_ENCODER.matches(currentPassword, adminPasswordBcrypt)) {
+            throw new IllegalArgumentException("当前密码不正确");
+        }
+
+        String nextAccount = normalize(request == null ? "" : request.account());
+        if (!StringUtils.hasText(nextAccount)) {
+            throw new IllegalArgumentException("请填写超级管理员登录账号");
+        }
+        validateSuperAdminAccount(nextAccount);
+
+        String nextNickname = defaultText(request == null ? "" : request.nickname(), "").trim();
+        if (!StringUtils.hasText(nextNickname)) {
+            nextNickname = "运营管理员";
+        }
+
+        String nextPasswordHash = adminPasswordBcrypt;
+        String nextPassword = defaultText(request == null ? "" : request.newPassword(), "");
+        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
+        if (StringUtils.hasText(nextPassword) || StringUtils.hasText(confirmPassword)) {
+            validateNewPassword(nextPassword, confirmPassword);
+            nextPasswordHash = ADMIN_PASSWORD_ENCODER.encode(nextPassword);
+        }
+
+        adminUsername = nextAccount;
+        adminNickname = nextNickname;
+        adminPasswordBcrypt = nextPasswordHash;
+        persistRuntimeSetting(SUPER_ADMIN_USERNAME_KEY, adminUsername);
+        persistRuntimeSetting(SUPER_ADMIN_NICKNAME_KEY, adminNickname);
+        persistRuntimeSetting(SUPER_ADMIN_PASSWORD_KEY, adminPasswordBcrypt);
+        logoutAllAdmins();
+        appendOperation("SUPER_ADMIN_CREDENTIAL_UPDATE", "ADMIN", "1", adminUsername);
+        return new AdminProfile(1L, adminUsername, adminNickname, ALL_ADMIN_PERMISSIONS);
     }
 
     public synchronized List<AdminStaffItem> listAdminStaff() {
@@ -7895,6 +7950,29 @@ public class InMemoryShopRepository {
         }
     }
 
+    private void loadSuperAdminCredentials() {
+        if (configPersistenceStore == null) {
+            return;
+        }
+        try {
+            Map<String, String> settings = configPersistenceStore.systemSettings();
+            String username = normalize(defaultText(settings.get(SUPER_ADMIN_USERNAME_KEY), ""));
+            String passwordHash = defaultText(settings.get(SUPER_ADMIN_PASSWORD_KEY), "");
+            String nickname = defaultText(settings.get(SUPER_ADMIN_NICKNAME_KEY), "").trim();
+            if (StringUtils.hasText(username)) {
+                adminUsername = username;
+            }
+            if (StringUtils.hasText(passwordHash)) {
+                adminPasswordBcrypt = passwordHash;
+            }
+            if (StringUtils.hasText(nickname)) {
+                adminNickname = nickname;
+            }
+        } catch (RuntimeException ex) {
+            appendOperation("PERSISTENCE_READ_FALLBACK", "SUPER_ADMIN", "CREDENTIALS", persistenceErrorMessage(ex));
+        }
+    }
+
     private void loadSmsLoginSetting() {
         if (configPersistenceStore == null) {
             return;
@@ -9712,6 +9790,14 @@ public class InMemoryShopRepository {
             .anyMatch(item -> Objects.equals(normalize(item.account()), account));
         if (exists) {
             throw new IllegalArgumentException("员工账号已存在");
+        }
+    }
+
+    private void validateSuperAdminAccount(String account) {
+        boolean exists = adminStaff.values().stream()
+            .anyMatch(item -> Objects.equals(normalize(item.account()), account));
+        if (exists) {
+            throw new IllegalArgumentException("超级管理员账号不能与员工账号重复");
         }
     }
 

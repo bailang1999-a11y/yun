@@ -39,6 +39,20 @@ const platformOptions = [
   { label: '京兆云', value: 'JINGZHAO' }
 ] as const
 
+const platformDefaults: Record<string, { name: string; baseUrl: string }> = {
+  CUSTOM: { name: '', baseUrl: '' },
+  KASUSHOU_2: { name: '卡速售 2.0', baseUrl: KASUSHOU_BASE_URL },
+  KAKAYUN: { name: '卡卡云', baseUrl: KAKAYUN_BASE_URL },
+  FULU: { name: '福禄新平台', baseUrl: FULU_BASE_URL },
+  FENGZHUSHOU: { name: '蜂助手直充', baseUrl: FENGZHUSHOU_BASE_URL },
+  CHENGQUAN: { name: '鼎信橙券', baseUrl: CHENGQUAN_BASE_URL },
+  FANCHEN_RJ: { name: '浙江梵尘', baseUrl: FANCHEN_BASE_URL },
+  JINGZHAO: { name: '京兆云', baseUrl: JINGZHAO_BASE_URL }
+}
+
+const knownDefaultNames = new Set(Object.values(platformDefaults).map((item) => item.name).filter(Boolean))
+const knownDefaultBaseUrls = new Set(Object.values(platformDefaults).map((item) => item.baseUrl).filter(Boolean))
+
 const kasushouCapabilityGroups = [
   { group: '基础', items: ['余额查询'] },
   { group: '商品', items: ['商品分类', '商品列表', '商品详情', '商品调价记录', '商品变更通知', '商品下单模板'] },
@@ -198,35 +212,8 @@ onMounted(() => {
 
 watch(
   () => form.platformType,
-  (platformType) => {
-    if (platformType === 'KASUSHOU_2') {
-      if (!form.name.trim()) form.name = '卡速售 2.0'
-      if (!form.baseUrl.trim()) form.baseUrl = KASUSHOU_BASE_URL
-    }
-    if (platformType === 'KAKAYUN') {
-      if (!form.name.trim()) form.name = '卡卡云'
-      if (!form.baseUrl.trim()) form.baseUrl = KAKAYUN_BASE_URL
-    }
-    if (platformType === 'FULU') {
-      if (!form.name.trim()) form.name = '福禄新平台'
-      if (!form.baseUrl.trim()) form.baseUrl = FULU_BASE_URL
-    }
-    if (platformType === 'FENGZHUSHOU') {
-      if (!form.name.trim()) form.name = '蜂助手直充'
-      if (!form.baseUrl.trim()) form.baseUrl = FENGZHUSHOU_BASE_URL
-    }
-    if (platformType === 'CHENGQUAN') {
-      if (!form.name.trim()) form.name = '鼎信橙券'
-      if (!form.baseUrl.trim()) form.baseUrl = CHENGQUAN_BASE_URL
-    }
-    if (platformType === 'FANCHEN_RJ') {
-      if (!form.name.trim()) form.name = '浙江梵尘'
-      if (!form.baseUrl.trim()) form.baseUrl = FANCHEN_BASE_URL
-    }
-    if (platformType === 'JINGZHAO') {
-      if (!form.name.trim()) form.name = '京兆云'
-      if (!form.baseUrl.trim()) form.baseUrl = JINGZHAO_BASE_URL
-    }
+  (platformType, previousPlatformType) => {
+    applyPlatformDefaults(platformType, previousPlatformType)
     if (!form.timeoutSeconds) form.timeoutSeconds = 15
   }
 )
@@ -328,6 +315,25 @@ function resetForm() {
   form.balance = 0
   form.status = 'ENABLED'
   form.remark = ''
+}
+
+function applyPlatformDefaults(platformType = form.platformType || 'CUSTOM', previousPlatformType = '') {
+  const defaults = platformDefaults[platformType] || platformDefaults.CUSTOM
+  const isEditing = Boolean(editingSupplierId.value)
+  const shouldRefreshName = !isEditing || !form.name.trim() || knownDefaultNames.has(form.name.trim())
+  const shouldRefreshBaseUrl = !isEditing || !form.baseUrl.trim() || knownDefaultBaseUrls.has(form.baseUrl.trim())
+
+  if (shouldRefreshName) form.name = defaults.name
+  if (shouldRefreshBaseUrl) form.baseUrl = defaults.baseUrl
+
+  if (!isEditing && previousPlatformType && previousPlatformType !== platformType) {
+    form.appId = ''
+    form.apiKey = ''
+    form.appKey = ''
+    form.appSecret = ''
+    form.userId = ''
+    form.callbackUrl = ''
+  }
 }
 
 function fillSupplierForm(row: Supplier) {

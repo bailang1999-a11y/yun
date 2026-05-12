@@ -562,6 +562,14 @@ export interface AdminAuthSession {
   profile: AdminProfile
 }
 
+export interface AdminCredentialPayload {
+  currentPassword: string
+  account: string
+  nickname: string
+  newPassword?: string
+  confirmPassword?: string
+}
+
 export interface AdminStaff {
   id: number | string
   account: string

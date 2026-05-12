@@ -102,6 +102,14 @@ public class AdminMvpController {
         return ApiResponse.ok("ok");
     }
 
+    @PostMapping("/auth/credentials")
+    public ApiResponse<AdminProfile> updateSuperAdminCredentials(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @RequestBody AdminCredentialRequest request
+    ) {
+        return safe(() -> repository.updateSuperAdminCredentials(token, request));
+    }
+
     @GetMapping("/staff")
     public ApiResponse<List<AdminStaffItem>> adminStaff() {
         return ApiResponse.ok(repository.listAdminStaff());
