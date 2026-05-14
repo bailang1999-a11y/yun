@@ -36,13 +36,13 @@ const emit = defineEmits<{
   'categories-loaded': [categories: Category[]]
 }>()
 
+const MAX_CATEGORY_DEPTH = 5
 const categories = ref<Category[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
-const selectedRootId = ref<string>('')
-const selectedSecondId = ref<string>('')
 const selectedCategoryId = ref<string>(props.modelValue == null ? '' : String(props.modelValue))
+const selectedPath = ref<Category[]>([])
 const editorVisible = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
 const editingCategoryId = ref<Category['id']>()
@@ -68,7 +68,7 @@ const form = reactive<CategoryCreatePayload & { icon: string; iconUrl: string; c
 const categoryTree = computed(() => buildCategoryTree(categories.value))
 const parentOptions = computed(() =>
   categories.value.filter((item) => {
-    if ((item.level || 1) >= 5) return false
+    if ((item.level || 1) >= MAX_CATEGORY_DEPTH) return false
     if (editorMode.value !== 'edit' || editingCategoryId.value === undefined) return true
     const blockedIds = new Set([
       String(editingCategoryId.value),
@@ -78,19 +78,28 @@ const parentOptions = computed(() =>
   })
 )
 const rootCategories = computed(() => categoryTree.value)
-const selectedRoot = computed(() => rootCategories.value.find((item) => String(item.id) === selectedRootId.value) || rootCategories.value[0])
-const secondLevelCategories = computed(() => selectedRoot.value?.children || [])
-const selectedSecond = computed(() => {
-  const explicit = secondLevelCategories.value.find((item) => String(item.id) === selectedSecondId.value)
-  if (explicit) return explicit
-  const selected = selectedCategory.value
-  if (selected && selectedRoot.value) {
-    return secondLevelCategories.value.find((item) => String(item.id) === String(selected.id) || findInTree(item.children || [], selected.id))
-  }
-  return secondLevelCategories.value[0]
-})
-const thirdLevelCategories = computed(() => selectedSecond.value?.children || [])
 const selectedCategory = computed(() => findInTree(categoryTree.value, selectedCategoryId.value))
+const selectedRoot = computed(() => selectedPath.value[0] || rootCategories.value[0])
+const categoryLevels = computed(() => {
+  const levels = [
+    {
+      level: 1,
+      parent: undefined as Category | undefined,
+      nodes: rootCategories.value
+    }
+  ]
+
+  selectedPath.value.forEach((parent, index) => {
+    if ((parent.level || index + 1) >= MAX_CATEGORY_DEPTH) return
+    levels.push({
+      level: index + 2,
+      parent,
+      nodes: parent.children || []
+    })
+  })
+
+  return levels
+})
 const editorTitle = computed(() => (editorMode.value === 'edit' ? '编辑分类' : '新增分类'))
 const editorActionText = computed(() => (editorMode.value === 'edit' ? '保存修改' : '创建分类'))
 
@@ -135,8 +144,6 @@ async function loadCategories() {
     const tree = buildCategoryTree(await fetchCategories())
     categories.value = flattenCategoryTree(tree)
     syncRootToSelection()
-    selectedRootId.value ||= String(tree[0]?.id || '')
-    selectedSecondId.value ||= String(selectedRoot.value?.children?.[0]?.id || '')
     emit('categories-loaded', categories.value)
     if (selectedCategoryId.value && !selectedCategory.value) selectCategory(null)
   } catch {
@@ -147,14 +154,11 @@ async function loadCategories() {
 }
 
 function selectRoot(row: Category) {
-  selectedRootId.value = String(row.id)
-  selectedSecondId.value = String(row.children?.[0]?.id || '')
   selectCategory(row)
 }
 
 function selectChild(row: Category) {
   form.parentId = row.id
-  if ((row.level || 1) === 2) selectedSecondId.value = String(row.id)
   selectCategory(row)
 }
 
@@ -166,12 +170,7 @@ function selectCategory(row: Category | null) {
 }
 
 function syncRootToSelection() {
-  const selectedRootItem = findRootForId(categoryTree.value, selectedCategoryId.value)
-  if (selectedRootItem) selectedRootId.value = String(selectedRootItem.id)
-  const selectedItem = selectedCategory.value
-  const selectedSecondItem = findSecondForId(categoryTree.value, selectedCategoryId.value)
-  if (selectedSecondItem) selectedSecondId.value = String(selectedSecondItem.id)
-  else if (selectedItem && (selectedItem.level || 1) === 1) selectedSecondId.value = String(selectedItem.children?.[0]?.id || '')
+  selectedPath.value = findPathForId(categoryTree.value, selectedCategoryId.value)
 }
 
 function iconForCategory(row: Category) {
@@ -268,24 +267,15 @@ function findInTree(nodes: Category[], id?: Category['id'] | string): Category |
   return undefined
 }
 
-function findRootForId(nodes: Category[], id?: Category['id'] | string): Category | undefined {
-  if (id === undefined || id === '') return undefined
+function findPathForId(nodes: Category[], id?: Category['id'] | string, path: Category[] = []): Category[] {
+  if (id === undefined || id === '') return []
   for (const node of nodes) {
-    if (String(node.id) === String(id)) return node
-    if (findInTree(node.children || [], id)) return node
+    const nextPath = [...path, node]
+    if (String(node.id) === String(id)) return nextPath
+    const childPath = findPathForId(node.children || [], id, nextPath)
+    if (childPath.length) return childPath
   }
-  return undefined
-}
-
-function findSecondForId(nodes: Category[], id?: Category['id'] | string): Category | undefined {
-  if (id === undefined || id === '') return undefined
-  const root = findRootForId(nodes, id)
-  if (!root) return undefined
-  for (const child of root.children || []) {
-    if (String(child.id) === String(id)) return child
-    if (findInTree(child.children || [], id)) return child
-  }
-  return undefined
+  return []
 }
 
 function resetForm() {
@@ -409,7 +399,6 @@ async function removeCategory(row: Category) {
   try {
     await deleteCategory(row.id)
     ElMessage.success('分类已删除')
-    if (String(selectedRootId.value) === String(row.id)) selectedRootId.value = ''
     if (String(selectedCategoryId.value) === String(row.id)) selectCategory(null)
     await loadCategories()
   } catch (error) {
@@ -437,96 +426,47 @@ async function removeCategory(row: Category) {
           <el-button :icon="RefreshCw" :loading="loading" @click="loadCategories">刷新</el-button>
         </div>
 
-        <section class="category-level root-level" aria-label="一级分类">
+        <section
+          v-for="level in categoryLevels"
+          :key="level.level"
+          class="category-level"
+          :class="{ 'root-level': level.level === 1 }"
+          :aria-label="`第 ${level.level} 级分类`"
+        >
           <div class="level-title">
-            <strong>一级分类</strong>
-            <span>{{ rootCategories.length ? `${rootCategories.length} 个一级分类` : '暂无一级分类' }}</span>
+            <strong>第 {{ level.level }} 级分类</strong>
+            <span v-if="level.parent">归属 {{ level.parent.name }}</span>
+            <span v-else>{{ level.nodes.length ? `${level.nodes.length} 个一级分类` : '暂无一级分类' }}</span>
           </div>
-          <div class="category-strip">
+          <div :class="level.level <= 2 ? 'category-strip' : 'category-matrix'">
             <button
-              v-for="item in rootCategories"
-              :key="item.id"
-              type="button"
-              class="category-icon-card root"
-              :class="{ active: String(item.id) === selectedRootId }"
-              @click="selectRoot(item)"
-              @contextmenu.prevent="openContextMenu($event, item)"
-            >
-              <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
-                <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
-                <component v-else :is="iconForCategory(item)" :size="30" />
-              </span>
-              <strong>{{ item.name }}</strong>
-              <em>{{ item.children?.length || 0 }} 个二级分类</em>
-              <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
-            </button>
-            <button type="button" class="category-icon-card add-card root-add-card" @click="openCreate()">
-              <span class="icon-bubble"><Plus :size="30" /></span>
-              <strong>新增分类</strong>
-              <em>一级分类</em>
-            </button>
-          </div>
-        </section>
-
-        <section class="category-level" aria-label="二级分类">
-          <div class="level-title">
-            <strong>二级分类</strong>
-            <span>{{ selectedRoot ? `归属 ${selectedRoot.name}` : '请选择一级分类' }}</span>
-          </div>
-          <div class="category-strip">
-            <button
-              v-for="item in secondLevelCategories"
+              v-for="item in level.nodes"
               :key="item.id"
               type="button"
               class="category-icon-card"
-              :class="{ active: String(item.id) === selectedSecondId || String(item.id) === selectedCategoryId }"
-              @click="selectChild(item)"
+              :class="{
+                root: level.level === 1,
+                active: selectedPath.some((pathItem) => String(pathItem.id) === String(item.id))
+              }"
+              @click="level.level === 1 ? selectRoot(item) : selectChild(item)"
               @contextmenu.prevent="openContextMenu($event, item)"
             >
               <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
                 <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
-                <component v-else :is="iconForCategory(item)" :size="28" />
+                <component v-else :is="iconForCategory(item)" :size="level.level === 1 ? 30 : level.level === 2 ? 28 : 26" />
               </span>
               <strong>{{ item.name }}</strong>
-              <em>{{ item.children?.length || 0 }} 个子类</em>
+              <em>{{ item.children?.length ? `${item.children.length} 个子类` : `排序 ${item.sort}` }}</em>
+              <small v-if="level.level >= 3" :data-enabled="item.enabled">{{ item.enabled ? '启用' : '停用' }}</small>
               <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
             </button>
-            <button type="button" class="category-icon-card add-card" @click="openCreate(selectedRoot?.id)">
-              <span class="icon-bubble"><Plus :size="30" /></span>
-              <strong>新增分类</strong>
-              <em>{{ selectedRoot ? `挂到 ${selectedRoot.name}` : '二级分类' }}</em>
-            </button>
-          </div>
-        </section>
-
-        <section class="category-level" aria-label="三级分类">
-          <div class="level-title">
-            <strong>三级分类</strong>
-            <span>{{ selectedSecond ? `归属 ${selectedSecond.name}` : '请选择二级分类' }}</span>
-          </div>
-          <div class="category-matrix">
-            <button
-              v-for="item in thirdLevelCategories"
-              :key="item.id"
-              type="button"
-              class="category-icon-card"
-              :class="{ active: String(item.id) === selectedCategoryId }"
-              @click="selectChild(item)"
-              @contextmenu.prevent="openContextMenu($event, item)"
-            >
-              <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
-                <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
-                <component v-else :is="iconForCategory(item)" :size="26" />
+            <button type="button" class="category-icon-card add-card" :class="{ 'root-add-card': level.level === 1 }" @click="openCreate(level.parent?.id)">
+              <span class="icon-bubble">
+                <Plus v-if="level.level <= 2" :size="30" />
+                <FolderPlus v-else :size="28" />
               </span>
-              <strong>{{ item.name }}</strong>
-              <em>排序 {{ item.sort }}</em>
-              <small :data-enabled="item.enabled">{{ item.enabled ? '启用' : '停用' }}</small>
-              <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
-            </button>
-            <button type="button" class="category-icon-card add-card" @click="openCreate(selectedSecond?.id || selectedRoot?.id)">
-              <span class="icon-bubble"><FolderPlus :size="28" /></span>
               <strong>新增分类</strong>
-              <em>{{ selectedSecond ? `挂到 ${selectedSecond.name}` : '选择二级分类' }}</em>
+              <em>{{ level.parent ? `挂到 ${level.parent.name}` : '一级分类' }}</em>
             </button>
           </div>
         </section>

@@ -50,7 +50,8 @@ export const useCatalogStore = defineStore('catalog', {
       return childrenOf(state.categories, parentOfLeaf)
     },
     depthProgress(state) {
-      return Math.min(state.activePath.length / 5, 1)
+      if (!state.activePath.length) return 0
+      return Math.min(state.activePath.length / (state.activePath.length + 1), 0.92)
     },
     visibleGoods(state) {
       return state.goods
@@ -59,7 +60,7 @@ export const useCatalogStore = defineStore('catalog', {
   actions: {
     selectCategory(category: H5Category) {
       const level = Math.max(levelOf(this.categories, category) - 1, 0)
-      this.activePath = [...this.activePath.slice(0, level), category.id].slice(0, 5)
+      this.activePath = [...this.activePath.slice(0, level), category.id]
       void this.loadGoods()
     },
     goToDepth(depth: number) {

@@ -26,51 +26,33 @@
         </button>
       </nav>
 
-      <section class="category-level" aria-label="二级分类">
+      <section
+        v-for="level in categoryLevels"
+        :key="level.level"
+        class="category-level"
+        :aria-label="`第 ${level.level} 级分类`"
+      >
         <div class="level-title">
-          <strong>二级分类</strong>
-          <span>{{ selectedRoot ? `归属 ${selectedRoot.name}` : '请选择一级分类' }}</span>
+          <strong>第 {{ level.level }} 级分类</strong>
+          <span>{{ level.parent ? `归属 ${level.parent.name}` : '请选择上级分类' }}</span>
         </div>
-        <div class="category-strip">
+        <div :class="level.level <= 2 ? 'category-strip' : 'category-matrix'">
           <button
-            v-for="item in secondLevelCategories"
+            v-for="item in level.nodes"
             :key="item.id"
             type="button"
             class="category-icon-card"
-            :class="{ active: catalog.activeCategoryId === item.id || selectedSecond?.id === item.id }"
-            @click="selectSecond(item)"
-          >
-            <span class="icon-bubble">
-              <component :is="iconForCategory(item.name)" :size="28" />
-            </span>
-            <strong>{{ item.name }}</strong>
-            <em>{{ catalog.childrenOf(item.id).length }} 个子类</em>
-          </button>
-          <div v-if="!secondLevelCategories.length" class="category-empty">暂无二级分类</div>
-        </div>
-      </section>
-
-      <section v-if="thirdLevelCategories.length" class="category-level" aria-label="三级分类">
-        <div class="level-title">
-          <strong>三级分类</strong>
-          <span>{{ selectedSecond ? `归属 ${selectedSecond.name}` : '请选择二级分类' }}</span>
-        </div>
-        <div class="category-matrix">
-          <button
-            v-for="item in thirdLevelCategories"
-            :key="item.id"
-            type="button"
-            class="category-icon-card"
-            :class="{ active: catalog.activeCategoryId === item.id }"
+            :class="{ active: isPathActive(item.id) }"
             @click="catalog.activeCategoryId = item.id"
           >
             <span class="icon-bubble">
               <component :is="iconForCategory(item.name)" :size="26" />
             </span>
             <strong>{{ item.name }}</strong>
-            <em>第 {{ item.level || 3 }} 级</em>
+            <em>{{ catalog.childrenOf(item.id).length ? `${catalog.childrenOf(item.id).length} 个子类` : `第 ${item.level || level.level} 级` }}</em>
             <small data-enabled="true">启用</small>
           </button>
+          <div v-if="!level.nodes.length" class="category-empty">暂无下级分类</div>
         </div>
       </section>
     </article>
@@ -85,17 +67,15 @@ import type { CategoryItem } from '../types/web'
 
 const catalog = useCatalogStore()
 
-const selectedRoot = computed(() => {
-  if (!catalog.activeCategoryId) return catalog.rootCategories[0]
-  return catalog.rootCategories.find((root) => root.id === catalog.activeCategoryId || hasDescendant(root.id, catalog.activeCategoryId))
-})
-
-const secondLevelCategories = computed(() => (selectedRoot.value ? catalog.childrenOf(selectedRoot.value.id) : []))
-const selectedSecond = computed(() => {
-  if (!catalog.activeCategoryId) return secondLevelCategories.value[0]
-  return secondLevelCategories.value.find((item) => item.id === catalog.activeCategoryId || hasDescendant(item.id, catalog.activeCategoryId))
-})
-const thirdLevelCategories = computed(() => (selectedSecond.value ? catalog.childrenOf(selectedSecond.value.id) : []))
+const selectedPath = computed(() => findPathForId(catalog.rootCategories, catalog.activeCategoryId))
+const selectedRoot = computed(() => selectedPath.value[0] || catalog.rootCategories[0])
+const categoryLevels = computed(() =>
+  selectedPath.value.map((parent, index) => ({
+    level: index + 2,
+    parent,
+    nodes: catalog.childrenOf(parent.id)
+  }))
+)
 const selectedCategoryName = computed(() => {
   if (!catalog.activeCategoryId) return '全部商品'
   return catalog.categoryName(catalog.activeCategoryId) || selectedRoot.value?.name || '未选择'
@@ -109,12 +89,23 @@ function selectRoot(item: CategoryItem) {
   catalog.activeCategoryId = item.id
 }
 
-function selectSecond(item: CategoryItem) {
-  catalog.activeCategoryId = item.id
-}
-
 function hasDescendant(parentId: string, targetId: string): boolean {
   return catalog.childrenOf(parentId).some((child) => child.id === targetId || hasDescendant(child.id, targetId))
+}
+
+function findPathForId(nodes: CategoryItem[], id?: string, path: CategoryItem[] = []): CategoryItem[] {
+  if (!id) return []
+  for (const node of nodes) {
+    const nextPath = [...path, node]
+    if (node.id === id) return nextPath
+    const childPath = findPathForId(catalog.childrenOf(node.id), id, nextPath)
+    if (childPath.length) return childPath
+  }
+  return []
+}
+
+function isPathActive(id: string) {
+  return selectedPath.value.some((item) => item.id === id)
 }
 
 function iconForCategory(name: string) {
