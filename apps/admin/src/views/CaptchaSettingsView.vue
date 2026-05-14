@@ -115,10 +115,10 @@ function validateSetting() {
     return form.genericConfig.url.trim() ? '' : '通用 HTTP 校验请求地址不能为空'
   }
   const requiredFields = [
-    ['secret_id', 'SecretId'],
-    ['secret_key', 'SecretKey'],
-    ['captcha_app_id', 'CaptchaAppId'],
-    ['app_secret_key', 'AppSecretKey']
+    ['secret_id', '腾讯云 SecretId（AKID 开头）'],
+    ['secret_key', '腾讯云 SecretKey'],
+    ['captcha_app_id', '验证码 CaptchaAppId'],
+    ['app_secret_key', '验证码 AppSecretKey']
   ] as const
   const missing = requiredFields.find(([key]) => !form.tencentConfig[key]?.trim())
   return missing ? `腾讯云 ${missing[1]} 不能为空` : ''
@@ -190,13 +190,21 @@ function trimMap(value: Record<string, string>) {
           <template v-if="form.provider === 'TENCENT'">
             <div v-if="needProviderConfig" class="config-tip">
               <strong>启用后必填：</strong>
-              <span>SecretId、SecretKey、CaptchaAppId、AppSecretKey。CaptchaAppId 与 AppSecretKey 来自腾讯云验证码应用。</span>
+              <span>腾讯云 SecretId 与 SecretKey 来自 CAM「API 密钥管理」；验证码 CaptchaAppId 与 AppSecretKey 来自验证码应用。不要把账号 APPID 填到 SecretId。</span>
             </div>
             <div class="config-grid">
-              <el-form-item label="SecretId"><el-input v-model="form.tencentConfig.secret_id" /></el-form-item>
-              <el-form-item label="SecretKey"><el-input v-model="form.tencentConfig.secret_key" type="password" show-password /></el-form-item>
-              <el-form-item label="CaptchaAppId"><el-input v-model="form.tencentConfig.captcha_app_id" placeholder="验证码应用 ID" /></el-form-item>
-              <el-form-item label="AppSecretKey"><el-input v-model="form.tencentConfig.app_secret_key" type="password" show-password /></el-form-item>
+              <el-form-item label="腾讯云 SecretId（AKID 开头）">
+                <el-input v-model="form.tencentConfig.secret_id" placeholder="来自访问管理 CAM / API 密钥管理，不是账号 APPID" />
+              </el-form-item>
+              <el-form-item label="腾讯云 SecretKey">
+                <el-input v-model="form.tencentConfig.secret_key" type="password" show-password placeholder="与上方 SecretId 同一条密钥对应" />
+              </el-form-item>
+              <el-form-item label="验证码 CaptchaAppId">
+                <el-input v-model="form.tencentConfig.captcha_app_id" placeholder="例如：192246501" />
+              </el-form-item>
+              <el-form-item label="验证码 AppSecretKey">
+                <el-input v-model="form.tencentConfig.app_secret_key" type="password" show-password placeholder="验证码应用详情里的 AppSecretKey" />
+              </el-form-item>
               <el-form-item label="地域"><el-input v-model="form.tencentConfig.region" placeholder="ap-guangzhou" /></el-form-item>
               <el-form-item label="场景"><el-input v-model="form.tencentConfig.scene" placeholder="login" /></el-form-item>
             </div>
