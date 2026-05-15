@@ -349,7 +349,12 @@ function startCountdown() {
           </button>
         </div>
       </label>
-      <button type="button" class="slider-check" :class="{ done: captchaDone }" @click="completeCaptcha">
+      <button
+        type="button"
+        class="slider-check"
+        :class="{ active: captchaChallenge.enabled && !captchaDone, done: captchaDone, idle: !captchaChallenge.enabled }"
+        @click="completeCaptcha"
+      >
         {{ captchaDone ? '人机验证完成' : captchaChallenge.enabled ? '点击完成人机验证' : '人机验证未启用' }}
       </button>
       <p v-if="codeMessage" class="notice success">{{ codeMessage }}</p>
@@ -506,6 +511,14 @@ input {
   border: 0.5px solid rgba(255, 255, 255, 0.12);
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.055);
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.slider-check.active {
+  color: #ffffff;
+  border-color: rgba(116, 168, 255, 0.58);
+  background: linear-gradient(135deg, rgba(61, 141, 255, 0.9), rgba(181, 125, 255, 0.82));
+  box-shadow: 0 12px 26px rgba(86, 145, 255, 0.22);
 }
 
 .slider-check.done {

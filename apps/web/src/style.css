@@ -898,6 +898,18 @@ a {
   background: oklch(100% 0.004 250 / 0.36);
   font-weight: 850;
   cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.web-slider-check:hover {
+  transform: translateY(-1px);
+}
+
+.web-slider-check.active {
+  color: #ffffff;
+  border-color: oklch(76% 0.13 258 / 0.62);
+  background: linear-gradient(135deg, oklch(68% 0.19 258 / 0.92), oklch(73% 0.17 305 / 0.86));
+  box-shadow: 0 12px 26px oklch(62% 0.18 278 / 0.24);
 }
 
 .web-slider-check.done {

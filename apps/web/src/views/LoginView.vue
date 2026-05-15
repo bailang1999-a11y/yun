@@ -34,7 +34,12 @@
             </button>
           </div>
         </label>
-        <button type="button" class="web-slider-check" :class="{ done: captchaDone }" @click="completeCaptcha">
+        <button
+          type="button"
+          class="web-slider-check"
+          :class="{ active: captchaChallenge.enabled && !captchaDone, done: captchaDone, idle: !captchaChallenge.enabled }"
+          @click="completeCaptcha"
+        >
           {{ captchaDone ? '人机验证完成' : captchaChallenge.enabled ? '点击完成人机验证' : '人机验证未启用' }}
         </button>
 
