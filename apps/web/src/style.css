@@ -918,6 +918,30 @@ a {
   background: oklch(91% 0.08 164 / 0.58);
 }
 
+.turnstile-check {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  padding: 14px;
+  border: 1px solid var(--glass-edge);
+  border-radius: 18px;
+  color: var(--muted-ink);
+  background: oklch(100% 0.004 250 / 0.36);
+  font-weight: 850;
+}
+
+.turnstile-check.done {
+  color: oklch(35% 0.13 164);
+  border-color: oklch(72% 0.12 164 / 0.45);
+  background: oklch(91% 0.08 164 / 0.58);
+}
+
+.turnstile-box {
+  min-height: 65px;
+  display: grid;
+  place-items: center;
+}
+
 .hero-band span {
   display: block;
   max-width: 560px;

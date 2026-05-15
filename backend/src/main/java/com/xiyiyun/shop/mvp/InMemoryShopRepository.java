@@ -194,6 +194,11 @@ public class InMemoryShopRepository {
             "region", "ap-guangzhou",
             "scene", "login"
         ),
+        Map.of(
+            "site_key", "",
+            "secret_key", "",
+            "scene", "login"
+        ),
         Map.of()
     );
     private final Set<String> viewedDeliveryOrders = ConcurrentHashMap.newKeySet();
@@ -574,11 +579,12 @@ public class InMemoryShopRepository {
     public CaptchaChallengeItem captchaChallenge(String terminal) {
         String cleanTerminal = normalizeTerminal(terminal);
         boolean required = isCaptchaRequired(cleanTerminal);
-        Map<String, String> config = captchaSetting.tencentConfig();
+        String provider = normalizeCaptchaProvider(captchaSetting.provider());
+        Map<String, String> config = "TURNSTILE".equals(provider) ? captchaSetting.turnstileConfig() : captchaSetting.tencentConfig();
         return new CaptchaChallengeItem(
             required,
-            normalizeCaptchaProvider(captchaSetting.provider()),
-            required ? defaultText(config.get("captcha_app_id"), "") : "",
+            provider,
+            required ? defaultText("TURNSTILE".equals(provider) ? config.get("site_key") : config.get("captcha_app_id"), "") : "",
             defaultText(config.get("scene"), "login")
         );
     }
@@ -625,6 +631,7 @@ public class InMemoryShopRepository {
         }
         return switch (normalizeCaptchaProvider(setting.provider())) {
             case "GENERIC" -> testGenericCaptchaSetting(setting.genericConfig());
+            case "TURNSTILE" -> testTurnstileCaptchaSetting(setting.turnstileConfig());
             default -> testTencentCaptchaSetting(setting.tencentConfig());
         };
     }
@@ -637,6 +644,7 @@ public class InMemoryShopRepository {
             request.webLoginEnabled() == null ? captchaSetting.webLoginEnabled() : request.webLoginEnabled(),
             normalizeCaptchaProvider(defaultText(request.provider(), captchaSetting.provider())),
             normalizeSmsConfig(request.tencentConfig() == null ? captchaSetting.tencentConfig() : request.tencentConfig()),
+            normalizeSmsConfig(request.turnstileConfig() == null ? captchaSetting.turnstileConfig() : request.turnstileConfig()),
             normalizeSmsConfig(request.genericConfig() == null ? captchaSetting.genericConfig() : request.genericConfig())
         );
     }
@@ -648,8 +656,14 @@ public class InMemoryShopRepository {
         if (!setting.adminLoginEnabled() && !setting.h5LoginEnabled() && !setting.webLoginEnabled()) {
             return;
         }
-        if ("GENERIC".equals(normalizeCaptchaProvider(setting.provider()))) {
+        String provider = normalizeCaptchaProvider(setting.provider());
+        if ("GENERIC".equals(provider)) {
             requireConfig(setting.genericConfig(), "url", "通用 HTTP 校验请求地址");
+            return;
+        }
+        if ("TURNSTILE".equals(provider)) {
+            requireConfig(setting.turnstileConfig(), "site_key", "Cloudflare Turnstile Site Key");
+            requireConfig(setting.turnstileConfig(), "secret_key", "Cloudflare Turnstile Secret Key");
             return;
         }
         Map<String, String> config = setting.tencentConfig();
@@ -7737,6 +7751,7 @@ public class InMemoryShopRepository {
             payload.put("webLoginEnabled", captchaSetting.webLoginEnabled());
             payload.put("provider", captchaSetting.provider());
             payload.put("tencentConfig", captchaSetting.tencentConfig());
+            payload.put("turnstileConfig", captchaSetting.turnstileConfig());
             payload.put("genericConfig", captchaSetting.genericConfig());
             persistRuntimeSetting(CAPTCHA_SETTING_KEY, OBJECT_MAPPER.writeValueAsString(payload));
         } catch (JsonProcessingException ex) {
@@ -8020,6 +8035,7 @@ public class InMemoryShopRepository {
                 booleanValue(payload.get("webLoginEnabled"), captchaSetting.webLoginEnabled()),
                 normalizeCaptchaProvider(defaultText(payload.get("provider"), captchaSetting.provider())),
                 normalizeSmsConfig(stringMap(payload.get("tencentConfig"))),
+                normalizeSmsConfig(stringMap(payload.get("turnstileConfig"))),
                 normalizeSmsConfig(stringMap(payload.get("genericConfig")))
             );
         } catch (RuntimeException | JsonProcessingException ex) {
@@ -10555,6 +10571,7 @@ public class InMemoryShopRepository {
         }
         switch (normalizeCaptchaProvider(captchaSetting.provider())) {
             case "GENERIC" -> verifyGenericCaptcha(ticket, randstr, clientIp);
+            case "TURNSTILE" -> verifyTurnstileCaptcha(ticket, clientIp);
             default -> verifyTencentCaptcha(ticket, randstr, clientIp);
         }
     }
@@ -10672,6 +10689,26 @@ public class InMemoryShopRepository {
         }
     }
 
+    private void verifyTurnstileCaptcha(String token, String clientIp) {
+        Map<String, String> config = captchaSetting.turnstileConfig();
+        String secretKey = defaultText(config.get("secret_key"), "");
+        if (!StringUtils.hasText(secretKey)) {
+            throw new IllegalStateException("Cloudflare Turnstile 配置不完整");
+        }
+        HttpResponse<String> response = requestTurnstileCaptcha(config, token, clientIp);
+        if (response.statusCode() >= 400) {
+            throw new IllegalStateException("Cloudflare Turnstile 返回异常：HTTP " + response.statusCode() + " " + response.body());
+        }
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(response.body());
+            if (!root.path("success").asBoolean(false)) {
+                throw new IllegalArgumentException("人机验证未通过，请重新验证");
+            }
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cloudflare Turnstile 响应解析失败");
+        }
+    }
+
     private String testTencentCaptchaSetting(Map<String, String> config) {
         HttpResponse<String> response = requestTencentCaptcha(config, "xiyiyun_config_test_ticket", "xiyiyun_config_test_randstr", "127.0.0.1");
         if (response.statusCode() >= 400) {
@@ -10695,6 +10732,41 @@ public class InMemoryShopRepository {
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("腾讯云人机验证测试响应解析失败");
         }
+    }
+
+    private String testTurnstileCaptchaSetting(Map<String, String> config) {
+        HttpResponse<String> response = requestTurnstileCaptcha(config, "xiyiyun_config_test_token", "127.0.0.1");
+        if (response.statusCode() >= 400) {
+            throw new IllegalStateException("Cloudflare Turnstile 接口连接失败：HTTP " + response.statusCode() + " " + response.body());
+        }
+        try {
+            JsonNode root = OBJECT_MAPPER.readTree(response.body());
+            JsonNode errors = root.path("error-codes");
+            if (errors.isArray()) {
+                for (JsonNode error : errors) {
+                    String code = error.asText("");
+                    if (code.contains("secret")) {
+                        throw new IllegalStateException("Cloudflare Turnstile Secret Key 配置异常：" + code);
+                    }
+                }
+            }
+            return "Cloudflare Turnstile 接口已连通；测试 token 无效属正常现象。";
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Cloudflare Turnstile 测试响应解析失败");
+        }
+    }
+
+    private HttpResponse<String> requestTurnstileCaptcha(Map<String, String> config, String token, String clientIp) {
+        String secretKey = defaultText(config.get("secret_key"), "");
+        String form = "secret=" + percentEncode(secretKey)
+            + "&response=" + percentEncode(token)
+            + "&remoteip=" + percentEncode(defaultText(clientIp, ""));
+        HttpRequest request = HttpRequest.newBuilder(URI.create("https://challenges.cloudflare.com/turnstile/v0/siteverify"))
+            .timeout(Duration.ofSeconds(12))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .POST(HttpRequest.BodyPublishers.ofString(form, StandardCharsets.UTF_8))
+            .build();
+        return sendHttp(request, "cloudflare turnstile");
     }
 
     private HttpResponse<String> requestTencentCaptcha(Map<String, String> config, String ticket, String randstr, String clientIp) {
@@ -10819,7 +10891,7 @@ public class InMemoryShopRepository {
 
     private String normalizeCaptchaProvider(String value) {
         String normalized = normalize(value).toUpperCase(Locale.ROOT);
-        if (Set.of("TENCENT", "GENERIC").contains(normalized)) {
+        if (Set.of("TENCENT", "TURNSTILE", "GENERIC").contains(normalized)) {
             return normalized;
         }
         return "TENCENT";

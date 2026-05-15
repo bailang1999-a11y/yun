@@ -670,6 +670,7 @@ export interface CaptchaSetting {
   webLoginEnabled: boolean
   provider: string
   tencentConfig: Record<string, string>
+  turnstileConfig: Record<string, string>
   genericConfig: Record<string, string>
 }
 

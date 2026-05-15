@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { LoaderCircle, LogOut, UserRound } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
@@ -24,16 +24,22 @@ const captchaDone = ref(false)
 const captchaTicket = ref('')
 const captchaRandstr = ref('')
 const captchaChallenge = ref<CaptchaChallenge>({ enabled: false, provider: 'TENCENT', appId: '' })
+const turnstileBoxRef = ref<HTMLElement | null>(null)
 const profile = ref<UserProfile | null>(null)
 const setting = ref<H5SystemSetting>({
   registrationEnabled: true,
   registrationType: 'MOBILE'
 })
 let countdownTimer: number | undefined
+let turnstileWidgetId = ''
 
 declare global {
   interface Window {
-    TencentCaptcha?: new (appId: string, callback: (res: { ret: number; ticket?: string; randstr?: string }) => void, options?: Record<string, unknown>) => { show: () => void }
+    TencentCaptcha?: new (appId: string, callback: (res: { ret: number; ticket?: string; randstr?: string; errorCode?: number; errorMessage?: string }) => void, options?: Record<string, unknown>) => { show: () => void }
+    turnstile?: {
+      render: (container: HTMLElement, options: Record<string, unknown>) => string
+      remove: (widgetId: string) => void
+    }
   }
 }
 
@@ -55,6 +61,8 @@ const codeRequiredForSubmit = computed(() =>
     || (mode.value === 'login' && !password.value.trim())
 )
 
+const isTurnstileCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'TURNSTILE')
+
 onMounted(() => {
   void loadSettings()
   void loadCaptchaChallenge()
@@ -68,6 +76,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('focus', refreshProfile)
   document.removeEventListener('visibilitychange', refreshWhenVisible)
   if (countdownTimer) window.clearInterval(countdownTimer)
+  clearTurnstileWidget()
 })
 
 function refreshProfile() {
@@ -169,8 +178,13 @@ async function completeCaptcha() {
       errorMessage.value = ''
       return true
     }
-    if (captchaChallenge.value.provider !== 'TENCENT' || !captchaChallenge.value.appId) {
+    if (!captchaChallenge.value.appId) {
       errorMessage.value = '人机验证未配置完整'
+      return false
+    }
+    if (captchaChallenge.value.provider === 'TURNSTILE') {
+      errorMessage.value = '请在页面中的 Cloudflare 验证框完成验证'
+      void renderTurnstileWidget()
       return false
     }
     const result = await runTencentCaptcha(captchaChallenge.value.appId)
@@ -190,16 +204,23 @@ function resetCaptcha() {
   captchaDone.value = false
   captchaTicket.value = ''
   captchaRandstr.value = ''
+  if (isTurnstileCaptcha.value) void renderTurnstileWidget()
 }
 
 async function loadCaptchaChallenge() {
   try {
     captchaChallenge.value = await fetchH5CaptchaChallenge('h5')
     if (!captchaChallenge.value.enabled) captchaDone.value = true
+    else if (captchaChallenge.value.provider === 'TURNSTILE') void renderTurnstileWidget()
   } catch {
     captchaChallenge.value = { enabled: false, provider: 'TENCENT', appId: '' }
     captchaDone.value = true
   }
+}
+
+function clearTurnstileWidget() {
+  if (turnstileWidgetId && window.turnstile) window.turnstile.remove(turnstileWidgetId)
+  turnstileWidgetId = ''
 }
 
 function loadTencentCaptchaScript() {
@@ -224,6 +245,59 @@ function loadTencentCaptchaScript() {
   })
 }
 
+function loadTurnstileScript() {
+  return new Promise<void>((resolve, reject) => {
+    if (window.turnstile) {
+      resolve()
+      return
+    }
+    const existing = document.querySelector<HTMLScriptElement>('script[data-turnstile="true"]')
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), { once: true })
+      existing.addEventListener('error', () => reject(new Error('Cloudflare Turnstile 脚本加载失败')), { once: true })
+      return
+    }
+    const script = document.createElement('script')
+    script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit'
+    script.async = true
+    script.defer = true
+    script.dataset.turnstile = 'true'
+    script.onload = () => resolve()
+    script.onerror = () => reject(new Error('Cloudflare Turnstile 脚本加载失败'))
+    document.head.appendChild(script)
+  })
+}
+
+async function renderTurnstileWidget() {
+  if (!isTurnstileCaptcha.value || !captchaChallenge.value.appId) return
+  await loadTurnstileScript()
+  await nextTick()
+  if (!window.turnstile || !turnstileBoxRef.value) return
+  clearTurnstileWidget()
+  turnstileWidgetId = window.turnstile.render(turnstileBoxRef.value, {
+    sitekey: captchaChallenge.value.appId,
+    theme: 'auto',
+    callback: (token: string) => {
+      captchaTicket.value = token
+      captchaRandstr.value = 'turnstile'
+      captchaDone.value = true
+      errorMessage.value = ''
+    },
+    'error-callback': () => {
+      captchaDone.value = false
+      captchaTicket.value = ''
+      captchaRandstr.value = ''
+      errorMessage.value = 'Cloudflare Turnstile 验证失败，请重试'
+    },
+    'expired-callback': () => {
+      captchaDone.value = false
+      captchaTicket.value = ''
+      captchaRandstr.value = ''
+      errorMessage.value = 'Cloudflare Turnstile 已过期，请重新验证'
+    }
+  })
+}
+
 async function runTencentCaptcha(appId: string) {
   await loadTencentCaptchaScript()
   return new Promise<{ ticket: string; randstr: string }>((resolve, reject) => {
@@ -232,14 +306,30 @@ async function runTencentCaptcha(appId: string) {
       reject(new Error('腾讯云验证码脚本未就绪'))
       return
     }
-    const captcha = new Captcha(appId, (res: { ret: number; ticket?: string; randstr?: string }) => {
-      if (res.ret === 0 && res.ticket && res.randstr) {
-        resolve({ ticket: res.ticket, randstr: res.randstr })
+    let settled = false
+    const finish = (handler: () => void) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timer)
+      handler()
+    }
+    const timer = window.setTimeout(() => {
+      finish(() => reject(new Error('腾讯云验证码初始化超时，请检查 CaptchaAppId、域名白名单和服务状态')))
+    }, 12000)
+    const captcha = new Captcha(appId, (res: { ret: number; ticket?: string; randstr?: string; errorCode?: number; errorMessage?: string }) => {
+      if (res.ret === 0 && res.ticket && res.randstr && !res.errorCode && !res.ticket.startsWith('trerror_')) {
+        const ticket = res.ticket
+        const randstr = res.randstr
+        finish(() => resolve({ ticket, randstr }))
       } else {
-        reject(new Error('人机验证已取消或未通过'))
+        finish(() => reject(new Error(res.errorMessage || '人机验证已取消或未通过')))
       }
-    })
-    captcha.show()
+    }, { userLanguage: 'zh-cn' })
+    try {
+      captcha.show()
+    } catch (error) {
+      finish(() => reject(error instanceof Error ? error : new Error('腾讯云验证码启动失败')))
+    }
   })
 }
 
@@ -349,7 +439,12 @@ function startCountdown() {
           </button>
         </div>
       </label>
+      <div v-if="isTurnstileCaptcha" class="turnstile-check" :class="{ done: captchaDone }">
+        <div ref="turnstileBoxRef" class="turnstile-box"></div>
+        <span>{{ captchaDone ? '人机验证完成' : '请完成人机验证' }}</span>
+      </div>
       <button
+        v-else
         type="button"
         class="slider-check"
         :class="{ active: captchaChallenge.enabled && !captchaDone, done: captchaDone, idle: !captchaChallenge.enabled }"
@@ -525,6 +620,31 @@ input {
   color: #b9ffe9;
   border-color: rgba(0, 255, 195, 0.35);
   background: rgba(0, 255, 195, 0.12);
+}
+
+.turnstile-check {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  min-height: 44px;
+  padding: 12px;
+  color: rgba(255, 255, 255, 0.72);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.055);
+  font-weight: 700;
+}
+
+.turnstile-check.done {
+  color: #b9ffe9;
+  border-color: rgba(0, 255, 195, 0.35);
+  background: rgba(0, 255, 195, 0.12);
+}
+
+.turnstile-box {
+  min-height: 65px;
+  display: grid;
+  place-items: center;
 }
 
 .menu-row {

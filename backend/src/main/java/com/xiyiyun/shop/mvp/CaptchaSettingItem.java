@@ -9,6 +9,7 @@ public record CaptchaSettingItem(
     boolean webLoginEnabled,
     String provider,
     Map<String, String> tencentConfig,
+    Map<String, String> turnstileConfig,
     Map<String, String> genericConfig
 ) {
 }

@@ -16,6 +16,7 @@ function normalizeSetting(item: Record<string, unknown>): CaptchaSetting {
     webLoginEnabled: Boolean(item.webLoginEnabled),
     provider: text(item.provider, 'TENCENT'),
     tencentConfig: recordMap(item.tencentConfig),
+    turnstileConfig: recordMap(item.turnstileConfig),
     genericConfig: recordMap(item.genericConfig)
   }
 }

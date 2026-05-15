@@ -11,6 +11,7 @@ const testing = ref(false)
 
 const providerOptions = [
   { label: '腾讯云验证码', value: 'TENCENT' },
+  { label: 'Cloudflare Turnstile', value: 'TURNSTILE' },
   { label: '通用 HTTP 校验', value: 'GENERIC' }
 ]
 
@@ -26,6 +27,11 @@ const form = reactive<CaptchaSettingPayload>({
     captcha_app_id: '',
     app_secret_key: '',
     region: 'ap-guangzhou',
+    scene: 'login'
+  },
+  turnstileConfig: {
+    site_key: '',
+    secret_key: '',
     scene: 'login'
   },
   genericConfig: {
@@ -49,6 +55,7 @@ async function loadSetting() {
     Object.assign(form, {
       ...setting,
       tencentConfig: { ...form.tencentConfig, ...setting.tencentConfig },
+      turnstileConfig: { ...form.turnstileConfig, ...setting.turnstileConfig },
       genericConfig: { ...form.genericConfig, ...setting.genericConfig }
     })
   } catch (error) {
@@ -69,11 +76,13 @@ async function saveSetting() {
     const next = await updateCaptchaSetting({
       ...form,
       tencentConfig: trimMap(form.tencentConfig),
+      turnstileConfig: trimMap(form.turnstileConfig),
       genericConfig: trimMap(form.genericConfig)
     })
     Object.assign(form, {
       ...next,
       tencentConfig: { ...form.tencentConfig, ...next.tencentConfig },
+      turnstileConfig: { ...form.turnstileConfig, ...next.turnstileConfig },
       genericConfig: { ...form.genericConfig, ...next.genericConfig }
     })
     ElMessage.success('人机验证配置已保存')
@@ -105,6 +114,7 @@ function normalizedPayload(): CaptchaSettingPayload {
   return {
     ...form,
     tencentConfig: trimMap(form.tencentConfig),
+    turnstileConfig: trimMap(form.turnstileConfig),
     genericConfig: trimMap(form.genericConfig)
   }
 }
@@ -113,6 +123,11 @@ function validateSetting() {
   if (!needProviderConfig.value) return ''
   if (form.provider === 'GENERIC') {
     return form.genericConfig.url.trim() ? '' : '通用 HTTP 校验请求地址不能为空'
+  }
+  if (form.provider === 'TURNSTILE') {
+    if (!form.turnstileConfig.site_key.trim()) return 'Cloudflare Turnstile Site Key 不能为空'
+    if (!form.turnstileConfig.secret_key.trim()) return 'Cloudflare Turnstile Secret Key 不能为空'
+    return ''
   }
   const requiredFields = [
     ['secret_id', '腾讯云 SecretId（AKID 开头）'],
@@ -207,6 +222,22 @@ function trimMap(value: Record<string, string>) {
               </el-form-item>
               <el-form-item label="地域"><el-input v-model="form.tencentConfig.region" placeholder="ap-guangzhou" /></el-form-item>
               <el-form-item label="场景"><el-input v-model="form.tencentConfig.scene" placeholder="login" /></el-form-item>
+            </div>
+          </template>
+
+          <template v-else-if="form.provider === 'TURNSTILE'">
+            <div v-if="needProviderConfig" class="config-tip">
+              <strong>启用后必填：</strong>
+              <span>Site Key 和 Secret Key 来自 Cloudflare Turnstile 小组件。前端只下发 Site Key，Secret Key 仅后端校验使用。</span>
+            </div>
+            <div class="config-grid">
+              <el-form-item label="Turnstile Site Key">
+                <el-input v-model="form.turnstileConfig.site_key" placeholder="0x4AAAA..." />
+              </el-form-item>
+              <el-form-item label="Turnstile Secret Key">
+                <el-input v-model="form.turnstileConfig.secret_key" type="password" show-password placeholder="仅保存在后端，用于 siteverify 校验" />
+              </el-form-item>
+              <el-form-item label="场景"><el-input v-model="form.turnstileConfig.scene" placeholder="login" /></el-form-item>
             </div>
           </template>
 
