@@ -1327,10 +1327,13 @@ public class InMemoryShopRepository {
     public synchronized RechargeFieldItem createRechargeField(RechargeFieldRequest request) {
         String code = normalizeRechargeFieldCode(request == null ? "" : request.code());
         if (!StringUtils.hasText(code)) {
-            throw new IllegalArgumentException("field code is required");
+            throw new IllegalArgumentException("字段标识不能为空");
+        }
+        if (!isValidRechargeFieldCode(code)) {
+            throw new IllegalArgumentException("字段标识需以英文字母开头，仅支持小写英文、数字、下划线");
         }
         if (rechargeFieldCodeExists(code, null)) {
-            throw new IllegalStateException("field code already exists");
+            throw new IllegalStateException("字段标识已存在");
         }
 
         Long id = allocateIncrementingId(rechargeFieldId, maxRechargeFieldId());
@@ -1360,8 +1363,14 @@ public class InMemoryShopRepository {
         }
 
         String code = normalizeRechargeFieldCode(firstText(request == null ? "" : request.code(), current.code(), current.code()));
+        if (!StringUtils.hasText(code)) {
+            throw new IllegalArgumentException("字段标识不能为空");
+        }
+        if (!isValidRechargeFieldCode(code)) {
+            throw new IllegalArgumentException("字段标识需以英文字母开头，仅支持小写英文、数字、下划线");
+        }
         if (rechargeFieldCodeExists(code, id)) {
-            throw new IllegalStateException("field code already exists");
+            throw new IllegalStateException("字段标识已存在");
         }
 
         RechargeFieldItem next = new RechargeFieldItem(
@@ -10204,7 +10213,14 @@ public class InMemoryShopRepository {
     }
 
     private String normalizeRechargeFieldCode(String value) {
-        return normalize(value).replaceAll("[^a-z0-9_]", "_");
+        return normalize(value)
+            .replaceAll("[^a-z0-9_]", "_")
+            .replaceAll("_+", "_")
+            .replaceAll("^_+|_+$", "");
+    }
+
+    private boolean isValidRechargeFieldCode(String value) {
+        return value != null && value.matches("^[a-z][a-z0-9_]*$");
     }
 
     private List<String> validateEnabledRechargeFieldCodes(List<String> codes) {

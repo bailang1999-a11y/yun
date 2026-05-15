@@ -40,6 +40,7 @@ const form = reactive<RechargeFieldPayload>({
 })
 
 const formTitle = computed(() => (editingId.value ? '编辑字段' : '新增字段'))
+const isEditing = computed(() => editingId.value !== undefined && editingId.value !== null && String(editingId.value) !== '')
 const enabledCount = computed(() => fields.value.filter((item) => item.enabled).length)
 const requiredCount = computed(() => fields.value.filter((item) => item.required).length)
 
@@ -81,8 +82,13 @@ function editField(row: RechargeField) {
 }
 
 async function saveField() {
-  if (!form.code.trim() || !form.label.trim()) {
+  const normalizedCode = normalizeCode(form.code)
+  if (!normalizedCode || !form.label.trim()) {
     ElMessage.warning('请填写字段标识和字段名称')
+    return
+  }
+  if (!/^[a-z][a-z0-9_]*$/.test(normalizedCode)) {
+    ElMessage.warning('字段标识需以英文字母开头，仅支持小写英文、数字、下划线')
     return
   }
 
@@ -90,14 +96,16 @@ async function saveField() {
   try {
     const payload = {
       ...form,
-      code: normalizeCode(form.code),
+      code: normalizedCode,
       label: form.label.trim(),
       placeholder: form.placeholder?.trim(),
       helpText: form.helpText?.trim(),
       sort: Number(form.sort) || nextSort()
     }
-    if (editingId.value) {
-      await updateRechargeField(editingId.value, payload)
+    if (isEditing.value) {
+      const id = editingId.value
+      if (id === undefined || id === null) throw new Error('编辑字段状态异常，请重新选择字段')
+      await updateRechargeField(id, payload)
       ElMessage.success('充值字段已更新')
     } else {
       await createRechargeField(payload)
@@ -141,7 +149,12 @@ async function removeField(row: RechargeField) {
 }
 
 function normalizeCode(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
 }
 
 function inputTypeLabel(value: string) {
@@ -260,8 +273,8 @@ function nextSort() {
 
         <div class="editor-actions">
           <el-button @click="resetForm">清空</el-button>
-          <el-button type="primary" :icon="editingId ? Save : Plus" :loading="saving" @click="saveField">
-            {{ editingId ? '保存修改' : '新增字段' }}
+          <el-button type="primary" :icon="isEditing ? Save : Plus" :loading="saving" @click="saveField">
+            {{ isEditing ? '保存修改' : '新增字段' }}
           </el-button>
         </div>
       </article>
