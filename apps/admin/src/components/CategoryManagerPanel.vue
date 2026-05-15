@@ -165,6 +165,7 @@ function selectChild(row: Category) {
 function selectCategory(row: Category | null) {
   const nextId = row == null ? '' : String(row.id)
   selectedCategoryId.value = nextId
+  syncRootToSelection()
   emit('update:modelValue', row?.id ?? null)
   emit('select', row)
 }
