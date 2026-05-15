@@ -111,7 +111,7 @@ function normalizeGoodsPayload(payload: GoodsCreatePayload) {
     description: payload.description,
     categoryId: payload.categoryId,
     platform: payload.platform || 'GENERAL',
-    availablePlatforms: payload.availablePlatforms?.length ? payload.availablePlatforms : ['h5', 'web', 'api'],
+    availablePlatforms: payload.availablePlatforms || [],
     forbiddenPlatforms: payload.forbiddenPlatforms || []
   }
 }

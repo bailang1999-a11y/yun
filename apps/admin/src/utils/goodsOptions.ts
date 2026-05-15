@@ -13,6 +13,10 @@ export const platformOptions = [
   { label: '小红书', value: 'xiaohongshu', logo: 'xiaohongshu' }
 ]
 
+export const goodsSalePlatformOptions = platformOptions.filter(
+  (item) => !['h5', 'web', 'pc', 'api'].includes(item.value)
+)
+
 export const statusOptions = [
   { label: '上架', value: 'ON_SALE', type: 'success' },
   { label: '下架', value: 'OFF_SALE', type: 'info' },

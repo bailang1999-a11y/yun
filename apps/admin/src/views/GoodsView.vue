@@ -41,6 +41,7 @@ import {
   benefitDurationOptions,
   deliveryOptions,
   fallbackAccountTypeOptions,
+  goodsSalePlatformOptions,
   goodsModules,
   monitoringItems,
   platformOptions,
@@ -50,7 +51,8 @@ import {
 import { formatMoney } from '../utils/formatters'
 import type { PriceTemplate } from '../utils/priceTemplates'
 
-const DEFAULT_SALE_PLATFORMS = ['h5', 'web', 'api']
+const DEFAULT_SALE_PLATFORMS = goodsSalePlatformOptions.map((item) => item.value)
+const GOODS_SALE_PLATFORM_VALUES = new Set(DEFAULT_SALE_PLATFORMS)
 
 const goods = ref<Goods[]>([])
 const cards = ref<GoodsCard[]>([])
@@ -452,6 +454,15 @@ function platformLabel(value: string) {
   return platformOptions.find((item) => item.value === value)?.label || value
 }
 
+function normalizeGoodsSalePlatforms(values?: string[]) {
+  const selected = values?.filter((item) => GOODS_SALE_PLATFORM_VALUES.has(item)) || []
+  return selected.length ? selected : [...DEFAULT_SALE_PLATFORMS]
+}
+
+function normalizeForbiddenSalePlatforms(values?: string[]) {
+  return values?.filter((item) => GOODS_SALE_PLATFORM_VALUES.has(item)) || []
+}
+
 function statusMeta(value = '') {
   return statusOptions.find((item) => item.value === value) || { label: value || '-', type: 'info' }
 }
@@ -580,8 +591,8 @@ function fillForm(row: Goods) {
   form.deliveryType = row.deliveryType === 'AUTO' ? 'DIRECT' : row.deliveryType || 'CARD'
   form.cardKindId = row.cardKindId
   form.platform = row.platform || 'GENERAL'
-  form.availablePlatforms = row.availablePlatforms?.length ? [...row.availablePlatforms] : [...DEFAULT_SALE_PLATFORMS]
-  form.forbiddenPlatforms = row.forbiddenPlatforms?.length ? [...row.forbiddenPlatforms] : []
+  form.availablePlatforms = normalizeGoodsSalePlatforms(row.availablePlatforms)
+  form.forbiddenPlatforms = normalizeForbiddenSalePlatforms(row.forbiddenPlatforms)
   form.benefitDurations = [...(row.benefitDurations || [])]
   form.benefitType = row.benefitType || ''
   form.benefitBrand = row.benefitBrand || ''
@@ -623,8 +634,8 @@ function goodsToPayload(row: Goods): GoodsCreatePayload {
     deliveryType: row.deliveryType === 'AUTO' ? 'DIRECT' : row.deliveryType || 'CARD',
     cardKindId: row.cardKindId,
     platform: row.platform || 'GENERAL',
-    availablePlatforms: row.availablePlatforms?.length ? [...row.availablePlatforms] : [...DEFAULT_SALE_PLATFORMS],
-    forbiddenPlatforms: row.forbiddenPlatforms?.length ? [...row.forbiddenPlatforms] : [],
+    availablePlatforms: normalizeGoodsSalePlatforms(row.availablePlatforms),
+    forbiddenPlatforms: normalizeForbiddenSalePlatforms(row.forbiddenPlatforms),
     benefitDurations: [...(row.benefitDurations || [])],
     benefitType: row.benefitType || '',
     benefitBrand: row.benefitBrand || '',
@@ -763,6 +774,8 @@ async function submitGoods() {
       detailImages: normalizedBlocks.map((item) => item.imageUrl).filter(Boolean),
       detailBlocks: normalizedBlocks,
       integrations: form.integrations || [],
+      availablePlatforms: normalizeGoodsSalePlatforms(form.availablePlatforms),
+      forbiddenPlatforms: normalizeForbiddenSalePlatforms(form.forbiddenPlatforms),
       benefitDurations: form.benefitDurations || [],
       benefitType: form.benefitType?.trim(),
       benefitBrand: form.benefitBrand?.trim(),
@@ -913,10 +926,6 @@ function clearGoodsSelection() {
   selectedTableGoods.value = []
 }
 
-function allPlatformValues() {
-  return platformOptions.map((item) => item.value)
-}
-
 function resetBatchEdit(source?: Goods) {
   batchEdit.categoryEnabled = false
   batchEdit.categoryId = source?.categoryId
@@ -935,9 +944,9 @@ function resetBatchEdit(source?: Goods) {
   batchEdit.deliveryTypeEnabled = false
   batchEdit.deliveryType = source?.deliveryType === 'AUTO' ? 'DIRECT' : source?.deliveryType || 'CARD'
   batchEdit.availablePlatformsEnabled = false
-  batchEdit.availablePlatforms = source?.availablePlatforms?.length ? [...source.availablePlatforms] : allPlatformValues()
+  batchEdit.availablePlatforms = normalizeGoodsSalePlatforms(source?.availablePlatforms)
   batchEdit.forbiddenPlatformsEnabled = false
-  batchEdit.forbiddenPlatforms = [...(source?.forbiddenPlatforms || [])]
+  batchEdit.forbiddenPlatforms = normalizeForbiddenSalePlatforms(source?.forbiddenPlatforms)
 }
 
 function openBatchEdit() {
@@ -1003,8 +1012,8 @@ async function submitBatchEdit() {
           payload.requireRechargeAccount = batchEdit.deliveryType !== 'CARD' ? true : false
           payload.accountTypes = batchEdit.deliveryType === 'CARD' ? [] : payload.accountTypes
         }
-        if (batchEdit.availablePlatformsEnabled) payload.availablePlatforms = [...batchEdit.availablePlatforms]
-        if (batchEdit.forbiddenPlatformsEnabled) payload.forbiddenPlatforms = [...batchEdit.forbiddenPlatforms]
+        if (batchEdit.availablePlatformsEnabled) payload.availablePlatforms = normalizeGoodsSalePlatforms(batchEdit.availablePlatforms)
+        if (batchEdit.forbiddenPlatformsEnabled) payload.forbiddenPlatforms = normalizeForbiddenSalePlatforms(batchEdit.forbiddenPlatforms)
 
         return updateGoods(row.id, payload)
       })
@@ -1141,7 +1150,7 @@ onMounted(() => {
             :props="{ label: 'name', children: 'children', value: 'id', disabled: 'disabled' }"
           />
           <el-select v-model="goodsFilters.platform" clearable placeholder="按销售平台选择">
-            <el-option v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value" />
+            <el-option v-for="item in goodsSalePlatformOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
         </div>
         <div class="primary-actions">
@@ -1383,7 +1392,7 @@ onMounted(() => {
         <GoodsPlatformSelector
           v-model:available-platforms="batchEdit.availablePlatforms"
           v-model:forbidden-platforms="batchEdit.forbiddenPlatforms"
-          :options="platformOptions"
+          :options="goodsSalePlatformOptions"
           :class="{ disabled: !batchEdit.availablePlatformsEnabled && !batchEdit.forbiddenPlatformsEnabled }"
         />
         <div class="batch-platform-toggles">
@@ -1536,7 +1545,7 @@ onMounted(() => {
                 <GoodsPlatformSelector
                   v-model:available-platforms="form.availablePlatforms"
                   v-model:forbidden-platforms="form.forbiddenPlatforms"
-                  :options="platformOptions"
+                  :options="goodsSalePlatformOptions"
                 />
               </div>
             </section>
