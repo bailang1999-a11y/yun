@@ -51,6 +51,8 @@ const batchForm = reactive({
   categoryId: '',
   status: '',
   coverUrl: '',
+  benefitType: '',
+  benefitBrand: '',
   accountTypes: [] as string[],
   requireRechargeAccount: undefined as boolean | undefined,
   priceTemplateId: '',
@@ -189,6 +191,8 @@ async function prepareDrafts() {
     stock: Math.max(0, Math.floor(numeric(item.stock))),
     status: batchForm.status || normalizeRemoteGoodsStatus(item.status),
     benefitDurations: inferBenefitDurations(item.name),
+    benefitType: batchForm.benefitType.trim(),
+    benefitBrand: batchForm.benefitBrand.trim(),
     coverUrl: batchForm.coverUrl,
     description: `货源对接自动创建，已绑定上游商品 ${item.supplierGoodsId}`,
     accountTypes: [...batchForm.accountTypes],
@@ -245,11 +249,19 @@ async function runClone() {
     selectedGoods.value = []
     draftItems.value = []
     batchApplied.value = false
-  } catch {
-    ElMessage.error('一键对接失败')
+  } catch (error) {
+    ElMessage.error(cloneErrorMessage(error))
   } finally {
     cloning.value = false
   }
+}
+
+function cloneErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : ''
+  if (/超时|timeout|ECONNABORTED/i.test(message)) {
+    return '一键对接处理时间较长，请刷新商品列表确认结果；如未创建成功，再减少数量重试。'
+  }
+  return message || '一键对接失败'
 }
 
 function syncBatchSettingsToDrafts() {
@@ -263,6 +275,8 @@ function applyBatchSettingsToDraft(item: SourceCloneDraft): SourceCloneDraft {
     categoryId: batchForm.categoryId || item.categoryId,
     status: batchForm.status || item.status,
     coverUrl: batchForm.coverUrl.trim() || item.coverUrl,
+    benefitType: batchForm.benefitType.trim() || item.benefitType,
+    benefitBrand: batchForm.benefitBrand.trim() || item.benefitBrand,
     accountTypes: batchForm.accountTypes.length ? [...batchForm.accountTypes] : item.accountTypes,
     requireRechargeAccount: typeof batchForm.requireRechargeAccount === 'boolean'
       ? batchForm.requireRechargeAccount
@@ -313,6 +327,8 @@ function toCloneConfig(item: SourceCloneDraft): SourceCloneConfig {
     stock: Math.max(0, Math.floor(numeric(item.stock))),
     status: item.status,
     benefitDurations: item.benefitDurations || [],
+    benefitType: item.benefitType?.trim(),
+    benefitBrand: item.benefitBrand?.trim(),
     coverUrl: item.coverUrl?.trim(),
     description: item.description?.trim(),
     accountTypes: item.accountTypes,
@@ -729,31 +745,35 @@ function buildCategoryTree(items: Category[]) {
         <el-button :icon="Layers3" :disabled="!draftItems.length" @click="applyBatch">应用到全部</el-button>
       </div>
       <div class="batch-compact">
-        <article class="batch-cover-compact">
-          <button
-            type="button"
-            class="source-cover-tile source-cover-tile--compact source-cover-preview-button"
-            :class="{ empty: !batchForm.coverUrl }"
-            :disabled="!batchForm.coverUrl"
-            @click="openCoverPreview(batchForm.coverUrl, '批量设置主图预览')"
-          >
-            <img v-if="batchForm.coverUrl" :src="coverImageSrc(batchForm.coverUrl)" alt="商品主图" />
-            <span v-else class="cover-empty-state">
-              <ImagePlus :size="18" />
-              <small>暂无主图</small>
-            </span>
-          </button>
-          <div>
-            <strong>商品主图</strong>
-            <span>{{ batchForm.coverUrl ? '点击预览' : '可不设置' }}</span>
-          </div>
-          <el-upload :before-upload="handleBatchCoverUpload" :show-file-list="false" :accept="imageAccept">
-            <el-button size="small" :icon="batchForm.coverUrl ? ImagePlus : UploadIcon">{{ batchForm.coverUrl ? '更换' : '上传' }}</el-button>
-          </el-upload>
-        </article>
-
-        <article class="batch-group batch-group--basis">
-          <div class="batch-fields two-col">
+        <article class="batch-section batch-section--basic">
+          <header class="batch-section-head">
+            <small>01</small>
+            <strong>基础信息</strong>
+          </header>
+          <div class="batch-basic-grid">
+            <div class="batch-cover-compact">
+              <button
+                type="button"
+                class="source-cover-tile source-cover-tile--compact source-cover-preview-button"
+                :class="{ empty: !batchForm.coverUrl }"
+                :disabled="!batchForm.coverUrl"
+                @click="openCoverPreview(batchForm.coverUrl, '批量设置主图预览')"
+              >
+                <img v-if="batchForm.coverUrl" :src="coverImageSrc(batchForm.coverUrl)" alt="商品主图" />
+                <span v-else class="cover-empty-state">
+                  <ImagePlus :size="18" />
+                  <small>暂无主图</small>
+                </span>
+              </button>
+              <div>
+                <strong>商品主图</strong>
+                <span>{{ batchForm.coverUrl ? '点击预览' : '可不设置' }}</span>
+              </div>
+              <el-upload :before-upload="handleBatchCoverUpload" :show-file-list="false" :accept="imageAccept">
+                <el-button size="small" :icon="batchForm.coverUrl ? ImagePlus : UploadIcon">{{ batchForm.coverUrl ? '更换' : '上传' }}</el-button>
+              </el-upload>
+            </div>
+            <div class="batch-fields two-col">
               <label class="field">
                 <span>本地分类</span>
                 <el-tree-select
@@ -779,90 +799,107 @@ function buildCategoryTree(items: Category[]) {
                 </el-select>
               </label>
             </div>
+          </div>
         </article>
 
-          <article class="batch-group batch-group--fulfillment">
-            <div class="batch-fields">
-              <label class="field">
-                <span>充值字段</span>
-                <el-select
-                  v-model="batchForm.accountTypes"
-                  multiple
-                  collapse-tags
-                  collapse-tags-tooltip
-                  filterable
-                  placeholder="选择本地字段库字段"
-                >
-                  <el-option v-for="field in accountFieldOptions" :key="field.code" :label="field.label" :value="field.code" />
-                </el-select>
-              </label>
-              <label class="switch-line">
-                <span>需要充值账号</span>
-                <el-select v-model="batchForm.requireRechargeAccount" placeholder="请选择">
-                  <el-option label="需要" :value="true" />
-                  <el-option label="不需要" :value="false" />
-                </el-select>
-              </label>
-            </div>
-          </article>
+        <article class="batch-section batch-section--benefit">
+          <header class="batch-section-head">
+            <small>02</small>
+            <strong>权益与履约</strong>
+          </header>
+          <div class="batch-fields benefit-grid">
+            <label class="field">
+              <span>权益类型</span>
+              <el-input v-model.trim="batchForm.benefitType" placeholder="例如：VIP / SVIP / 大会员" />
+            </label>
+            <label class="field">
+              <span>权益品牌</span>
+              <el-input v-model.trim="batchForm.benefitBrand" placeholder="例如：腾讯视频 / 芒果TV / 爱奇艺" />
+            </label>
+            <label class="field">
+              <span>充值字段</span>
+              <el-select
+                v-model="batchForm.accountTypes"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                filterable
+                placeholder="选择本地字段库字段"
+              >
+                <el-option v-for="field in accountFieldOptions" :key="field.code" :label="field.label" :value="field.code" />
+              </el-select>
+            </label>
+            <label class="switch-line">
+              <span>需要充值账号</span>
+              <el-select v-model="batchForm.requireRechargeAccount" placeholder="请选择">
+                <el-option label="需要" :value="true" />
+                <el-option label="不需要" :value="false" />
+              </el-select>
+            </label>
+          </div>
+        </article>
 
-          <article class="batch-group batch-group--channel">
-            <div class="batch-fields three-col">
-              <label class="field">
-                <span>价格模板</span>
-                <el-select
-                  v-model="batchForm.priceTemplateId"
-                  filterable
-                  placeholder="选择价格模板"
-                  @visible-change="handlePriceTemplateVisible"
-                  @change="applyBatchPriceTemplate"
-                >
-                  <el-option
-                    v-for="template in priceTemplateOptions"
-                    :key="template.id"
-                    :label="template.enabled === false ? `${template.name}（停用）` : template.name"
-                    :value="template.id"
-                    :disabled="template.enabled === false"
-                  />
-                </el-select>
-              </label>
-              <label class="field">
-                <span>可售平台</span>
-                <el-select
-                  v-model="batchForm.availablePlatforms"
-                  multiple
-                  collapse-tags
-                  collapse-tags-tooltip
-                  filterable
-                  placeholder="选择可售平台"
-                  @change="handleAvailablePlatformsChange"
-                >
-                  <el-option v-for="platform in salePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
-                </el-select>
-              </label>
-              <label class="field">
-                <span>不可售平台</span>
-                <el-select
-                  v-model="batchForm.forbiddenPlatforms"
-                  multiple
-                  collapse-tags
-                  collapse-tags-tooltip
-                  filterable
-                  placeholder="选择不可售平台"
-                >
-                  <el-option v-for="platform in goodsSalePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
-                </el-select>
-              </label>
-              <label class="field compact-field">
-                <span>优先级</span>
-                <el-input-number v-model="batchForm.priority" :min="1" :step="10" :controls="false" />
-              </label>
-              <label class="field compact-field">
-                <span>下单超时(秒)</span>
-                <el-input-number v-model="batchForm.timeoutSeconds" :min="5" :step="5" :controls="false" />
-              </label>
-            </div>
-          </article>
+        <article class="batch-section batch-section--sales">
+          <header class="batch-section-head">
+            <small>03</small>
+            <strong>销售配置</strong>
+          </header>
+          <div class="batch-fields sales-grid">
+            <label class="field">
+              <span>价格模板</span>
+              <el-select
+                v-model="batchForm.priceTemplateId"
+                filterable
+                placeholder="选择价格模板"
+                @visible-change="handlePriceTemplateVisible"
+                @change="applyBatchPriceTemplate"
+              >
+                <el-option
+                  v-for="template in priceTemplateOptions"
+                  :key="template.id"
+                  :label="template.enabled === false ? `${template.name}（停用）` : template.name"
+                  :value="template.id"
+                  :disabled="template.enabled === false"
+                />
+              </el-select>
+            </label>
+            <label class="field">
+              <span>可售平台</span>
+              <el-select
+                v-model="batchForm.availablePlatforms"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                filterable
+                placeholder="选择可售平台"
+                @change="handleAvailablePlatformsChange"
+              >
+                <el-option v-for="platform in salePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+              </el-select>
+            </label>
+            <label class="field">
+              <span>不可售平台</span>
+              <el-select
+                v-model="batchForm.forbiddenPlatforms"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                filterable
+                placeholder="选择不可售平台"
+              >
+                <el-option v-for="platform in goodsSalePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+              </el-select>
+            </label>
+            <label class="field compact-field">
+              <span>优先级</span>
+              <el-input-number v-model="batchForm.priority" :min="1" :step="10" :controls="false" />
+            </label>
+            <label class="field compact-field">
+              <span>下单超时(秒)</span>
+              <el-input-number v-model="batchForm.timeoutSeconds" :min="5" :step="5" :controls="false" />
+            </label>
+          </div>
+        </article>
       </div>
     </section>
 
@@ -966,6 +1003,14 @@ function buildCategoryTree(items: Category[]) {
                       </el-select>
                     </label>
                     <label class="draft-mini-field">
+                      <span>权益类型</span>
+                      <el-input v-model.trim="row.benefitType" placeholder="例如：VIP / SVIP / 大会员" />
+                    </label>
+                    <label class="draft-mini-field">
+                      <span>权益品牌</span>
+                      <el-input v-model.trim="row.benefitBrand" placeholder="例如：腾讯视频 / 芒果TV" />
+                    </label>
+                    <label class="draft-mini-field">
                       <span>充值字段</span>
                       <el-select
                         v-model="row.accountTypes"
@@ -1065,6 +1110,8 @@ function buildCategoryTree(items: Category[]) {
             <template #default="{ row }">
               <div class="draft-chip-line">
                 <span :class="{ muted: !row.benefitDurations?.length }">{{ row.benefitDurations?.join('、') || '未设置权益' }}</span>
+                <span :class="{ muted: !row.benefitType }">{{ row.benefitType || '未设置类型' }}</span>
+                <span :class="{ muted: !row.benefitBrand }">{{ row.benefitBrand || '未设置品牌' }}</span>
                 <span :class="{ muted: !row.accountTypes?.length }">{{ accountFieldLabels(row.accountTypes) }}</span>
                 <span :class="{ muted: typeof row.requireRechargeAccount !== 'boolean' }">
                   {{ typeof row.requireRechargeAccount === 'boolean' ? (row.requireRechargeAccount ? '需要账号' : '不需要账号') : '未设置账号' }}
@@ -1593,25 +1640,63 @@ function buildCategoryTree(items: Category[]) {
 
 .batch-compact {
   display: grid;
-  grid-template-columns: 210px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.batch-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 12px;
+  border: 0.5px solid rgba(255, 255, 255, 0.09);
+  background:
+    linear-gradient(135deg, rgba(0, 255, 195, 0.025), rgba(88, 166, 255, 0.035)),
+    rgba(255, 255, 255, 0.028);
+}
+
+.batch-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.batch-section-head small {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 7px;
+  color: rgba(189, 248, 220, 0.82);
+  font-size: 11px;
+  font-weight: 850;
+  background: rgba(189, 248, 220, 0.08);
+  border: 0.5px solid rgba(189, 248, 220, 0.16);
+}
+
+.batch-section-head strong {
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.batch-basic-grid {
+  display: grid;
+  grid-template-columns: 178px minmax(0, 1fr);
   gap: 10px;
   align-items: stretch;
 }
 
 .batch-cover-compact {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  grid-template-rows: auto auto;
-  gap: 8px 10px;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
   align-items: center;
-  padding: 10px;
-  border-radius: 12px;
-  border: 0.5px solid rgba(255, 255, 255, 0.09);
-  background: rgba(255, 255, 255, 0.04);
+  min-width: 0;
 }
 
-.batch-cover-compact strong,
-.batch-group header {
+.batch-cover-compact strong {
   color: rgba(255, 255, 255, 0.74);
   font-size: 13px;
   font-weight: 700;
@@ -1630,15 +1715,6 @@ function buildCategoryTree(items: Category[]) {
   width: 100%;
 }
 
-.batch-group {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  border-radius: 12px;
-  border: 0.5px solid rgba(255, 255, 255, 0.09);
-  background: rgba(255, 255, 255, 0.035);
-}
-
 .batch-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1649,15 +1725,11 @@ function buildCategoryTree(items: Category[]) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.batch-group--fulfillment {
-  grid-column: 3;
+.batch-fields.benefit-grid {
+  grid-template-columns: minmax(150px, 0.8fr) minmax(180px, 0.9fr) minmax(260px, 1.3fr) minmax(150px, 0.65fr);
 }
 
-.batch-group--channel {
-  grid-column: 1 / -1;
-}
-
-.batch-fields.three-col {
+.batch-fields.sales-grid {
   grid-template-columns: minmax(180px, 0.85fr) minmax(220px, 1fr) minmax(220px, 1fr) 118px 126px;
 }
 
@@ -1690,8 +1762,8 @@ function buildCategoryTree(items: Category[]) {
 
 .source-cover-tile--compact {
   display: grid;
-  width: 96px;
-  height: 72px;
+  width: 72px;
+  height: 62px;
   place-items: center;
   color: rgba(189, 248, 220, 0.55);
   border-radius: 12px;
@@ -2373,17 +2445,10 @@ function buildCategoryTree(items: Category[]) {
   }
 
   .batch-compact,
-  .batch-fields.three-col {
+  .batch-basic-grid,
+  .batch-fields.benefit-grid,
+  .batch-fields.sales-grid {
     grid-template-columns: 1fr 1fr;
-  }
-
-  .batch-group--fulfillment,
-  .batch-group--channel {
-    grid-column: auto;
-  }
-
-  .batch-cover-compact {
-    grid-column: 1 / -1;
   }
 }
 
@@ -2400,8 +2465,10 @@ function buildCategoryTree(items: Category[]) {
   .content-grid,
   .dock-grid,
   .batch-compact,
+  .batch-basic-grid,
   .batch-fields.two-col,
-  .batch-fields.three-col {
+  .batch-fields.benefit-grid,
+  .batch-fields.sales-grid {
     grid-template-columns: 1fr;
   }
 

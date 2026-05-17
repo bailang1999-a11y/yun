@@ -13,6 +13,7 @@ import type {
 } from '../types/operations'
 
 const SOURCE_CONNECT_SYNC_TIMEOUT_MS = 90_000
+const SOURCE_CONNECT_CLONE_TIMEOUT_MS = 180_000
 
 export async function fetchSuppliers() {
   const { data } = await apiClient.get<unknown>('/api/admin/suppliers')
@@ -80,7 +81,11 @@ export async function fetchSourceConnectGoods(
 }
 
 export async function cloneSourceGoods(supplierId: Supplier['id'], payload: SourceClonePayload): Promise<SourceCloneResult> {
-  const { data } = await apiClient.post<unknown>(`/api/admin/source-connect/suppliers/${supplierId}/clone`, payload)
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/source-connect/suppliers/${supplierId}/clone`,
+    payload,
+    { timeout: SOURCE_CONNECT_CLONE_TIMEOUT_MS }
+  )
   const result = unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>)
 
   return {

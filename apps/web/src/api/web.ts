@@ -122,7 +122,7 @@ function normalizeSourceChannels(record: AnyRecord) {
   return cleanTextList([...directChannels, directSupplier, ...integrationChannels])
 }
 
-const SALE_TERMINAL_PLATFORMS = new Set(['all', 'h5', 'web', 'pc', 'api', 'private'])
+const SALE_TERMINAL_PLATFORMS = new Set(['all', 'h5', 'web', 'pc', 'api'])
 
 function hasSaleTerminalRestriction(platforms: string[]) {
   return platforms.some((item) => SALE_TERMINAL_PLATFORMS.has(item))

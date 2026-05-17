@@ -11,11 +11,23 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface CategoryRecordMapper extends BaseMapper<CategoryRecordEntity> {
     @Update("""
-        INSERT INTO categories (id, parent_id, name, sort_no, status)
-        VALUES (#{entity.id}, #{entity.parentId}, #{entity.name}, #{entity.sortNo}, #{entity.status})
+        INSERT INTO categories (id, parent_id, name, icon, icon_url, custom_icon_url, sort_no, status)
+        VALUES (
+            #{entity.id},
+            #{entity.parentId},
+            #{entity.name},
+            #{entity.icon},
+            #{entity.iconUrl},
+            #{entity.customIconUrl},
+            #{entity.sortNo},
+            #{entity.status}
+        )
         ON DUPLICATE KEY UPDATE
             parent_id = VALUES(parent_id),
             name = VALUES(name),
+            icon = VALUES(icon),
+            icon_url = VALUES(icon_url),
+            custom_icon_url = VALUES(custom_icon_url),
             sort_no = VALUES(sort_no),
             status = VALUES(status),
             deleted_at = NULL
@@ -26,7 +38,7 @@ public interface CategoryRecordMapper extends BaseMapper<CategoryRecordEntity> {
     int softDelete(@Param("id") Long id);
 
     @Select("""
-        SELECT id, parent_id, name, sort_no, status
+        SELECT id, parent_id, name, icon, icon_url, custom_icon_url, sort_no, status
         FROM categories
         WHERE deleted_at IS NULL
         ORDER BY sort_no, id

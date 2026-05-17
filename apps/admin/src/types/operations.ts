@@ -260,6 +260,8 @@ export interface SourceCloneConfig {
   stock: number
   status: string
   benefitDurations?: string[]
+  benefitType?: string
+  benefitBrand?: string
   coverUrl?: string
   description?: string
   accountTypes: string[]

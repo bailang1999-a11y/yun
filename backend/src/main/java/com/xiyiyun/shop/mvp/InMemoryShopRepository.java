@@ -89,7 +89,7 @@ public class InMemoryShopRepository {
     private static final DateTimeFormatter ORDER_NO_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
     private static final DateTimeFormatter FULU_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final ZoneId CHINA_ZONE = ZoneId.of("Asia/Shanghai");
-    private static final Set<String> SALES_TERMINAL_PLATFORMS = Set.of("all", "h5", "web", "pc", "api", "private");
+    private static final Set<String> SALES_TERMINAL_PLATFORMS = Set.of("all", "h5", "web", "pc", "api");
     private static final Set<String> LEGACY_SYSTEM_GOODS_TAGS = Set.of("new", "api-source");
     private static final String SMS_LOGIN_SETTING_KEY = "sms.login.setting";
     private static final String CAPTCHA_SETTING_KEY = "captcha.setting";
@@ -2166,8 +2166,8 @@ public class InMemoryShopRepository {
                     "由 " + supplier.name() + " 一键对接创建",
                     defaultText(cloneItem.description(), "货源对接自动创建，已绑定上游商品 " + normalizedId),
                     benefitDurations,
-                    "",
-                    "",
+                    defaultText(cloneItem.benefitType(), ""),
+                    defaultText(cloneItem.benefitBrand(), ""),
                     titleContainsPriceLimited(goodsName),
                     inferredPriceLimitText(goodsName),
                     defaultText(cloneItem.coverUrl(), ""),
@@ -2250,6 +2250,8 @@ public class InMemoryShopRepository {
                 id,
                 null,
                 request.categoryId(),
+                null,
+                null,
                 null,
                 null,
                 null,

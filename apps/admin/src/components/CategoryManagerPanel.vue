@@ -23,6 +23,7 @@ import {
   X
 } from 'lucide-vue-next'
 import { createCategory, deleteCategory, fetchCategories, updateCategory } from '../api/catalog'
+import { uploadImage } from '../api/uploads'
 import type { Category, CategoryCreatePayload, CategoryUpdatePayload } from '../types/operations'
 import { buildCategoryTree, flattenCategoryTree } from '../utils/categoryTree'
 
@@ -41,6 +42,7 @@ const categories = ref<Category[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
+const iconUploading = ref(false)
 const selectedCategoryId = ref<string>(props.modelValue == null ? '' : String(props.modelValue))
 const selectedPath = ref<Category[]>([])
 const editorVisible = ref(false)
@@ -209,48 +211,59 @@ function clearCustomIcon() {
   if (iconFileInput.value) iconFileInput.value.value = ''
 }
 
-function handleIconFileChange(event: Event) {
+async function handleIconFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
 
-  if (!/^image\/(jpeg|png)$/.test(file.type)) {
-    ElMessage.warning('仅支持 JPG、JPEG、PNG 图片')
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)) {
+    ElMessage.warning('仅支持 JPG、PNG、WEBP、GIF 图片')
+    input.value = ''
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    ElMessage.warning('图片大小不能超过 5MB')
     input.value = ''
     return
   }
 
-  const reader = new FileReader()
-  reader.onload = () => {
-    const dataUrl = typeof reader.result === 'string' ? reader.result : ''
-    if (!dataUrl) {
-      ElMessage.error('图标读取失败')
-      input.value = ''
+  iconUploading.value = true
+  try {
+    const { width, height } = await readImageSize(file)
+    if (width !== height) {
+      ElMessage.warning('请上传 1:1 的正方形图片')
       return
     }
-
-    const image = new Image()
-    image.onload = () => {
-      if (image.naturalWidth !== image.naturalHeight) {
-        ElMessage.warning('请上传 1:1 的正方形图片')
-        input.value = ''
-        return
-      }
-      form.iconUrl = dataUrl
-      form.customIconUrl = dataUrl
-      ElMessage.success('图标已上传')
+    const result = await uploadImage(file)
+    if (!result.url) {
+      ElMessage.error('图标上传失败')
+      return
     }
-    image.onerror = () => {
-      ElMessage.error('图标解析失败')
-      input.value = ''
-    }
-    image.src = dataUrl
-  }
-  reader.onerror = () => {
-    ElMessage.error('图标读取失败')
+    form.iconUrl = result.url
+    form.customIconUrl = result.url
+    ElMessage.success('图标已上传')
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '图标上传失败'))
+  } finally {
+    iconUploading.value = false
     input.value = ''
   }
-  reader.readAsDataURL(file)
+}
+
+function readImageSize(file: File) {
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file)
+    const image = new Image()
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve({ width: image.naturalWidth, height: image.naturalHeight })
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('图标解析失败'))
+    }
+    image.src = objectUrl
+  })
 }
 
 function depthLabel(row?: Category) {
@@ -349,6 +362,10 @@ function removeContextRow() {
 }
 
 async function submitCategory() {
+  if (iconUploading.value) {
+    ElMessage.warning('图标正在上传，请稍后保存')
+    return
+  }
   if (!form.name.trim()) {
     ElMessage.warning('请填写分类名称')
     return
@@ -508,14 +525,14 @@ async function removeCategory(row: Category) {
                 <input
                   ref="iconFileInput"
                   type="file"
-                  accept="image/png,image/jpeg"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
                   class="sr-only-input"
                   @change="handleIconFileChange"
                 />
-                <el-button :icon="ImagePlus" @click="triggerIconUpload">上传图片</el-button>
+                <el-button :icon="ImagePlus" :loading="iconUploading" @click="triggerIconUpload">上传图片</el-button>
                 <el-button v-if="form.iconUrl" :icon="Trash2" @click="clearCustomIcon">移除图片</el-button>
               </div>
-              <span class="custom-icon-hint">支持 JPG、JPEG、PNG，图片比例需为 1:1</span>
+              <span class="custom-icon-hint">支持 JPG、PNG、WEBP、GIF，图片比例需为 1:1</span>
             </div>
             <div class="icon-picker" role="radiogroup" aria-label="选择分类图标">
               <button
@@ -558,7 +575,7 @@ async function removeCategory(row: Category) {
         </el-form>
         <template #footer>
           <el-button :icon="X" @click="editorVisible = false">取消</el-button>
-          <el-button type="primary" :icon="editorMode === 'edit' ? Save : Plus" :loading="saving" @click="submitCategory">
+          <el-button type="primary" :icon="editorMode === 'edit' ? Save : Plus" :loading="saving" :disabled="iconUploading" @click="submitCategory">
             {{ editorActionText }}
           </el-button>
         </template>

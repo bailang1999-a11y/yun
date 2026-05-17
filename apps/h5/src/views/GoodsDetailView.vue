@@ -46,7 +46,7 @@ const forbiddenPlatformText = computed(() => {
   return platforms.map(platformLabel).join('、')
 })
 const h5Forbidden = computed(() => Boolean(goods.value?.forbiddenPlatforms?.includes('h5')))
-const saleTerminalPlatforms = new Set(['all', 'h5', 'web', 'pc', 'api', 'private'])
+const saleTerminalPlatforms = new Set(['all', 'h5', 'web', 'pc', 'api'])
 const h5NotAvailable = computed(() => {
   const platforms = goods.value?.availablePlatforms || []
   return Boolean(platforms.some((item) => saleTerminalPlatforms.has(item)) && !platforms.includes('all') && !platforms.includes('h5'))

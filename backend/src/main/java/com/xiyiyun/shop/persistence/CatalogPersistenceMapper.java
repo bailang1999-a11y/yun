@@ -30,6 +30,9 @@ public class CatalogPersistenceMapper {
         entity.setId(category.id());
         entity.setParentId(category.parentId() == null || category.parentId() == 0L ? null : category.parentId());
         entity.setName(category.name());
+        entity.setIcon(category.icon());
+        entity.setIconUrl(category.iconUrl());
+        entity.setCustomIconUrl(category.customIconUrl());
         entity.setSortNo(category.sort());
         entity.setStatus(Boolean.FALSE.equals(category.enabled()) ? "OFF_SALE" : "ON_SALE");
         return entity;
@@ -78,9 +81,9 @@ public class CatalogPersistenceMapper {
             entity.getName(),
             "",
             entity.getParentId() == null ? 0L : entity.getParentId(),
-            null,
-            "",
-            "",
+            entity.getIcon(),
+            textValue(entity.getIconUrl()),
+            textValue(entity.getCustomIconUrl()),
             entity.getSortNo(),
             enabled,
             enabled ? "ENABLED" : "DISABLED",

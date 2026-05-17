@@ -12,6 +12,8 @@ public record SourceCloneConfigItem(
     Integer stock,
     String status,
     List<String> benefitDurations,
+    String benefitType,
+    String benefitBrand,
     String coverUrl,
     String description,
     List<String> accountTypes,

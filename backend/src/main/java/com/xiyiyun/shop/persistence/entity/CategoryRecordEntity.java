@@ -10,6 +10,9 @@ public class CategoryRecordEntity {
     private Long id;
     private Long parentId;
     private String name;
+    private String icon;
+    private String iconUrl;
+    private String customIconUrl;
     private Integer sortNo;
     private String status;
 
@@ -19,6 +22,12 @@ public class CategoryRecordEntity {
     public void setParentId(Long parentId) { this.parentId = parentId; }
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+    public String getIcon() { return icon; }
+    public void setIcon(String icon) { this.icon = icon; }
+    public String getIconUrl() { return iconUrl; }
+    public void setIconUrl(String iconUrl) { this.iconUrl = iconUrl; }
+    public String getCustomIconUrl() { return customIconUrl; }
+    public void setCustomIconUrl(String customIconUrl) { this.customIconUrl = customIconUrl; }
     public Integer getSortNo() { return sortNo; }
     public void setSortNo(Integer sortNo) { this.sortNo = sortNo; }
     public String getStatus() { return status; }
