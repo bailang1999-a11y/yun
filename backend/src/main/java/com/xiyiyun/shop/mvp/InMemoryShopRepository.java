@@ -9298,14 +9298,14 @@ public class InMemoryShopRepository {
 
     private List<String> normalizePlatforms(List<String> platforms) {
         if (platforms == null || platforms.isEmpty()) {
-            return List.of("private");
+            return List.of();
         }
         List<String> normalized = platforms.stream()
             .map(this::normalize)
             .filter(StringUtils::hasText)
             .distinct()
             .toList();
-        return normalized.isEmpty() ? List.of("private") : normalized;
+        return normalized;
     }
 
     private List<String> normalizeSalePlatforms(List<String> platforms) {

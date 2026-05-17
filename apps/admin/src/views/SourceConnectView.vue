@@ -59,7 +59,7 @@ const batchForm = reactive({
   priceMode: '',
   priceCoefficient: undefined as RequiredBatchNumber,
   priceFixedAdd: undefined as RequiredBatchNumber,
-  availablePlatforms: [UNLIMITED_PLATFORM] as string[],
+  availablePlatforms: [] as string[],
   forbiddenPlatforms: [] as string[],
   priority: 10 as RequiredBatchNumber,
   timeoutSeconds: 30 as RequiredBatchNumber
@@ -285,7 +285,7 @@ function applyBatchSettingsToDraft(item: SourceCloneDraft): SourceCloneDraft {
     priceMode: batchForm.priceMode || item.priceMode,
     priceCoefficient: hasPositiveNumber(batchForm.priceCoefficient) ? Number(batchForm.priceCoefficient) : item.priceCoefficient,
     priceFixedAdd: typeof batchForm.priceFixedAdd === 'number' ? Number(batchForm.priceFixedAdd) : item.priceFixedAdd,
-    availablePlatforms: batchForm.availablePlatforms.length ? normalizeAvailablePlatforms(batchForm.availablePlatforms) : item.availablePlatforms,
+    availablePlatforms: normalizeAvailablePlatforms(batchForm.availablePlatforms),
     forbiddenPlatforms: [...batchForm.forbiddenPlatforms],
     priority: hasPositiveNumber(batchForm.priority) ? Number(batchForm.priority) : item.priority,
     timeoutSeconds: hasPositiveNumber(batchForm.timeoutSeconds) ? Number(batchForm.timeoutSeconds) : item.timeoutSeconds
@@ -308,7 +308,6 @@ function validateDraftSettings() {
     if (!item.accountTypes?.length) missing.add('充值字段')
     if (typeof item.requireRechargeAccount !== 'boolean') missing.add('是否需要充值账号')
     if (!item.priceTemplateId) missing.add('价格模板')
-    if (!item.availablePlatforms?.length) missing.add('可售平台')
   })
   if (missing.size) {
     ElMessage.warning(`请先设置待对接配置：${Array.from(missing).join('、')}`)

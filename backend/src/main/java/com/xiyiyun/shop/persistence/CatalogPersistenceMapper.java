@@ -156,7 +156,7 @@ public class CatalogPersistenceMapper {
             tags,
             entity.getCreatedAt(),
             entity.getCreatedAt(),
-            availablePlatforms.isEmpty() ? List.of("GENERAL") : availablePlatforms,
+            availablePlatforms,
             forbiddenPlatforms,
             cardKindId
         );
