@@ -2128,12 +2128,6 @@ public class InMemoryShopRepository {
             throw new IllegalArgumentException("items is required");
         }
 
-        RemoteGoodsSyncResult source = Optional.ofNullable(remoteGoodsSyncResults.get(supplierId))
-            .orElseGet(() -> sourceConnectRemoteGoods(supplierId, new SyncGoodsRequest(null, "", 1, 100)));
-        Map<String, RemoteGoodsItem> remoteGoodsById = source.items().stream()
-            .filter(item -> StringUtils.hasText(item.supplierGoodsId()))
-            .collect(java.util.stream.Collectors.toMap(item -> item.supplierGoodsId().trim(), item -> item, (left, right) -> left));
-
         int createdCount = 0;
         int skippedCount = 0;
         int failedCount = 0;
@@ -2147,22 +2141,19 @@ public class InMemoryShopRepository {
             }
 
             try {
-                RemoteGoodsItem remote = remoteGoodsById.get(normalizedId);
-                if (remote == null) {
-                    remote = fetchRemoteGoodsSnapshot(supplier, normalizedId);
-                    remoteGoodsById.put(normalizedId, remote);
-                }
+                RemoteGoodsItem remote = fetchRemoteGoodsSnapshot(supplier, normalizedId, false);
+                GoodsIntegrationItem remoteIntegration = remoteGoodsIntegration(supplier, remote);
                 Optional<GoodsChannelItem> existing = allGoodsChannelSnapshots().stream()
                     .filter(channel -> Objects.equals(channel.supplierId(), supplierId))
                     .filter(channel -> Objects.equals(channel.supplierGoodsId(), normalizedId))
                     .filter(channel -> findGoodsSnapshot(channel.goodsId()).isPresent())
                     .findFirst();
                 List<String> accountTypes = validateEnabledRechargeFieldCodes(cloneItem.accountTypes());
-                String goodsName = firstText(cloneItem.name(), remote.goodsName(), normalizedId);
-                BigDecimal price = cloneItem.price() == null ? defaultDecimal(remote.goodsPrice()) : cloneItem.price();
-                BigDecimal originalPrice = cloneItem.originalPrice() == null ? remote.faceValue() : cloneItem.originalPrice();
-                int stock = cloneItem.stock() == null ? Math.max(0, remote.stockNum() == null ? 0 : remote.stockNum()) : Math.max(0, cloneItem.stock());
-                String status = StringUtils.hasText(cloneItem.status()) ? cloneItem.status() : remoteGoodsStatus(remote);
+                String goodsName = firstText(remote.goodsName(), cloneItem.name(), normalizedId);
+                BigDecimal price = defaultDecimal(remote.goodsPrice());
+                BigDecimal originalPrice = remote.faceValue() == null ? price : remote.faceValue();
+                int stock = Math.max(0, remote.stockNum() == null ? 0 : remote.stockNum());
+                String status = remoteGoodsStatus(remote);
                 List<String> benefitDurations = normalizedBenefitDurations(cloneItem.benefitDurations(), goodsName);
                 int priority = cloneItem.priority() == null ? normalizedPriority(request.priority()) : normalizedPriority(cloneItem.priority());
                 int timeoutSeconds = cloneItem.timeoutSeconds() == null
@@ -2182,20 +2173,7 @@ public class InMemoryShopRepository {
                     defaultText(cloneItem.coverUrl(), ""),
                     List.of(),
                     List.of(),
-                    List.of(new GoodsIntegrationItem(
-                        String.valueOf(supplier.id()),
-                        supplier.id(),
-                        supplier.name(),
-                        supplier.platformType(),
-                        normalizedId,
-                        goodsName,
-                        price,
-                        remote.status(),
-                        remote.stockNum(),
-                        goodsName,
-                        OffsetDateTime.now().toString(),
-                        true
-                    )),
+                    List.of(remoteIntegration),
                     true,
                     true,
                     GoodsType.DIRECT,
@@ -2224,7 +2202,7 @@ public class InMemoryShopRepository {
                         channel.id(),
                         channel.goodsId(),
                         channel.supplierId(),
-                        channel.supplierName(),
+                        supplier.name(),
                         channel.supplierGoodsId(),
                         priority,
                         timeoutSeconds,

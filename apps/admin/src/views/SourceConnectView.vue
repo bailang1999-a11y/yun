@@ -9,7 +9,7 @@ import { fetchPriceTemplates } from '../api/priceTemplates'
 import { uploadImage } from '../api/uploads'
 import type { Category, RechargeField, RemoteCategory, RemoteGoods, SourceCloneConfig, SourceCloneResult, Supplier } from '../types/operations'
 import { formatMoney as formatAmount } from '../utils/formatters'
-import { benefitDurationOptions, platformOptions } from '../utils/goodsOptions'
+import { benefitDurationOptions, goodsSalePlatformOptions } from '../utils/goodsOptions'
 import { type PriceTemplate } from '../utils/priceTemplates'
 
 type SourceCloneDraft = Omit<SourceCloneConfig, 'requireRechargeAccount'> & { requireRechargeAccount?: boolean }
@@ -72,7 +72,7 @@ const priceTemplateOptions = computed(() => priceTemplates.value)
 const categoryTreeOptions = computed(() => buildCategoryTree(categories.value))
 const salePlatformOptions = computed(() => [
   { label: '无限制', value: UNLIMITED_PLATFORM, logo: 'all' },
-  ...platformOptions
+  ...goodsSalePlatformOptions
 ])
 const remoteRangeLabel = computed(() => {
   if (!remoteTotal.value || !remoteGoods.value.length) return '未获取上游商品'
@@ -187,7 +187,7 @@ async function prepareDrafts() {
     price: numeric(item.price),
     originalPrice: numeric(item.faceValue) || numeric(item.price),
     stock: Math.max(0, Math.floor(numeric(item.stock))),
-    status: batchForm.status,
+    status: batchForm.status || normalizeRemoteGoodsStatus(item.status),
     benefitDurations: inferBenefitDurations(item.name),
     coverUrl: batchForm.coverUrl,
     description: `货源对接自动创建，已绑定上游商品 ${item.supplierGoodsId}`,
@@ -422,8 +422,16 @@ function handleAvailablePlatformsChange(values: string[]) {
 
 function normalizeAvailablePlatforms(values?: string[]) {
   if (!values?.length) return []
-  if (values.includes(UNLIMITED_PLATFORM)) return platformOptions.map((item) => item.value)
+  if (values.includes(UNLIMITED_PLATFORM)) return goodsSalePlatformOptions.map((item) => item.value)
   return values.filter((item) => item !== UNLIMITED_PLATFORM)
+}
+
+function normalizeRemoteGoodsStatus(status?: string) {
+  const value = String(status || '').trim().toUpperCase()
+  if (['ON_SALE', 'ENABLED', 'NORMAL', 'ACTIVE', 'TRUE', '1', '正常', '上架'].includes(value)) return 'ON_SALE'
+  if (['OFF_SALE', 'DISABLED', 'INACTIVE', 'FALSE', '0', '下架', '停售'].includes(value)) return 'OFF_SALE'
+  if (['SOLD_OUT', 'EMPTY', '售罄', '缺货'].includes(value)) return 'OFF_SALE'
+  return 'ON_SALE'
 }
 
 function inferBenefitDurations(title: string) {
@@ -842,7 +850,7 @@ function buildCategoryTree(items: Category[]) {
                   filterable
                   placeholder="选择不可售平台"
                 >
-                  <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+                  <el-option v-for="platform in goodsSalePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
                 </el-select>
               </label>
               <label class="field compact-field">
@@ -987,7 +995,7 @@ function buildCategoryTree(items: Category[]) {
                         filterable
                         placeholder="可售平台"
                       >
-                        <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+                        <el-option v-for="platform in goodsSalePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
                       </el-select>
                     </label>
                     <label class="draft-mini-field">
@@ -1000,7 +1008,7 @@ function buildCategoryTree(items: Category[]) {
                         filterable
                         placeholder="不可售平台"
                       >
-                        <el-option v-for="platform in platformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
+                        <el-option v-for="platform in goodsSalePlatformOptions" :key="platform.value" :label="platform.label" :value="platform.value" />
                       </el-select>
                     </label>
                     <div class="source-cover-upload source-cover-upload--row">
@@ -1069,7 +1077,7 @@ function buildCategoryTree(items: Category[]) {
             <template #default="{ row }">
               <div class="draft-cover-summary">
                 <div class="draft-chip-line">
-                  <span :class="{ muted: !row.availablePlatforms?.length }">{{ optionLabels(row.availablePlatforms, platformOptions, '未设置平台') }}</span>
+                  <span :class="{ muted: !row.availablePlatforms?.length }">{{ optionLabels(row.availablePlatforms, goodsSalePlatformOptions, '未设置平台') }}</span>
                   <span>{{ row.forbiddenPlatforms?.length ? `禁售 ${row.forbiddenPlatforms.length} 项` : '无禁售限制' }}</span>
                 </div>
                 <button
