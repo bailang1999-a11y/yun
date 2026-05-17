@@ -8612,6 +8612,7 @@ public class InMemoryShopRepository {
     private boolean isProductMonitorChannel(GoodsChannelItem channel) {
         GoodsItem item = findGoodsSnapshot(channel.goodsId()).orElse(null);
         return item != null
+            && !Boolean.FALSE.equals(item.monitoringEnabled())
             && "ENABLED".equals(channel.status());
     }
 
