@@ -9467,7 +9467,11 @@ public class InMemoryShopRepository {
                     allocateIncrementingId(channelId, maxGoodsChannelId()),
                     item.id(),
                     integration.supplierId(),
-                    firstText(integration.supplierName(), "", "货源渠道"),
+                    firstText(
+                        Optional.ofNullable(suppliers.get(integration.supplierId())).map(SupplierItem::name).orElse(""),
+                        integration.supplierName(),
+                        "货源渠道"
+                    ),
                     integration.supplierGoodsId(),
                     10,
                     30,
@@ -9490,7 +9494,7 @@ public class InMemoryShopRepository {
 
     private GoodsIntegrationItem goodsChannelIntegration(GoodsChannelItem channel) {
         SupplierItem supplier = suppliers.get(channel.supplierId());
-        String supplierName = firstText(channel.supplierName(), supplier == null ? "" : supplier.name(), "货源渠道");
+        String supplierName = firstText(supplier == null ? "" : supplier.name(), channel.supplierName(), "货源渠道");
         String platformCode = supplier == null ? String.valueOf(channel.supplierId()) : defaultText(supplier.platformType(), String.valueOf(channel.supplierId()));
         Optional<RemoteGoodsItem> remote = Optional.ofNullable(remoteGoodsSyncResults.get(channel.supplierId()))
             .flatMap(result -> exactRemoteGoods(result.items(), channel.supplierGoodsId()));

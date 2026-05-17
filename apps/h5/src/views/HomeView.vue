@@ -5,6 +5,7 @@ import { LoaderCircle, Search } from 'lucide-vue-next'
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
 import type { GoodsCard, GoodsType } from '../types/h5'
+import { formatMoney } from '../utils/formatters'
 
 const catalog = useCatalogStore()
 const router = useRouter()
@@ -160,8 +161,8 @@ function platformLabel(value: string) {
             <span v-if="item.soldOut" class="tag tag-deny">已售罄</span>
           </div>
           <div class="goods-foot">
-            <strong class="metal-price">¥{{ item.price.toFixed(2) }}</strong>
-            <del v-if="item.originalPrice">¥{{ item.originalPrice.toFixed(2) }}</del>
+            <strong class="metal-price">¥{{ formatMoney(item.price) }}</strong>
+            <del v-if="item.originalPrice">¥{{ formatMoney(item.originalPrice) }}</del>
             <button type="button" :disabled="!item.canBuy" @click="openGoods(item)">
               {{ item.canBuy ? '购买' : '暂不可买' }}
             </button>

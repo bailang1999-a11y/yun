@@ -7,6 +7,7 @@ import { cancelH5Order, fetchH5GoodsDetail, fetchH5Order, fetchH5PaymentChannels
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
 import type { GoodsCard, H5Order, PaymentChannel } from '../types/h5'
+import { formatMoney } from '../utils/formatters'
 
 const route = useRoute()
 const router = useRouter()
@@ -202,7 +203,7 @@ function platformLabel(value: string) {
         </div>
         <div class="amount-row">
           <span>应付金额</span>
-          <strong class="metal-price">¥{{ order.totalAmount.toFixed(2) }}</strong>
+          <strong class="metal-price">¥{{ formatMoney(order.totalAmount) }}</strong>
         </div>
         <div v-if="order.paymentNo">
           <span>支付流水</span>

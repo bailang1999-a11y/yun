@@ -54,6 +54,7 @@ import { fetchSiteSettings } from '../api/web'
 import { useSessionStore } from '../stores/session'
 import { useThemeStore } from '../stores/theme'
 import type { SiteSettings } from '../types/web'
+import { formatMoney } from '../utils/formatters'
 
 const session = useSessionStore()
 const theme = useThemeStore()
@@ -98,6 +99,6 @@ function refreshWhenVisible() {
 }
 
 function money(value: number) {
-  return value.toFixed(2)
+  return formatMoney(value)
 }
 </script>

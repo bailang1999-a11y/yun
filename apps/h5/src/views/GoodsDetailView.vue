@@ -7,6 +7,7 @@ import { createH5Order, fetchH5GoodsDetail, fetchH5RechargeFields } from '../api
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
 import type { GoodsCard, GoodsType, RechargeField } from '../types/h5'
+import { formatMoney } from '../utils/formatters'
 
 const route = useRoute()
 const router = useRouter()
@@ -238,7 +239,7 @@ function accountMatches(inputType: string, value: string) {
               禁 {{ platformLabel(platform) }}
             </span>
           </div>
-          <strong class="metal-price">¥{{ goods.price.toFixed(2) }}</strong>
+          <strong class="metal-price">¥{{ formatMoney(goods.price) }}</strong>
         </div>
       </section>
 
@@ -271,7 +272,7 @@ function accountMatches(inputType: string, value: string) {
 
         <div class="settlement">
           <span>应付</span>
-          <strong class="metal-price">¥{{ totalAmount.toFixed(2) }}</strong>
+          <strong class="metal-price">¥{{ formatMoney(totalAmount) }}</strong>
         </div>
 
         <button class="primary-action" type="button" :disabled="buyDisabled" @click="createOrder">

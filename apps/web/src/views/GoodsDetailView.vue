@@ -40,8 +40,8 @@
             </span>
           </div>
           <div class="price-line">
-            <strong>¥{{ goods.price.toFixed(2) }}</strong>
-            <del v-if="goods.originalPrice">¥{{ goods.originalPrice.toFixed(2) }}</del>
+            <strong>¥{{ formatMoney(goods.price) }}</strong>
+            <del v-if="goods.originalPrice">¥{{ formatMoney(goods.originalPrice) }}</del>
           </div>
 
           <label class="quantity-row">
@@ -99,6 +99,7 @@ import { getApiErrorMessage } from '../api/client'
 import { useCatalogStore } from '../stores/catalog'
 import { useSessionStore } from '../stores/session'
 import type { GoodsItem, RechargeField } from '../types/web'
+import { formatMoney } from '../utils/formatters'
 
 const route = useRoute()
 const router = useRouter()

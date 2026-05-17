@@ -4,7 +4,7 @@
       <div class="member-card">
         <p>会员中心</p>
         <h1>{{ session.displayName }}</h1>
-        <div class="balance-large">¥{{ (session.profile?.balance || 0).toFixed(2) }}</div>
+        <div class="balance-large">¥{{ formatMoney(session.profile?.balance || 0) }}</div>
         <span>{{ session.profile?.groupName || '默认会员' }}</span>
         <RouterLink class="primary-button recharge-button" to="/account/recharge">账户充值</RouterLink>
       </div>
@@ -38,6 +38,7 @@ import { onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import WebShell from '../components/WebShell.vue'
 import { useSessionStore } from '../stores/session'
+import { formatMoney } from '../utils/formatters'
 
 const session = useSessionStore()
 

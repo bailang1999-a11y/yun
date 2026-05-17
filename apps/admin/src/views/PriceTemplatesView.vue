@@ -6,6 +6,7 @@ import { fetchUserGroups } from '../api/users'
 import type { UserGroup } from '../types/operations'
 import { fetchPriceTemplates, savePriceTemplates } from '../api/priceTemplates'
 import { type PriceGroupRate, type PriceTemplate } from '../utils/priceTemplates'
+import { formatMoney } from '../utils/formatters'
 
 const rateColors = ['#ffb300', '#3aa5ff', '#12a594', '#0d9488', '#8b5cf6', '#f97316', '#22c55e']
 
@@ -139,7 +140,7 @@ async function removeTemplate(row: PriceTemplate) {
       <div v-for="(rate, index) in form.groupRates" :key="rate.groupName" class="template-form-line rate-line">
         <label><i :style="{ background: rate.color }"></i>{{ rate.groupName }}倍率</label>
         <el-input-number v-model="rate.value" :min="0" :precision="2" controls-position="right" />
-        <span>预览：<strong>{{ preview[index].price.toFixed(2) }} 元</strong></span>
+        <span>预览：<strong>{{ formatMoney(preview[index].price, { currency: false }) }} 元</strong></span>
       </div>
 
       <div class="template-actions">

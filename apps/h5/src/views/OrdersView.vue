@@ -7,6 +7,7 @@ import { fetchH5Orders } from '../api/h5'
 import { subscribeOrderEvents } from '../api/realtime'
 import AppTabbar from '../components/AppTabbar.vue'
 import type { H5Order } from '../types/h5'
+import { formatMoney } from '../utils/formatters'
 import { formatOrderProcessingDuration } from '../utils/orderDuration'
 
 const route = useRoute()
@@ -229,7 +230,7 @@ function closeCopyFallback() {
       <div class="order-foot">
         <span v-if="order.deliveryStatus">发货：{{ formatStatus(order.deliveryStatus) }}</span>
         <span v-else>等待发货信息</span>
-        <strong>¥{{ order.totalAmount.toFixed(2) }}</strong>
+        <strong>¥{{ formatMoney(order.totalAmount) }}</strong>
       </div>
       <div class="order-actions">
         <RouterLink v-if="order.status === 'UNPAID'" :to="{ path: '/checkout/' + order.orderNo }">去支付</RouterLink>

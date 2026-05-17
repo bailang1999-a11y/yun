@@ -71,7 +71,8 @@ export function formatMoney(value?: number | string, options: { currency?: boole
   const { currency = true, fallback = '-' } = options
   const numberValue = Number(value)
   if (!Number.isFinite(numberValue)) return fallback
-  return `${currency ? '¥' : ''}${numberValue.toFixed(2)}`
+  const formatted = numberValue.toFixed(3).replace(/(\.\d{2})0$/, '$1')
+  return `${currency ? '¥' : ''}${formatted}`
 }
 
 export function formatDateTime(value?: string, options: { compact?: boolean } = {}) {

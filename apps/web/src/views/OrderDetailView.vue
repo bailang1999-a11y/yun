@@ -31,7 +31,7 @@
             </div>
             <div>
               <span>金额</span>
-              <strong class="result-price">¥{{ order.totalAmount.toFixed(2) }}</strong>
+              <strong class="result-price">¥{{ formatMoney(order.totalAmount) }}</strong>
             </div>
             <StatusBadge :status="order.status" />
           </div>
@@ -136,6 +136,7 @@ import { getApiErrorMessage } from '../api/client'
 import { useCatalogStore } from '../stores/catalog'
 import { useSessionStore } from '../stores/session'
 import type { GoodsItem, OrderDelivery, OrderItem, PaymentChannel } from '../types/web'
+import { formatMoney } from '../utils/formatters'
 import { formatOrderProcessingDuration } from '../utils/orderDuration'
 
 const route = useRoute()

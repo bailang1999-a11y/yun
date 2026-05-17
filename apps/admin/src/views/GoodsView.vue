@@ -446,11 +446,27 @@ function goodsSourceLabels(row: Goods) {
 }
 
 function integrationSupplierName(item: GoodsIntegration) {
-  const supplierName = item.supplierName?.trim()
-  if (supplierName) return supplierName
   const supplier = suppliers.value.find((entry) => String(entry.id) === String(item.supplierId))
   if (supplier?.name) return supplier.name
+  const supplierName = item.supplierName?.trim()
+  if (supplierName) return supplierName
   return ''
+}
+
+function goodsSubtitle(row: Goods) {
+  const subTitle = row.subTitle?.trim()
+  if (!subTitle) return ''
+  const sourceName = primarySupplierName(row)
+  if (sourceName && /^由\s*.+?\s*一键对接创建$/.test(subTitle)) {
+    return `由 ${sourceName} 一键对接创建`
+  }
+  return subTitle
+}
+
+function primarySupplierName(row: Goods) {
+  return (row.integrations || [])
+    .map(integrationSupplierName)
+    .find(Boolean) || ''
 }
 
 function normalizeUpstreamStatus(status?: string) {
@@ -1240,7 +1256,7 @@ onMounted(() => {
           <template #default="{ row }">
             <div class="goods-info-cell">
               <strong>{{ row.name }}</strong>
-              <span v-if="row.subTitle">{{ row.subTitle }}</span>
+              <span v-if="goodsSubtitle(row)">{{ goodsSubtitle(row) }}</span>
               <div class="goods-info-meta">
                 <em>ID {{ row.id }}</em>
               </div>

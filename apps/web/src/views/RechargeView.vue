@@ -12,7 +12,7 @@
       <div class="recharge-grid">
         <section class="member-card recharge-summary">
           <p>当前余额</p>
-          <h1>¥{{ (session.profile?.balance || 0).toFixed(2) }}</h1>
+          <h1>¥{{ formatMoney(session.profile?.balance || 0) }}</h1>
           <span>{{ session.profile?.groupName || '默认会员' }}</span>
         </section>
 
@@ -56,7 +56,7 @@
             <textarea v-model.trim="remark" rows="3" placeholder="付款账号、转账备注等（选填）" />
           </label>
 
-          <p v-if="result" class="success-line">充值请求 {{ result.requestNo }} 已创建，金额 ¥{{ result.amount.toFixed(2) }}。</p>
+          <p v-if="result" class="success-line">充值请求 {{ result.requestNo }} 已创建，金额 ¥{{ formatMoney(result.amount) }}。</p>
           <p v-if="error" class="alert-line">{{ error }}</p>
           <button class="primary-button wide" type="submit" :disabled="submitting">{{ submitting ? '提交中...' : '提交充值' }}</button>
         </form>
@@ -72,6 +72,7 @@ import WebShell from '../components/WebShell.vue'
 import { createRechargeRequest } from '../api/web'
 import { useSessionStore } from '../stores/session'
 import type { RechargeRequestResult } from '../types/web'
+import { formatMoney } from '../utils/formatters'
 
 const session = useSessionStore()
 const amounts = [50, 100, 200, 500, 1000, 2000]

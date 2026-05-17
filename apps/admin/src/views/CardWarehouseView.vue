@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { Eye, Plus, RefreshCw, Upload } from 'lucide-vue-next'
 import { createCardKind, fetchCardKindCards, fetchCardKinds, importCardKindCards } from '../api/cardKinds'
 import type { CardKind, CardKindCreatePayload, CardKindType, GoodsCard } from '../types/operations'
+import { formatMoney } from '../utils/formatters'
 
 const cardTypeOptions: Array<{ label: string; value: CardKindType }> = [
   { label: '一次性卡', value: 'ONCE' },
@@ -216,7 +217,7 @@ async function openCards(row: CardKind) {
       <div class="panel-head">
         <div>
           <h2>卡种列表</h2>
-          <span>共 {{ cardKinds.length }} 个卡种，成本合计 {{ totalCost.toFixed(2) }} 元</span>
+          <span>共 {{ cardKinds.length }} 个卡种，成本合计 {{ formatMoney(totalCost, { currency: false }) }} 元</span>
         </div>
         <el-button :icon="RefreshCw" :loading="loading" @click="loadCardKinds">刷新</el-button>
       </div>
@@ -231,7 +232,7 @@ async function openCards(row: CardKind) {
           </template>
         </el-table-column>
         <el-table-column label="成本" width="140">
-          <template #default="{ row }">{{ Number(row.cost || 0).toFixed(2) }}</template>
+          <template #default="{ row }">{{ formatMoney(row.cost, { currency: false }) }}</template>
         </el-table-column>
         <el-table-column label="库存" width="110">
           <template #default="{ row }">{{ cardKindUnused(row) }}</template>

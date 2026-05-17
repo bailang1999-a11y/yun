@@ -7,6 +7,7 @@ import { fetchH5GoodsDetail, fetchH5Order } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
 import type { GoodsCard, H5Order } from '../types/h5'
+import { formatMoney } from '../utils/formatters'
 import { formatOrderProcessingDuration } from '../utils/orderDuration'
 
 const route = useRoute()
@@ -175,7 +176,7 @@ function platformLabel(value: string) {
       </div>
       <div><span>状态</span><strong>{{ formatStatus(order.status) }}</strong></div>
       <div><span>订单处理耗时</span><strong>{{ formatOrderProcessingDuration(order) }}</strong></div>
-      <div><span>金额</span><strong class="metal-price">¥{{ order.totalAmount.toFixed(2) }}</strong></div>
+      <div><span>金额</span><strong class="metal-price">¥{{ formatMoney(order.totalAmount) }}</strong></div>
     </section>
 
     <div v-if="order" class="action-row">

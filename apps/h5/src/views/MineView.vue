@@ -6,6 +6,7 @@ import { getApiErrorMessage } from '../api/client'
 import { authH5, fetchH5CaptchaChallenge, fetchH5Me, fetchH5Settings, sendH5LoginSms } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import type { CaptchaChallenge, H5SystemSetting, UserProfile } from '../types/h5'
+import { formatMoney } from '../utils/formatters'
 
 const tokenKey = 'xiyiyun_h5_token'
 const route = useRoute()
@@ -401,7 +402,7 @@ function startCountdown() {
       <div class="avatar">{{ profile?.nickname?.slice(0, 1) || '喜' }}</div>
       <div>
         <h1>{{ profile?.nickname || '游客用户' }}</h1>
-        <p>{{ profile ? `${profile.groupName || '默认会员'} · 余额 ¥${Number(profile.balance || 0).toFixed(2)}` : '登录后查看订单、卡密记录和余额。' }}</p>
+        <p>{{ profile ? `${profile.groupName || '默认会员'} · 余额 ¥${formatMoney(profile.balance || 0)}` : '登录后查看订单、卡密记录和余额。' }}</p>
       </div>
     </section>
 

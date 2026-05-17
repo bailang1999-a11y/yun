@@ -38,8 +38,8 @@
         <span class="goods-stock">{{ goods.stockLabel }}</span>
         <div class="goods-price-stack">
           <small>采购价</small>
-          <strong>¥{{ goods.price.toFixed(2) }}</strong>
-          <del v-if="goods.originalPrice">¥{{ goods.originalPrice.toFixed(2) }}</del>
+          <strong>¥{{ formatMoney(goods.price) }}</strong>
+          <del v-if="goods.originalPrice">¥{{ formatMoney(goods.originalPrice) }}</del>
         </div>
         <b :class="{ disabled: !goods.canBuy }" :aria-disabled="!goods.canBuy">{{ goods.canBuy ? '立即购买' : restrictionLabel }}</b>
       </div>
@@ -62,6 +62,7 @@
 import { computed, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { GoodsItem } from '../types/web'
+import { formatMoney } from '../utils/formatters'
 
 const props = defineProps<{ goods: GoodsItem }>()
 const restrictionDialogMessage = ref('')

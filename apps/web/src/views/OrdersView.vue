@@ -45,7 +45,7 @@
                 </button>
               </td>
               <td>{{ order.quantity }}</td>
-              <td class="amount-cell">¥{{ order.totalAmount.toFixed(2) }}</td>
+              <td class="amount-cell">¥{{ formatMoney(order.totalAmount) }}</td>
               <td><StatusBadge :status="order.status" /></td>
               <td>{{ formatOrderProcessingDuration(order) }}</td>
               <td>{{ formatDateTime(order.createdAt) }}</td>
@@ -68,6 +68,7 @@ import EmptyState from '../components/EmptyState.vue'
 import { fetchOrders } from '../api/web'
 import { getApiErrorMessage } from '../api/client'
 import type { OrderItem } from '../types/web'
+import { formatMoney } from '../utils/formatters'
 import { formatOrderProcessingDuration } from '../utils/orderDuration'
 
 const orders = ref<OrderItem[]>([])
