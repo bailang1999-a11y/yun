@@ -2094,9 +2094,7 @@ public class InMemoryShopRepository {
         if (!StringUtils.hasText(normalizedId)) {
             throw new IllegalArgumentException("supplierGoodsId is required");
         }
-        RemoteGoodsItem remote = latestRemoteGoods(supplierId)
-            .flatMap(result -> exactRemoteGoods(result.items(), normalizedId))
-            .orElseGet(() -> fetchRemoteGoodsSnapshot(supplier, normalizedId));
+        RemoteGoodsItem remote = fetchRemoteGoodsSnapshot(supplier, normalizedId, false);
         return remoteGoodsIntegration(supplier, remote);
     }
 
@@ -2363,7 +2361,42 @@ public class InMemoryShopRepository {
     }
 
     private String remoteGoodsStatus(RemoteGoodsItem remote) {
-        return remote.canBuy() == Boolean.FALSE || remote.canNoBuy() == Boolean.TRUE ? "OFF_SALE" : "ON_SALE";
+        return remoteGoodsSaleStatus(remote);
+    }
+
+    private String remoteGoodsSaleStatus(RemoteGoodsItem remote) {
+        if (remote == null) {
+            return "UNKNOWN";
+        }
+        String status = normalize(remote.status());
+        if (isRemoteOnSaleStatus(status)) {
+            return "ON_SALE";
+        }
+        if (isRemoteOffSaleStatus(status)) {
+            return "OFF_SALE";
+        }
+        if (remote.canNoBuy() == Boolean.TRUE) {
+            return "OFF_SALE";
+        }
+        if (remote.canBuy() == Boolean.TRUE) {
+            return "ON_SALE";
+        }
+        if (remote.canBuy() == Boolean.FALSE) {
+            return "OFF_SALE";
+        }
+        return "ON_SALE";
+    }
+
+    private boolean isRemoteOnSaleStatus(String status) {
+        return List.of("1", "on", "true", "yes", "y", "enabled", "enable", "normal", "online", "on_sale", "onsale", "sale", "selling")
+            .contains(status)
+            || List.of("正常", "上架", "在售", "可售", "可购买", "销售中").contains(status);
+    }
+
+    private boolean isRemoteOffSaleStatus(String status) {
+        return List.of("0", "2", "false", "no", "n", "disabled", "disable", "offline", "off_sale", "offsale", "sold_out", "closed", "stop")
+            .contains(status)
+            || List.of("下架", "停售", "不可售", "不可购买", "售罄", "关闭").contains(status);
     }
 
     public List<OrderItem> listOrders() {
@@ -8665,7 +8698,7 @@ public class InMemoryShopRepository {
             firstText(item.goodsName(), current.goodsName(), current.name()),
             item.goodsPrice() == null ? current.price() : item.goodsPrice(),
             item.stockNum() == null ? current.stock() : Math.max(0, item.stockNum()),
-            item.canBuy() == Boolean.FALSE || item.canNoBuy() == Boolean.TRUE ? "OFF_SALE" : "ON_SALE",
+            remoteGoodsSaleStatus(item),
             remoteGoodsIntegration(supplier, item)
         );
     }
@@ -9359,7 +9392,7 @@ public class InMemoryShopRepository {
                 item.upstreamStock() == null ? 0 : item.upstreamStock(),
                 defaultText(item.upstreamTitle(), item.supplierGoodsName()),
                 defaultText(item.lastSyncAt(), OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)),
-                item.enabled() == null || item.enabled()
+                true
             ))
             .filter(item -> StringUtils.hasText(item.platformCode()) || StringUtils.hasText(item.supplierGoodsId()))
             .toList();
@@ -9752,9 +9785,7 @@ public class InMemoryShopRepository {
     }
 
     private GoodsIntegrationItem remoteGoodsIntegration(SupplierItem supplier, RemoteGoodsItem remote) {
-        String status = remote.canBuy() == Boolean.FALSE || remote.canNoBuy() == Boolean.TRUE
-            ? "OFF_SALE"
-            : firstText(remote.status(), "ON_SALE", "ON_SALE");
+        String status = remoteGoodsSaleStatus(remote);
         return new GoodsIntegrationItem(
             "remote-" + supplier.id() + "-" + remote.supplierGoodsId(),
             supplier.id(),
@@ -9767,7 +9798,7 @@ public class InMemoryShopRepository {
             remote.stockNum() == null ? 0 : remote.stockNum(),
             defaultText(remote.goodsName(), ""),
             OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            !"OFF_SALE".equals(status)
+            true
         );
     }
 

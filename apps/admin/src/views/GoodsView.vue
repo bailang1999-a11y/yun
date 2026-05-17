@@ -29,6 +29,7 @@ import type {
   GoodsChannelCreatePayload,
   GoodsCreatePayload,
   GoodsDetailBlock,
+  GoodsIntegration,
   RechargeField,
   Supplier
 } from '../types/operations'
@@ -395,8 +396,10 @@ async function refreshIntegration(index: number) {
     const snapshot = await fetchRemoteGoodsSnapshot(item.supplierId, item.supplierGoodsId.trim())
     Object.assign(item, snapshot, {
       supplierId: snapshot.supplierId || item.supplierId,
-      supplierName: snapshot.supplierName || supplier?.name || item.supplierName
+      supplierName: snapshot.supplierName || supplier?.name || item.supplierName,
+      enabled: true
     })
+    syncGoodsFormFromIntegration(snapshot)
     ElMessage.success('已同步真实上游信息')
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '真实上游信息同步失败')
@@ -430,11 +433,45 @@ function cardKindTotal(row: CardKind) {
 
 function goodsSourceLabels(row: Goods) {
   const labels = (row.integrations || [])
-    .filter((item) => item.enabled !== false)
-    .map((item) => item.supplierName || platformLabel(item.platformCode || ''))
+    .map((item) => {
+      const name = integrationSupplierName(item)
+      if (!name) return ''
+      const status = normalizeUpstreamStatus(item.upstreamStatus)
+      const notes = [status === 'OFF_SALE' ? '上游下架' : ''].filter(Boolean)
+      return notes.length ? `${name}（${notes.join('，')}）` : name
+    })
     .filter(Boolean)
 
   return labels.length ? Array.from(new Set(labels)) : ['本地']
+}
+
+function integrationSupplierName(item: GoodsIntegration) {
+  const supplierName = item.supplierName?.trim()
+  if (supplierName) return supplierName
+  const supplier = suppliers.value.find((entry) => String(entry.id) === String(item.supplierId))
+  if (supplier?.name) return supplier.name
+  return ''
+}
+
+function normalizeUpstreamStatus(status?: string) {
+  const normalized = (status || '').trim().toUpperCase()
+  if (['ON_SALE', 'NORMAL', 'ENABLED', 'ONLINE', '1'].includes(normalized)) return 'ON_SALE'
+  if (['OFF_SALE', 'DISABLED', 'OFFLINE', 'SOLD_OUT', '0', '2'].includes(normalized)) return 'OFF_SALE'
+  if (['正常', '上架', '在售', '可售', '可购买'].includes(status || '')) return 'ON_SALE'
+  if (['下架', '停售', '不可售', '不可购买', '售罄'].includes(status || '')) return 'OFF_SALE'
+  return ''
+}
+
+function syncGoodsFormFromIntegration(snapshot: GoodsIntegration) {
+  const name = snapshot.supplierGoodsName?.trim() || snapshot.upstreamTitle?.trim()
+  const price = Number(snapshot.supplierPrice)
+  const stock = Number(snapshot.upstreamStock)
+  const status = normalizeUpstreamStatus(snapshot.upstreamStatus)
+
+  if (name) form.name = name
+  if (Number.isFinite(price) && price >= 0) form.price = price
+  if (Number.isFinite(stock) && stock >= 0) form.stock = Math.floor(stock)
+  if (status) form.status = status
 }
 
 function categoryLabel(row: Goods) {
