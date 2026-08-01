@@ -86,6 +86,11 @@ public class AgisoCallbackTaskStore {
         return mapper.markDead(requiredId(id), optionalText(lastError, 1000)) == 1;
     }
 
+    @Transactional
+    public boolean markDeadIfUnbound(Long id, String lastError) {
+        return mapper.markDeadIfUnbound(requiredId(id), optionalText(lastError, 1000)) == 1;
+    }
+
     private Long requiredUserId(Long value) {
         if (value == null || value <= 0) {
             throw new IllegalArgumentException("userId is required");

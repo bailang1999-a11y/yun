@@ -25,6 +25,7 @@ class AgisoCallbackTaskStoreIT extends AbstractIntegrationTest {
             .extracting(AgisoCallbackTaskEntity::getId)
             .doesNotContain(first.getId());
         assertThat(taskStore.bindOrder(90001L, "external-1", "local-1", now.plusSeconds(2))).isTrue();
+        assertThat(taskStore.markDeadIfUnbound(first.getId(), "duplicate request failed")).isFalse();
         assertThat(taskStore.findDue(now.plusSeconds(1), 20))
             .extracting(AgisoCallbackTaskEntity::getId)
             .doesNotContain(first.getId());
@@ -54,5 +55,10 @@ class AgisoCallbackTaskStoreIT extends AbstractIntegrationTest {
             .extracting(AgisoCallbackTaskEntity::getId)
             .contains(leased.getId());
         assertThat(taskStore.claim(leased.getId(), now.plusSeconds(10), now.plusSeconds(20))).isTrue();
+
+        AgisoCallbackTaskEntity orphan = taskStore.registerPending(
+            90001L, "external-3", "https://mai.91kami.com/callback/orphan", "DIRECT", now
+        );
+        assertThat(taskStore.markDeadIfUnbound(orphan.getId(), "order was not created")).isTrue();
     }
 }

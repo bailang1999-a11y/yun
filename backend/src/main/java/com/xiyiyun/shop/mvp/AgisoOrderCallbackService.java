@@ -62,8 +62,8 @@ public class AgisoOrderCallbackService {
 
     void discard(Long userId, String requestId, String reason) {
         AgisoCallbackTaskEntity task = prepared.remove(key(userId, requestId));
-        if (task != null && task.getId() != null && !"SENT".equals(task.getState())) {
-            taskStore.markDead(task.getId(), message(reason));
+        if (task != null && task.getId() != null) {
+            taskStore.markDeadIfUnbound(task.getId(), message(reason));
         }
     }
 

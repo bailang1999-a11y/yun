@@ -143,4 +143,19 @@ public interface AgisoCallbackTaskMapper extends BaseMapper<AgisoCallbackTaskEnt
         @Param("id") Long id,
         @Param("lastError") String lastError
     );
+
+    @Update("""
+        UPDATE agiso_callback_tasks
+        SET state = 'DEAD',
+            next_attempt_at = NULL,
+            lease_until = NULL,
+            last_error = #{lastError}
+        WHERE id = #{id}
+          AND order_no IS NULL
+          AND state = 'PENDING'
+        """)
+    int markDeadIfUnbound(
+        @Param("id") Long id,
+        @Param("lastError") String lastError
+    );
 }

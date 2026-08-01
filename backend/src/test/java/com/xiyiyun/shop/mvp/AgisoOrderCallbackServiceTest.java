@@ -124,6 +124,19 @@ class AgisoOrderCallbackServiceTest {
     }
 
     @Test
+    void discardCannotKillAnAlreadyBoundCallbackTask() {
+        AgisoCallbackTaskEntity task = task("PENDING", 0);
+        when(taskStore.registerPending(eq(90001L), eq("external-1"), eq(CALLBACK_URL), eq("DIRECT"), any()))
+            .thenReturn(task);
+
+        service.prepare(90001L, "external-1", CALLBACK_URL, GoodsType.DIRECT);
+        service.discard(90001L, "external-1", "duplicate request failed");
+
+        verify(taskStore).markDeadIfUnbound(1L, "duplicate request failed");
+        verify(taskStore, never()).markDead(eq(1L), any());
+    }
+
+    @Test
     void failedDeliveryIsPersistedForRetry() {
         AgisoCallbackTaskEntity task = task("PENDING", 2);
         when(taskStore.findDue(any(), anyInt())).thenReturn(List.of(task));
