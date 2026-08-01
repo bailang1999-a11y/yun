@@ -1,7 +1,7 @@
 {
   "name": "xiyiyun-platform",
   "private": true,
-  "version": "0.2.0",
+  "version": "1.44",
   "workspaces": [
     "apps/h5",
     "apps/admin",
@@ -19,9 +19,10 @@
     "build:h5": "npm --workspace apps/h5 run build",
     "build:admin": "npm --workspace apps/admin run build",
     "build:web": "npm --workspace apps/web run build",
+    "build:portal": "npm --prefix apps/portal run build",
     "build:liquid": "npm --prefix apps/liquid-next run build",
-    "build:backend": "docker compose -p xiyiyun run --rm backend mvn -q -DskipTests package",
-    "test:backend": "docker compose -p xiyiyun run --rm backend mvn -q test",
+    "build:backend": "docker compose -p xiyiyun run --no-deps --rm backend mvn -q -DskipTests package",
+    "test:backend": "docker compose -p xiyiyun run --no-deps --rm backend mvn -q test",
     "typecheck": "npm --workspace apps/h5 run build && npm --workspace apps/web run build && npm --workspace apps/admin run build",
     "smoke": "node scripts/smoke-test.mjs",
     "schema:check": "node scripts/schema-check.mjs",
@@ -32,9 +33,10 @@
     "check": "npm run schema:check && npm run typecheck && npm run test:backend && npm run smoke"
   },
   "overrides": {
-    "postcss": "^8.5.10",
+    "form-data": "^4.0.6",
+    "postcss": "^8.5.18",
     "next": {
-      "postcss": "^8.5.10"
+      "postcss": "^8.5.18"
     }
   },
   "devDependencies": {

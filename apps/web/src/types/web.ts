@@ -3,6 +3,7 @@ export type GoodsType = 'CARD' | 'DIRECT' | 'MANUAL'
 export interface CategoryItem {
   id: string
   name: string
+  iconUrl?: string
   parentId?: string
   level?: number
 }
@@ -98,6 +99,7 @@ export interface AuthPayload {
   captchaTicket?: string
   captchaRandstr?: string
   mode: 'login' | 'register' | 'forgot'
+  username?: string
 }
 
 export interface CaptchaChallenge {
@@ -146,6 +148,7 @@ export interface CreateOrderPayload {
   goodsId: string
   quantity: number
   rechargeAccount?: string
+  rechargeFields?: Record<string, string>
   buyerRemark?: string
   requestId: string
   terminal?: 'h5' | 'web' | 'api'
@@ -154,6 +157,7 @@ export interface CreateOrderPayload {
 export interface ApiCredential {
   appKey: string
   appSecretMasked: string
+  callbackUrl: string
   status: string
   ipWhitelist: string[]
   dailyLimit: number

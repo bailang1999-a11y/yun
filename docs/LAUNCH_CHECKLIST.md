@@ -107,7 +107,21 @@ db/init/001_schema.sql
 ```bash
 docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
   sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/002_config_persistence.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/003_category_icons.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/004_security_and_order_consistency.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/005_cards_kind_and_callback_logs.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/006_money_integrity.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/007_config_tables_extraction.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/008_user_username.sql
 ```
+
+迁移必须严格按 002 → 003 → 004 → 005 → 006 → 007 → 008 的顺序执行：005 依赖 004 建好的表，006 依赖 005，007 依赖 006 的 version 列，008 增加会员用户名列。跳号或乱序会导致后端启动时缺列缺表。
 
 已有数据库必须在新后端启动前完成迁移，否则后端会因为缺少新增配置列或配置表而启动失败。全新数据卷不需要执行增量迁移。
 

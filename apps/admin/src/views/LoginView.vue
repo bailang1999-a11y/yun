@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { LoaderCircle, LogIn } from 'lucide-vue-next'
 import { loginAdmin } from '../api/auth'
-import { fetchAdminCaptchaChallenge } from '../api/captcha'
+import { fetchAdminAltchaChallenge, fetchAdminCaptchaChallenge } from '../api/captcha'
 import { sendAdminLoginSms } from '../api/smsLogin'
 import type { CaptchaChallenge } from '../types/operations'
 
@@ -45,6 +45,8 @@ onBeforeUnmount(() => {
 const title = computed(() => (mode.value === 'login' ? '管理员登录' : '找回管理员密码'))
 const subtitle = computed(() => (mode.value === 'login' ? '密码、短信验证码和滑块校验共同保护后台入口。' : '管理员密码找回需要短信校验，后端重置接口确认后接入。'))
 const isTurnstileCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'TURNSTILE')
+const isAltchaCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'ALTCHA')
+const altchaChallengeJson = ref('')
 
 async function submit() {
   if (loading.value) return
@@ -110,6 +112,12 @@ async function completeCaptcha() {
       errorMessage.value = ''
       return true
     }
+    if (captchaChallenge.value.provider === 'ALTCHA') {
+      // Altcha 由 widget 自动完成，completeCaptcha 时检查是否已有票据
+      if (captchaDone.value) return true
+      errorMessage.value = '请等待人机验证完成'
+      return false
+    }
     if (!captchaChallenge.value.appId) {
       errorMessage.value = '人机验证未配置完整'
       return false
@@ -144,6 +152,7 @@ function resetCaptcha() {
   captchaTicket.value = ''
   captchaRandstr.value = ''
   if (isTurnstileCaptcha.value) void renderTurnstileWidget()
+  if (isAltchaCaptcha.value) void fetchAdminAltchaChallenge().then(j => { altchaChallengeJson.value = j })
 }
 
 async function loadCaptchaChallenge() {
@@ -151,6 +160,9 @@ async function loadCaptchaChallenge() {
     captchaChallenge.value = await fetchAdminCaptchaChallenge()
     if (!captchaChallenge.value.enabled) captchaDone.value = true
     else if (captchaChallenge.value.provider === 'TURNSTILE') void renderTurnstileWidget()
+    else if (captchaChallenge.value.provider === 'ALTCHA') {
+      altchaChallengeJson.value = await fetchAdminAltchaChallenge()
+    }
   } catch {
     captchaChallenge.value = { enabled: false, provider: 'TENCENT', appId: '' }
     captchaDone.value = true
@@ -305,6 +317,21 @@ async function runTencentCaptcha(appId: string) {
       <div v-if="isTurnstileCaptcha" class="turnstile-check" :class="{ done: captchaDone }">
         <div ref="turnstileBoxRef" class="turnstile-box"></div>
         <span>{{ captchaDone ? '人机验证完成' : '请完成人机验证' }}</span>
+      </div>
+      <div v-else-if="isAltchaCaptcha" class="altcha-check" :class="{ done: captchaDone }">
+        <altcha-widget
+          v-if="altchaChallengeJson"
+          :challenge="altchaChallengeJson"
+          auto="onload"
+          configuration='{"hideFooter":true}'
+          @statechange="(e: CustomEvent) => {
+            if (e.detail?.state === 'verified') {
+              captchaTicket = e.detail.payload || ''
+              captchaDone = true
+            }
+          }"
+        />
+        <span>{{ captchaDone ? '人机验证完成 ✓' : '验证中...' }}</span>
       </div>
       <button
         v-else
@@ -483,6 +510,25 @@ button {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.055);
   font-weight: 700;
+}
+
+.altcha-check {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 12px;
+  color: rgba(255, 255, 255, 0.72);
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.055);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.altcha-check.done {
+  color: #b9ffe9;
+  border-color: rgba(0, 255, 195, 0.35);
+  background: rgba(0, 255, 195, 0.12);
 }
 
 .turnstile-check.done {

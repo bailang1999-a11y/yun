@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { fetchCategories, fetchGoods } from '../api/web'
+import { fetchCategories, fetchGoodsPage } from '../api/web'
 import type { CategoryItem, GoodsItem } from '../types/web'
 
 export const useCatalogStore = defineStore('catalog', () => {
@@ -10,6 +10,9 @@ export const useCatalogStore = defineStore('catalog', () => {
   const keyword = ref('')
   const loading = ref(false)
   const error = ref('')
+  const page = ref(1)
+  const pageSize = ref(20)
+  const total = ref(0)
 
   const rootCategories = computed(() => categories.value.filter((item) => !item.parentId))
 
@@ -21,20 +24,10 @@ export const useCatalogStore = defineStore('catalog', () => {
     return categories.value.find((item) => item.id === id)?.name || ''
   }
 
-  function descendantIds(id: string): string[] {
-    const direct = childrenOf(id)
-    return [id, ...direct.flatMap((item) => descendantIds(item.id))]
-  }
-
-  const visibleGoods = computed(() => {
-    const term = keyword.value.trim().toLowerCase()
-    const scopedIds = activeCategoryId.value ? new Set(descendantIds(activeCategoryId.value)) : null
-    return goods.value.filter((item) => {
-      const matchCategory = !scopedIds || scopedIds.has(item.categoryId || '')
-      const matchKeyword = !term || item.name.toLowerCase().includes(term) || item.faceValue.toLowerCase().includes(term)
-      return matchCategory && matchKeyword
-    })
-  })
+  const visibleGoods = computed(() => goods.value)
+  const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
+  const pageStart = computed(() => (total.value ? (page.value - 1) * pageSize.value + 1 : 0))
+  const pageEnd = computed(() => Math.min(page.value * pageSize.value, total.value))
 
   const visibleSourceChannels = computed(() => {
     const seen = new Set<string>()
@@ -48,6 +41,19 @@ export const useCatalogStore = defineStore('catalog', () => {
       })
   })
 
+  async function requestGoodsPage(nextPage: number) {
+    const result = await fetchGoodsPage(categories.value, {
+      categoryId: activeCategoryId.value || undefined,
+      search: keyword.value,
+      page: nextPage,
+      pageSize: pageSize.value
+    })
+    goods.value = result.items
+    total.value = result.total
+    page.value = result.page
+    pageSize.value = result.pageSize
+  }
+
   async function loadCatalog() {
     if (loading.value) return
     loading.value = true
@@ -55,10 +61,14 @@ export const useCatalogStore = defineStore('catalog', () => {
     try {
       const remoteCategories = await fetchCategories()
       categories.value = remoteCategories
-      goods.value = await fetchGoods(categories.value)
+      if (activeCategoryId.value && !categories.value.some((item) => item.id === activeCategoryId.value)) {
+        activeCategoryId.value = ''
+      }
+      await requestGoodsPage(1)
     } catch (err) {
       categories.value = []
       goods.value = []
+      total.value = 0
       error.value = err instanceof Error ? err.message : '商品加载失败'
     } finally {
       loading.value = false
@@ -66,17 +76,34 @@ export const useCatalogStore = defineStore('catalog', () => {
   }
 
   async function reloadGoods() {
+    await loadGoods(1)
+  }
+
+  async function loadGoods(nextPage = page.value) {
     if (loading.value) return
     loading.value = true
     error.value = ''
     try {
-      goods.value = await fetchGoods(categories.value, { search: keyword.value })
+      await requestGoodsPage(nextPage)
     } catch (err) {
       goods.value = []
+      total.value = 0
       error.value = err instanceof Error ? err.message : '商品加载失败'
     } finally {
       loading.value = false
     }
+  }
+
+  async function selectCategory(categoryId: string) {
+    if (loading.value || activeCategoryId.value === categoryId) return
+    activeCategoryId.value = categoryId
+    await loadGoods(1)
+  }
+
+  async function goToPage(nextPage: number) {
+    const target = Math.min(Math.max(1, nextPage), pageCount.value)
+    if (loading.value || target === page.value) return
+    await loadGoods(target)
   }
 
   return {
@@ -86,12 +113,20 @@ export const useCatalogStore = defineStore('catalog', () => {
     keyword,
     loading,
     error,
+    page,
+    pageSize,
+    total,
+    pageCount,
+    pageStart,
+    pageEnd,
     rootCategories,
     visibleGoods,
     visibleSourceChannels,
     childrenOf,
     categoryName,
     loadCatalog,
-    reloadGoods
+    reloadGoods,
+    selectCategory,
+    goToPage
   }
 })

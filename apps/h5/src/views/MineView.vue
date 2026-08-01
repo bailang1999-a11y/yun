@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LoaderCircle, LogOut, UserRound } from 'lucide-vue-next'
+import { Key, KeyRound, LoaderCircle, LogOut, UserRound } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { authH5, fetchH5CaptchaChallenge, fetchH5Me, fetchH5Settings, sendH5LoginSms } from '../api/h5'
+import { authH5, changeH5Password, fetchH5AltchaChallenge, fetchH5CaptchaChallenge, fetchH5Me, fetchH5MemberApi, fetchH5Settings, saveH5MemberApi, sendH5LoginSms } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import type { CaptchaChallenge, H5SystemSetting, UserProfile } from '../types/h5'
 import { formatMoney } from '../utils/formatters'
@@ -15,6 +15,7 @@ const account = ref('')
 const code = ref('')
 const password = ref('')
 const confirmPassword = ref('')
+const username = ref('')
 const mode = ref<'login' | 'register' | 'forgot'>('login')
 const loading = ref(false)
 const codeSending = ref(false)
@@ -63,6 +64,8 @@ const codeRequiredForSubmit = computed(() =>
 )
 
 const isTurnstileCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'TURNSTILE')
+const isAltchaCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'ALTCHA')
+const altchaChallengeJson = ref('')
 
 onMounted(() => {
   void loadSettings()
@@ -121,6 +124,10 @@ async function login() {
     errorMessage.value = '请先完成人机验证'
     return
   }
+  if (mode.value === 'register' && username.value.trim() && !/^[a-z0-9_-]{1,12}$/.test(username.value.trim())) {
+    errorMessage.value = '用户名只能包含小写字母、数字、下划线和连字符，且不超过 12 个字符'
+    return
+  }
   if (mode.value === 'register' && password.value && password.value !== confirmPassword.value) {
     errorMessage.value = '两次输入的密码不一致'
     return
@@ -148,7 +155,8 @@ async function login() {
       terminal: 'h5',
       captchaTicket: captchaTicket.value,
       captchaRandstr: captchaRandstr.value,
-      mode: mode.value
+      mode: mode.value,
+      username: mode.value === 'register' ? (username.value.trim() || undefined) : undefined
     })
     localStorage.setItem(tokenKey, session.token)
     profile.value = session.profile
@@ -169,6 +177,7 @@ function switchMode(next: 'login' | 'register' | 'forgot') {
   mode.value = next
   errorMessage.value = ''
   codeMessage.value = ''
+  username.value = ''
   resetCaptcha()
 }
 
@@ -178,6 +187,12 @@ async function completeCaptcha() {
       captchaDone.value = true
       errorMessage.value = ''
       return true
+    }
+    if (captchaChallenge.value.provider === 'ALTCHA') {
+      // Altcha 由 widget 自动完成，completeCaptcha 时检查是否已有票据
+      if (captchaDone.value) return true
+      errorMessage.value = '请等待人机验证完成'
+      return false
     }
     if (!captchaChallenge.value.appId) {
       errorMessage.value = '人机验证未配置完整'
@@ -206,13 +221,19 @@ function resetCaptcha() {
   captchaTicket.value = ''
   captchaRandstr.value = ''
   if (isTurnstileCaptcha.value) void renderTurnstileWidget()
+  if (isAltchaCaptcha.value) void fetchH5AltchaChallenge().then(j => { altchaChallengeJson.value = j })
 }
 
 async function loadCaptchaChallenge() {
   try {
     captchaChallenge.value = await fetchH5CaptchaChallenge('h5')
-    if (!captchaChallenge.value.enabled) captchaDone.value = true
-    else if (captchaChallenge.value.provider === 'TURNSTILE') void renderTurnstileWidget()
+    if (!captchaChallenge.value.enabled) {
+      captchaDone.value = true
+    } else if (captchaChallenge.value.provider === 'TURNSTILE') {
+      void renderTurnstileWidget()
+    } else if (captchaChallenge.value.provider === 'ALTCHA') {
+      altchaChallengeJson.value = await fetchH5AltchaChallenge()
+    }
   } catch {
     captchaChallenge.value = { enabled: false, provider: 'TENCENT', appId: '' }
     captchaDone.value = true
@@ -340,6 +361,85 @@ function logout() {
   void router.replace({ name: 'login' })
 }
 
+// ──────────── 修改密码 ────────────
+const showPwdDialog = ref(false)
+const pwdSaving = ref(false)
+const pwdForm = ref({ current: '', next: '', confirm: '' })
+const pwdError = ref('')
+
+async function submitChangePassword() {
+  pwdError.value = ''
+  if (!pwdForm.value.current) { pwdError.value = '请输入当前密码'; return }
+  if (pwdForm.value.next.length < 6) { pwdError.value = '新密码至少 6 位'; return }
+  if (pwdForm.value.next !== pwdForm.value.confirm) { pwdError.value = '两次输入不一致'; return }
+  pwdSaving.value = true
+  try {
+    await changeH5Password(pwdForm.value.current, pwdForm.value.next, pwdForm.value.confirm)
+    showPwdDialog.value = false
+    pwdForm.value = { current: '', next: '', confirm: '' }
+    errorMessage.value = ''
+    alert('密码已修改，请重新登录')
+    logout()
+  } catch (err) {
+    pwdError.value = getApiErrorMessage(err)
+  } finally {
+    pwdSaving.value = false
+  }
+}
+
+// ──────────── API 配置 ────────────
+const showApiDialog = ref(false)
+const apiInfo = ref<{ appKey: string; appSecret: string; callbackUrl: string; status: string; dailyLimit: number } | null>(null)
+const apiLoading = ref(false)
+const apiSaving = ref(false)
+const callbackUrl = ref('')
+const apiError = ref('')
+const apiMessage = ref('')
+
+async function openApiDialog() {
+  showApiDialog.value = true
+  apiLoading.value = true
+  apiError.value = ''
+  apiMessage.value = ''
+  try {
+    apiInfo.value = await fetchH5MemberApi()
+    callbackUrl.value = apiInfo.value?.callbackUrl || ''
+  } catch {
+    apiInfo.value = null
+  } finally {
+    apiLoading.value = false
+  }
+}
+
+function isHttpUrl(value: string) {
+  if (!value.trim()) return true
+  try {
+    const url = new URL(value.trim())
+    return Boolean(url.hostname) && (url.protocol === 'http:' || url.protocol === 'https:')
+  } catch {
+    return false
+  }
+}
+
+async function submitMemberApi() {
+  apiError.value = ''
+  apiMessage.value = ''
+  if (!isHttpUrl(callbackUrl.value)) {
+    apiError.value = '请输入有效的 http 或 https 回调地址'
+    return
+  }
+  apiSaving.value = true
+  try {
+    apiInfo.value = await saveH5MemberApi(callbackUrl.value.trim())
+    callbackUrl.value = apiInfo.value?.callbackUrl || ''
+    apiMessage.value = '回调地址已保存'
+  } catch (error) {
+    apiError.value = getApiErrorMessage(error)
+  } finally {
+    apiSaving.value = false
+  }
+}
+
 function accountLabel() {
   if (mode.value !== 'register') return '手机号 / 邮箱 / 账号'
   if (setting.value.registrationType === 'MOBILE') return '手机号'
@@ -431,6 +531,10 @@ function startCountdown() {
         <span>{{ mode === 'forgot' ? '确认新密码' : '确认密码' }}</span>
         <input v-model="confirmPassword" type="password" autocomplete="new-password" placeholder="请再次输入密码" />
       </label>
+      <label v-if="mode === 'register'">
+        <span>用户名（选填）</span>
+        <input v-model.trim="username" type="text" autocomplete="username" maxlength="12" placeholder="2-12位，仅小写字母、数字、-、_" />
+      </label>
       <label v-if="needCode()">
         <span>短信验证码</span>
         <div class="code-entry">
@@ -443,6 +547,21 @@ function startCountdown() {
       <div v-if="isTurnstileCaptcha" class="turnstile-check" :class="{ done: captchaDone }">
         <div ref="turnstileBoxRef" class="turnstile-box"></div>
         <span>{{ captchaDone ? '人机验证完成' : '请完成人机验证' }}</span>
+      </div>
+      <div v-else-if="isAltchaCaptcha" class="altcha-check">
+        <altcha-widget
+          v-if="altchaChallengeJson"
+          :challenge="altchaChallengeJson"
+          auto="onload"
+          configuration='{"hideFooter":true}'
+          @statechange="(e: CustomEvent) => {
+            if (e.detail?.state === 'verified') {
+              captchaTicket = e.detail.payload || ''
+              captchaDone = true
+            }
+          }"
+        />
+        <span>{{ captchaDone ? '人机验证完成 ✓' : '验证中...' }}</span>
       </div>
       <button
         v-else
@@ -462,8 +581,66 @@ function startCountdown() {
 
     <section v-else class="menu-panel liquid-surface">
       <div class="menu-row"><UserRound :size="17" /><span>{{ profile.mobile || profile.email }}</span></div>
+      <button type="button" class="menu-row" @click="showPwdDialog = true"><Key :size="17" /><span>修改密码</span></button>
+      <button type="button" class="menu-row" @click="openApiDialog"><KeyRound :size="17" /><span>API 配置</span></button>
       <button type="button" class="menu-row logout" @click="logout"><LogOut :size="17" /><span>退出登录</span></button>
     </section>
+
+    <!-- 修改密码弹窗 -->
+    <div v-if="showPwdDialog" class="dialog-mask" @click.self="showPwdDialog = false">
+      <div class="dialog liquid-surface">
+        <h3>修改密码</h3>
+        <label><span>当前密码</span><input v-model="pwdForm.current" type="password" placeholder="请输入当前密码" /></label>
+        <label><span>新密码</span><input v-model="pwdForm.next" type="password" placeholder="至少 6 位" /></label>
+        <label><span>确认新密码</span><input v-model="pwdForm.confirm" type="password" placeholder="再次输入新密码" /></label>
+        <p v-if="pwdError" class="notice danger">{{ pwdError }}</p>
+        <div class="dialog-footer">
+          <button type="button" class="btn-cancel" @click="showPwdDialog = false">取消</button>
+          <button type="button" class="btn-primary" :disabled="pwdSaving" @click="submitChangePassword">
+            <LoaderCircle v-if="pwdSaving" class="spin" :size="14" />
+            {{ pwdSaving ? '保存中' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- API 配置弹窗 -->
+    <div v-if="showApiDialog" class="dialog-mask" @click.self="showApiDialog = false">
+      <div class="dialog liquid-surface">
+        <h3>API 配置</h3>
+        <p v-if="apiLoading" class="notice">加载中…</p>
+        <template v-else-if="apiInfo && apiInfo.status === 'ENABLED'">
+          <label><span>用户 ID</span><input :value="profile?.id" readonly /></label>
+          <label><span>App Key</span><input :value="apiInfo.appKey" readonly /></label>
+          <label><span>App Secret</span><input :value="apiInfo.appSecret" type="password" readonly /></label>
+          <label for="api-callback-url">订单状态回调地址（选填）</label>
+          <input
+            id="api-callback-url"
+            v-model="callbackUrl"
+            type="url"
+            inputmode="url"
+            autocomplete="url"
+            maxlength="500"
+            placeholder="https://example.com/api/order/callback"
+            :aria-describedby="apiError ? 'api-callback-help api-callback-error' : 'api-callback-help'"
+            :aria-invalid="Boolean(apiError)"
+            @input="apiError = ''; apiMessage = ''"
+          />
+          <p id="api-callback-help" class="api-hint">订单状态变化时通知此地址；留空表示不接收回调。</p>
+          <p v-if="apiError" id="api-callback-error" class="notice danger" role="alert">{{ apiError }}</p>
+          <p v-if="apiMessage" class="notice success" role="status">{{ apiMessage }}</p>
+          <p class="api-hint">每日下单限额：{{ apiInfo.dailyLimit }} 笔</p>
+        </template>
+        <p v-else class="notice">API 下单功能未开启，请联系平台管理员。</p>
+        <div class="dialog-footer">
+          <button type="button" class="btn-cancel" :disabled="apiSaving" @click="showApiDialog = false">关闭</button>
+          <button v-if="apiInfo && apiInfo.status === 'ENABLED'" type="button" class="btn-primary" :disabled="apiSaving" @click="submitMemberApi">
+            <LoaderCircle v-if="apiSaving" class="spin" :size="14" />
+            {{ apiSaving ? '保存中' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <p v-if="errorMessage" class="notice danger">{{ errorMessage }}</p>
     <AppTabbar v-if="profile" />
@@ -680,5 +857,68 @@ input {
   to {
     transform: rotate(360deg);
   }
+}
+
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  padding: 16px;
+}
+
+.dialog {
+  width: 100%;
+  max-width: 400px;
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  border-radius: 24px;
+}
+
+.dialog h3 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 18px;
+}
+
+.dialog-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.btn-cancel, .btn-primary {
+  height: 40px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-cancel {
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.btn-primary {
+  color: #06100e;
+  background: linear-gradient(135deg, #00ffc3, #dffff6);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+}
+
+.api-hint {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 13px;
 }
 </style>

@@ -18,7 +18,7 @@ import {
   Truck,
   XCircle
 } from 'lucide-vue-next'
-import { deleteOrder, exportOrdersExcel, fetchOrders, markOrderFailed, markOrderSuccess, refreshUnfinishedOrders } from '../api/orders'
+import { deleteOrder, exportOrdersExcel, fetchOrdersPage, markOrderFailed, markOrderSuccess, refreshUnfinishedOrders } from '../api/orders'
 import { subscribeOrderEvents } from '../api/realtime'
 import type { Order } from '../types/operations'
 import OrderBuyerCell from '../components/OrderBuyerCell.vue'
@@ -44,6 +44,11 @@ const exporting = ref(false)
 const lastSyncedAt = ref('')
 const operatingOrder = ref('')
 const nowTick = ref(Date.now())
+const pagination = reactive({
+  page: 1,
+  pageSize: 10,
+  total: 0
+})
 let refreshTimer: number | undefined
 let durationTimer: number | undefined
 let unsubscribeRealtime: (() => void) | undefined
@@ -90,7 +95,9 @@ async function loadOrders(options: { silent?: boolean } = {}) {
   }
 
   try {
-    orders.value = await fetchOrders(filters)
+    const result = await fetchOrdersPage({ ...filters, page: pagination.page, pageSize: pagination.pageSize })
+    orders.value = result.items
+    pagination.total = result.total
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   } catch {
     if (!options.silent) ElMessage.error('订单列表加载失败')
@@ -105,7 +112,9 @@ async function refreshOrdersWithUpstream() {
   upstreamRefreshing.value = true
   try {
     const result = await refreshUnfinishedOrders()
-    orders.value = await fetchOrders(filters)
+    const page = await fetchOrdersPage({ ...filters, page: pagination.page, pageSize: pagination.pageSize })
+    orders.value = page.items
+    pagination.total = page.total
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     if (result.total === 0) {
       ElMessage.info('暂无可刷新上游状态的未完成订单')
@@ -145,6 +154,17 @@ function resetFilters() {
   filters.search = ''
   filters.status = ''
   filters.goodsType = ''
+  pagination.page = 1
+  void loadOrders()
+}
+
+function searchOrders() {
+  pagination.page = 1
+  void loadOrders()
+}
+
+function handlePageChange(page: number) {
+  pagination.page = page
   void loadOrders()
 }
 
@@ -184,6 +204,7 @@ async function handleManualCommand(command: unknown, row: Order) {
     if (action === 'delete') {
       await deleteOrder(row.orderNo)
       orders.value = orders.value.filter((item) => item.orderNo !== row.orderNo)
+      pagination.total = Math.max(0, pagination.total - 1)
       ElMessage.success('订单已删除')
     }
   } catch (error) {
@@ -242,18 +263,18 @@ onBeforeUnmount(() => {
           clearable
           placeholder="订单号 / 商品 / 充值账号"
           :prefix-icon="Search"
-          @keyup.enter="() => loadOrders()"
-          @clear="() => loadOrders()"
+          @keyup.enter="searchOrders"
+          @clear="searchOrders"
         />
-        <el-select v-model="filters.status" clearable placeholder="订单状态" @change="() => loadOrders()">
+        <el-select v-model="filters.status" clearable placeholder="订单状态" @change="searchOrders">
           <el-option v-for="status in statusOptions" :key="status.value" :label="status.label" :value="status.value" />
         </el-select>
-        <el-select v-model="filters.goodsType" clearable placeholder="发货类型" @change="() => loadOrders()">
+        <el-select v-model="filters.goodsType" clearable placeholder="发货类型" @change="searchOrders">
           <el-option label="卡密" value="CARD" />
           <el-option label="直充" value="DIRECT" />
           <el-option label="代充" value="MANUAL" />
         </el-select>
-        <el-button type="primary" :icon="Search" :loading="loading" @click="() => loadOrders()">查询</el-button>
+        <el-button type="primary" :icon="Search" :loading="loading" @click="searchOrders">查询</el-button>
         <el-button class="ghost-action" :icon="RotateCcw" @click="resetFilters">重置</el-button>
       </div>
 
@@ -273,7 +294,7 @@ onBeforeUnmount(() => {
       <div class="table-caption">
         <div>
           <strong>订单明细</strong>
-          <span>{{ orders.length ? `当前展示 ${orders.length} 笔订单` : '暂无订单数据' }}</span>
+          <span>{{ pagination.total ? `共 ${pagination.total} 笔，每页 10 笔` : '暂无订单数据' }}</span>
         </div>
       </div>
 
@@ -360,6 +381,16 @@ onBeforeUnmount(() => {
         </template>
       </el-table-column>
       </el-table>
+      <div class="table-pagination">
+        <el-pagination
+          background
+          layout="prev, pager, next, total"
+          :current-page="pagination.page"
+          :page-size="pagination.pageSize"
+          :total="pagination.total"
+          @current-change="handlePageChange"
+        />
+      </div>
     </section>
   </article>
 </template>
@@ -609,6 +640,13 @@ onBeforeUnmount(() => {
 .table-caption span {
   color: rgba(255, 255, 255, 0.46);
   font-size: 12px;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 14px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
 }
 
 .row-actions {

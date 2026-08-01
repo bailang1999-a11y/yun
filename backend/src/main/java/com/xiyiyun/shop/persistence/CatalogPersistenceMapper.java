@@ -59,15 +59,42 @@ public class CatalogPersistenceMapper {
         return entity;
     }
 
+    /**
+     * 会员落库映射。
+     *
+     * <p><b>mobile / email 必须把空值写成 NULL，不能写空串。</b>
+     * users 表上有 {@code uk_users_mobile} 与 {@code uk_users_email} 两个唯一键，
+     * 而 MySQL 唯一索引<b>允许多行 NULL、不允许多行同值空串</b>。
+     *
+     * <p>写空串会造成如下真实故障（已在生产复现）：手机号注册的会员 email 为空，
+     * 第一个会员落库后 {@code email=''} 占住了 {@code uk_users_email}；
+     * 第二个手机注册会员再落库时撞上该唯一键，触发
+     * {@code UserRecordMapper.upsertSnapshot} 的 {@code ON DUPLICATE KEY UPDATE}，
+     * 把<b>已有那一行</b>的手机号、昵称、余额全部覆盖成新会员的值；
+     * 而 {@code id} 不在 UPDATE 列表里，行号始终停在第一个会员的 id。
+     * 净效果是整张 users 表只能存下一个手机注册会员，
+     * 后来者不仅存不进去，还会顶掉前者的资料与余额。
+     *
+     * <p>连带后果：会员在库里不存在 →
+     * {@code FundsLedgerStore.lockUser} 的 {@code SELECT ... FOR UPDATE} 锁不到行 →
+     * 外部支付回调落账抛 {@code user not found}，钱已收到却记不上账。
+     */
     public UserRecordEntity toUserRecord(UserItem user) {
         UserRecordEntity entity = new UserRecordEntity();
         entity.setId(user.id());
         entity.setAvatar(user.avatar());
-        entity.setMobile(user.mobile());
-        entity.setEmail(user.email());
+        entity.setMobile(blankToNull(user.mobile()));
+        entity.setEmail(blankToNull(user.email()));
+        entity.setUsername(blankToNull(user.username()));
         entity.setNickname(user.nickname());
         entity.setGroupId(user.groupId());
         entity.setBalance(user.balance() == null ? BigDecimal.ZERO : user.balance());
+        entity.setDeposit(user.deposit() == null ? BigDecimal.ZERO : user.deposit());
+        entity.setRealNameType(user.realNameType());
+        entity.setRealName(user.realName());
+        entity.setSubjectName(user.subjectName());
+        entity.setCertificateNo(user.certificateNo());
+        entity.setVerificationStatus(user.verificationStatus());
         entity.setStatus(user.status());
         entity.setLastLoginAt(user.lastLoginAt());
         entity.setCreatedAt(user.createdAt());
@@ -172,15 +199,16 @@ public class CatalogPersistenceMapper {
             entity.getGroupId(),
             "",
             entity.getBalance(),
-            BigDecimal.ZERO,
+            entity.getDeposit() == null ? BigDecimal.ZERO : entity.getDeposit(),
             entity.getStatus(),
             entity.getCreatedAt(),
             entity.getLastLoginAt(),
-            "NONE",
-            "",
-            "",
-            "",
-            "UNVERIFIED"
+            textValue(entity.getRealNameType()).isBlank() ? "NONE" : entity.getRealNameType(),
+            textValue(entity.getRealName()),
+            textValue(entity.getSubjectName()),
+            textValue(entity.getCertificateNo()),
+            textValue(entity.getVerificationStatus()).isBlank() ? "UNVERIFIED" : entity.getVerificationStatus(),
+            entity.getUsername()
         );
     }
 
@@ -342,5 +370,19 @@ public class CatalogPersistenceMapper {
         } catch (NumberFormatException ex) {
             return fallback;
         }
+    }
+
+    /**
+     * 空值归一成 NULL，供带唯一索引的可选列使用。
+     *
+     * <p>见 {@link #toUserRecord} 上的说明：唯一索引下 {@code ''} 与 {@code NULL}
+     * 语义完全不同——前者是一个会互相冲突的真实值，后者可重复。
+     */
+    private static String blankToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }

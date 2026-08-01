@@ -34,6 +34,10 @@ docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --bui
 ```bash
 docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
   sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/002_config_persistence.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/003_category_icons.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/004_security_and_order_consistency.sql
 docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --build
 ```
 

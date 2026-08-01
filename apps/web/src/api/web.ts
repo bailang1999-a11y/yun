@@ -1,4 +1,4 @@
-import { apiClient } from './client'
+import { apiClient, isNotFoundError } from './client'
 import type {
   ApiCredential,
   AuthPayload,
@@ -143,6 +143,7 @@ function normalizeCategory(item: unknown): CategoryItem {
   return {
     id: text(record.id ?? record.categoryId ?? record.code ?? record.name),
     name: text(record.name ?? record.categoryName ?? record.title, '未命名分类'),
+    iconUrl: text(record.iconUrl ?? record.icon_url ?? record.icon ?? record.imageUrl ?? record.image_url),
     parentId: rawParentId && rawParentId !== '0' ? rawParentId : undefined,
     level: record.level === undefined ? undefined : numberValue(record.level)
   }
@@ -333,11 +334,30 @@ export async function fetchSiteSettings() {
   return normalizeSiteSettings(unwrap(response.data))
 }
 
-export async function fetchGoods(categories: CategoryItem[], query: { categoryId?: string; search?: string; platform?: string } = {}) {
-  const response = await apiClient.get('/api/h5/goods', { params: cleanParams({ ...query, platform: 'web', pageSize: 80 }) })
+export async function fetchGoodsPage(
+  categories: CategoryItem[],
+  query: { categoryId?: string; search?: string; page: number; pageSize: number }
+) {
+  const response = await apiClient.get('/api/h5/goods', {
+    params: cleanParams({ ...query, platform: 'web' })
+  })
   const value = unwrap(response.data)
-  const source = isRecord(value) ? value.items ?? value.records ?? value.list ?? value.rows : value
-  return toArray(source).map((item) => normalizeGoods(item, categories)).filter((item) => item.id)
+
+  if (!isRecord(value)) {
+    const items = toArray(value).map((item) => normalizeGoods(item, categories)).filter((item) => item.id)
+    return { items, total: items.length, page: query.page, pageSize: query.pageSize }
+  }
+
+  const items = toArray(value.items ?? value.records ?? value.list ?? value.rows)
+    .map((item) => normalizeGoods(item, categories))
+    .filter((item) => item.id)
+
+  return {
+    items,
+    total: numberValue(value.total ?? value.totalCount, items.length),
+    page: numberValue(value.page, query.page),
+    pageSize: numberValue(value.pageSize ?? value.size, query.pageSize)
+  }
 }
 
 export async function fetchGoodsDetail(goodsId: string, categories: CategoryItem[]) {
@@ -362,6 +382,11 @@ export async function authWeb(payload: AuthPayload) {
 export async function createWebSliderToken() {
   const response = await apiClient.post('/api/h5/auth/slider', { terminal: 'web' })
   return text(unwrap(response.data))
+}
+
+export async function fetchWebAltchaChallenge(): Promise<string> {
+  const response = await apiClient.get('/api/h5/auth/altcha-challenge')
+  return typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
 }
 
 export async function fetchWebCaptchaChallenge(): Promise<CaptchaChallenge> {
@@ -390,9 +415,38 @@ export async function createOrder(payload: CreateOrderPayload) {
   return normalizeOrder(unwrap(response.data))
 }
 
+export async function fetchOrderByRequestId(requestId: string) {
+  try {
+    const response = await apiClient.get(`/api/h5/orders/by-request/${encodeURIComponent(requestId)}`, { timeout: 3000 })
+    return normalizeOrder(unwrap(response.data))
+  } catch (error) {
+    if (isNotFoundError(error)) return null
+    throw error
+  }
+}
+
 export async function payOrder(orderNo: string, payMethod = 'balance') {
   const response = await apiClient.post(`/api/h5/orders/${encodeURIComponent(orderNo)}/pay`, { payMethod, terminal: 'web' })
   return normalizeOrder(unwrap(response.data))
+}
+
+/**
+ * 发起支付宝支付，拿到跳转地址。
+ *
+ * 与 payOrder 的区别：payOrder 是当场结清（余额支付），这里只是拿到去支付宝付款的地址，
+ * 订单状态要等支付宝异步通知回我方服务器后才会变成已支付，因此返回后需要轮询订单状态。
+ */
+export async function payOrderViaGateway(orderNo: string, payMethod: string) {
+  const response = await apiClient.post(
+    `/api/h5/orders/${encodeURIComponent(orderNo)}/pay-gateway`,
+    { payMethod, terminal: 'web' }
+  )
+  const data = unwrap(response.data)
+  const record = isRecord(data) ? data : {}
+  return {
+    paymentNo: text(record.paymentNo),
+    payUrl: text(record.payUrl)
+  }
 }
 
 export async function fetchPaymentChannels(terminal: 'h5' | 'web' | 'api' = 'web') {
@@ -424,6 +478,7 @@ export async function fetchApiCredential(): Promise<ApiCredential> {
   return {
     appKey: text(record.appKey),
     appSecretMasked: text(record.appSecretMasked, rawSecret ? maskSecret(rawSecret) : '由后台分配，重置后仅展示一次'),
+    callbackUrl: text(record.callbackUrl),
     status: text(record.status, 'DISABLED'),
     ipWhitelist: toArray(record.ipWhitelist).map((item) => text(item)).filter(Boolean),
     dailyLimit: numberValue(record.dailyLimit),
@@ -431,13 +486,14 @@ export async function fetchApiCredential(): Promise<ApiCredential> {
   }
 }
 
-export async function saveApiCredential(payload: { enabled?: boolean; resetSecret?: boolean; ipWhitelist?: string[]; dailyLimit?: number }) {
+export async function saveApiCredential(payload: { enabled?: boolean; resetSecret?: boolean; callbackUrl?: string; ipWhitelist?: string[]; dailyLimit?: number }) {
   const response = await apiClient.post('/api/h5/member-api', payload)
   const record = isRecord(unwrap(response.data)) ? (unwrap(response.data) as AnyRecord) : {}
   const rawSecret = text(record.appSecret)
   return {
     appKey: text(record.appKey),
     appSecretMasked: text(record.appSecretMasked, rawSecret ? maskSecret(rawSecret) : '由后台分配，重置后仅展示一次'),
+    callbackUrl: text(record.callbackUrl),
     status: text(record.status, 'DISABLED'),
     ipWhitelist: toArray(record.ipWhitelist).map((item) => text(item)).filter(Boolean),
     dailyLimit: numberValue(record.dailyLimit),

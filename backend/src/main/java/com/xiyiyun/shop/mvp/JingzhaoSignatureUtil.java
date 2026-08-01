@@ -3,6 +3,7 @@ package com.xiyiyun.shop.mvp;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.util.StringUtils;
 
@@ -31,6 +32,16 @@ public final class JingzhaoSignatureUtil {
             builder.append(key).append('=').append(value == null ? "" : value);
         });
         return builder.toString();
+    }
+
+    /** 京兆回调的 cards=[] 表示无卡密，上游不把这个语义空值放进签名源串。 */
+    static String callbackSign(Map<String, Object> params, String key) {
+        if (params == null || !"[]".equals(String.valueOf(params.get("cards")).trim())) {
+            return sign(params == null ? Map.of() : params, key);
+        }
+        Map<String, Object> signed = new LinkedHashMap<>(params);
+        signed.remove("cards");
+        return sign(signed, key);
     }
 
     private static String md5(String value) {

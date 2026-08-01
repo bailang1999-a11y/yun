@@ -1,14 +1,24 @@
 import { apiClient } from './client'
 import { cleanParams, numberValue, text } from './normalize'
-import { type ApiEnvelope, unwrapResponse, unwrapValue } from './response'
+import { type ApiEnvelope, type PageResult, unwrapPage, unwrapValue } from './response'
 import type { GoodsChannel, Order, OrderQuery, OrderRefreshResult } from '../types/operations'
 
-export async function fetchOrders(query: OrderQuery = {}) {
+const ORDER_UPSTREAM_OPERATION_TIMEOUT_MS = 90_000
+export type OrderPageQuery = OrderQuery & { page?: number; pageSize?: number }
+
+export async function fetchOrders(query: OrderPageQuery = {}) {
+  return (await fetchOrdersPage(query)).items
+}
+
+export async function fetchOrdersPage(query: OrderPageQuery = {}): Promise<PageResult<Order>> {
   const { data } = await apiClient.get<unknown>('/api/admin/orders', {
     params: cleanParams(query)
   })
-
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeOrder)
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return {
+    ...page,
+    items: page.items.map(normalizeOrder)
+  }
 }
 
 export async function exportOrdersExcel(query: OrderQuery = {}) {
@@ -27,7 +37,11 @@ export async function fetchOrderDetail(orderNo: string) {
 }
 
 export async function refreshUnfinishedOrders(): Promise<OrderRefreshResult> {
-  const { data } = await apiClient.post<unknown>('/api/admin/orders/refresh-unfinished')
+  const { data } = await apiClient.post<unknown>(
+    '/api/admin/orders/refresh-unfinished',
+    undefined,
+    { timeout: ORDER_UPSTREAM_OPERATION_TIMEOUT_MS }
+  )
   const value = unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>)
 
   return {
@@ -40,7 +54,11 @@ export async function refreshUnfinishedOrders(): Promise<OrderRefreshResult> {
 }
 
 export async function refreshOrderCallback(orderNo: string) {
-  const { data } = await apiClient.post<unknown>(`/api/admin/orders/${encodeURIComponent(orderNo)}/refresh-callback`)
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/orders/${encodeURIComponent(orderNo)}/refresh-callback`,
+    undefined,
+    { timeout: ORDER_UPSTREAM_OPERATION_TIMEOUT_MS }
+  )
 
   return normalizeOrder(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
@@ -52,14 +70,20 @@ export async function completeManualOrder(orderNo: string) {
 }
 
 export async function retryOrder(orderNo: string) {
-  const { data } = await apiClient.post<unknown>(`/api/admin/orders/${encodeURIComponent(orderNo)}/retry`)
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/orders/${encodeURIComponent(orderNo)}/retry`,
+    undefined,
+    { timeout: ORDER_UPSTREAM_OPERATION_TIMEOUT_MS }
+  )
 
   return normalizeOrder(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
 export async function retryOrderWithChannel(orderNo: string, channelId: GoodsChannel['id']) {
   const { data } = await apiClient.post<unknown>(
-    `/api/admin/orders/${encodeURIComponent(orderNo)}/retry-channel/${encodeURIComponent(String(channelId))}`
+    `/api/admin/orders/${encodeURIComponent(orderNo)}/retry-channel/${encodeURIComponent(String(channelId))}`,
+    undefined,
+    { timeout: ORDER_UPSTREAM_OPERATION_TIMEOUT_MS }
   )
 
   return normalizeOrder(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))

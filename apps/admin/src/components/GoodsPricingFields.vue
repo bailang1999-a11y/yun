@@ -19,7 +19,7 @@ const price = defineModel<number>('price', { required: true })
 const originalPrice = defineModel<number | undefined>('originalPrice')
 const stock = defineModel<number | undefined>('stock')
 const maxBuy = defineModel<number | undefined>('maxBuy')
-const accountTypes = defineModel<string[]>('accountTypes', { default: [] })
+const accountTypes = defineModel<string[]>('accountTypes', { default: () => [] })
 
 const emit = defineEmits<{
   applyPriceTemplate: [value?: string]

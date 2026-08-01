@@ -11,7 +11,7 @@
 
   <groupId>com.xiyiyun</groupId>
   <artifactId>xiyiyun-backend</artifactId>
-  <version>0.2.0</version>
+  <version>1.44</version>
   <name>xiyiyun-backend</name>
 
   <properties>
@@ -46,9 +46,18 @@
       <scope>runtime</scope>
     </dependency>
     <dependency>
+      <groupId>org.apache.httpcomponents.client5</groupId>
+      <artifactId>httpclient5</artifactId>
+    </dependency>
+    <dependency>
       <groupId>com.alibaba</groupId>
       <artifactId>easyexcel</artifactId>
       <version>4.0.3</version>
+    </dependency>
+    <dependency>
+      <groupId>com.alipay.sdk</groupId>
+      <artifactId>alipay-sdk-java</artifactId>
+      <version>4.40.272.ALL</version>
     </dependency>
     <dependency>
       <groupId>org.projectlombok</groupId>
@@ -67,6 +76,27 @@
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!--
+            Surefire 默认 include 只有 *Test / Test* / *Tests / *TestCase，
+            集成测试类以 IT 结尾（OrderFullChainIT 等）不会被执行。
+            这里显式补上 **/*IT.java，让 `mvn test` 一次跑完单测 + 集成测试。
+          -->
+          <includes>
+            <include>**/Test*.java</include>
+            <include>**/*Test.java</include>
+            <include>**/*Tests.java</include>
+            <include>**/*TestCase.java</include>
+            <include>**/*IT.java</include>
+          </includes>
+          <!-- 并发用例自己开线程池，Surefire 保持单 fork 顺序执行，避免多个 JVM 抢同一个测试库 -->
+          <forkCount>1</forkCount>
+          <reuseForks>true</reuseForks>
+        </configuration>
       </plugin>
     </plugins>
   </build>

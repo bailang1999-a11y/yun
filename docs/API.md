@@ -243,16 +243,24 @@
 请求头：
 
 ```text
-X-Access-Key: ak_xxx
-X-Timestamp: 1777300000000
+X-App-Key: ak_xxx
+X-Timestamp: 1777300000
 X-Nonce: nonce_32_chars
 X-Signature: hex_hmac_sha256
+# POST /api/member/orders 还必须传：
+X-Content-SHA256: lowercase_hex_sha256_of_raw_body
 ```
 
-签名原文建议：
+GET 请求签名原文：
 
 ```text
-METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + NONCE + "\n" + SHA256(BODY)
+TIMESTAMP + "\n" + NONCE + "\n" + PATH
+```
+
+`POST /api/member/orders` 在末尾追加请求体哈希：
+
+```text
+TIMESTAMP + "\n" + NONCE + "\n" + PATH + "\n" + X-CONTENT-SHA256
 ```
 
 服务端校验时间偏移、nonce 重放、IP 白名单、API Key 状态和 scopes。

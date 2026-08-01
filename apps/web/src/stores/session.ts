@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { authWeb, fetchMe, loginWeb } from '../api/web'
-import { tokenKey } from '../api/client'
+import { isAuthenticationError, tokenKey } from '../api/client'
 import type { AuthPayload, UserProfile } from '../types/web'
 
 export const useSessionStore = defineStore('session', () => {
@@ -45,8 +45,8 @@ export const useSessionStore = defineStore('session', () => {
       const nextProfile = await fetchMe()
       profile.value = nextProfile
       return nextProfile
-    } catch {
-      logout()
+    } catch (error) {
+      if (isAuthenticationError(error)) logout()
       return null
     } finally {
       profileLoading.value = false

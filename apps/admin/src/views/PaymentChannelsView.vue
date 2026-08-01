@@ -31,14 +31,14 @@ const terminalOptions = [
   { label: 'API', value: 'api' }
 ]
 
-const configFieldMap: Record<string, Array<{ key: string; label: string; placeholder: string; sensitive?: boolean; textarea?: boolean }>> = {
+const configFieldMap: Record<string, Array<{ key: string; label: string; placeholder: string; sensitive?: boolean; textarea?: boolean; notifyUrlSuffix?: string }>> = {
   WECHAT: [
     { key: 'app_id', label: '微信 AppID', placeholder: '公众号/小程序/应用 AppID' },
     { key: 'mch_id', label: '微信商户号', placeholder: '微信支付商户号 mch_id' },
     { key: 'api_v3_key', label: 'APIv3 密钥', placeholder: '32 位 APIv3 密钥', sensitive: true },
     { key: 'merchant_serial_no', label: '证书序列号', placeholder: '微信支付商户证书序列号' },
     { key: 'private_key', label: '商户私钥', placeholder: '粘贴 apiclient_key.pem 内容', sensitive: true, textarea: true },
-    { key: 'notify_url', label: '支付回调地址', placeholder: 'https://你的域名/api/payment/wechat/notify' },
+    { key: 'notify_url', label: '后端 API 域名', placeholder: 'https://api.xiyi.co', notifyUrlSuffix: '/api/payment/callback/wechat' },
     { key: 'sandbox', label: '沙箱模式', placeholder: 'true / false' }
   ],
   ALIPAY: [
@@ -46,7 +46,8 @@ const configFieldMap: Record<string, Array<{ key: string; label: string; placeho
     { key: 'app_private_key', label: '应用私钥', placeholder: '粘贴应用私钥', sensitive: true, textarea: true },
     { key: 'alipay_public_key', label: '支付宝公钥', placeholder: '粘贴支付宝公钥', sensitive: true, textarea: true },
     { key: 'gateway_url', label: '网关地址', placeholder: 'https://openapi.alipay.com/gateway.do' },
-    { key: 'notify_url', label: '支付回调地址', placeholder: 'https://你的域名/api/payment/alipay/notify' },
+    { key: 'notify_url', label: '后端 API 域名', placeholder: 'https://api.xiyi.co', notifyUrlSuffix: '/api/payment/notify/alipay' },
+    { key: 'return_url', label: '付款后跳回地址', placeholder: 'https://web.xiyi.co/orders（可留空）' },
     { key: 'sandbox', label: '沙箱模式', placeholder: 'true / false' }
   ],
   BANK: [
@@ -60,7 +61,7 @@ const configFieldMap: Record<string, Array<{ key: string; label: string; placeho
     { key: 'app_id', label: '应用 ID', placeholder: '第三方支付应用 ID' },
     { key: 'api_key', label: '接口密钥', placeholder: '第三方支付接口密钥', sensitive: true },
     { key: 'gateway_url', label: '网关地址', placeholder: '第三方支付网关 URL' },
-    { key: 'notify_url', label: '支付回调地址', placeholder: '支付结果回调 URL' }
+    { key: 'notify_url', label: '后端 API 域名', placeholder: 'https://api.xiyi.co', notifyUrlSuffix: '/api/payment/callback/custom' }
   ]
 }
 
@@ -208,10 +209,24 @@ function ensureConfigDefaults() {
   form.config = next
 }
 
+/**
+ * 回调地址字段只保存<b>域名</b>，完整路径由后端拼接。
+ *
+ * <p>不在前端拼后缀，是因为拼了会出两个问题：一是保存后再次编辑该通道时，
+ * 读到的值已含后缀，再保存会重复追加；二是后端 AlipayGatewayService 也会拼一次路径，
+ * 两边都拼就变成了 domain + 前端后缀 + 后端后缀。路径归后端一处所有，前端只做预览展示。
+ */
 function normalizeConfig(config: Record<string, string>) {
   return Object.fromEntries(
     Object.entries(config)
-      .map(([key, value]) => [key.trim(), String(value ?? '').trim()])
+      .map(([key, value]) => {
+        let normalized = String(value ?? '').trim()
+        const field = configFields.value.find((item) => item.key === key)
+        if (field?.notifyUrlSuffix && normalized) {
+          normalized = normalized.replace(/\/+$/, '')
+        }
+        return [key.trim(), normalized]
+      })
       .filter(([key]) => key)
   )
 }
@@ -332,6 +347,9 @@ function normalizeConfig(config: Record<string, string>) {
                 :show-password="field.sensitive && !field.textarea"
                 :placeholder="field.placeholder"
               />
+              <div v-if="field.notifyUrlSuffix && form.config![field.key]" class="notify-url-preview">
+                实际回调地址：{{ form.config![field.key].replace(/\/+$/, '') + field.notifyUrlSuffix }}
+              </div>
             </el-form-item>
           </section>
           <el-form-item label="备注">
@@ -529,6 +547,17 @@ function normalizeConfig(config: Record<string, string>) {
   border-radius: 16px;
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.notify-url-preview {
+  margin-top: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: rgba(0, 255, 195, 0.8);
+  background: rgba(0, 255, 195, 0.06);
+  border-radius: 8px;
+  border: 0.5px solid rgba(0, 255, 195, 0.15);
+  word-break: break-all;
 }
 
 .config-title {

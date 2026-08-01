@@ -1,6 +1,6 @@
 import { apiClient } from './client'
 import { cleanParams, numberValue, stringArray, text } from './normalize'
-import { type ApiEnvelope, unwrapResponse, unwrapValue } from './response'
+import { type ApiEnvelope, type PageResult, unwrapPage, unwrapResponse, unwrapValue } from './response'
 import type {
   CardImportItem,
   Goods,
@@ -11,12 +11,27 @@ import type {
   GoodsIntegration
 } from '../types/operations'
 
-export async function fetchGoods(query: { categoryId?: string | number; platform?: string; search?: string } = {}) {
+export type GoodsQuery = { categoryId?: string | number; platform?: string; search?: string; page?: number; pageSize?: number }
+
+export async function fetchGoods(query: GoodsQuery = {}) {
+  return (await fetchGoodsPage(query)).items
+}
+
+export async function fetchGoodsPage(query: GoodsQuery = {}): Promise<PageResult<Goods>> {
   const { data } = await apiClient.get<unknown>('/api/admin/goods', {
     params: cleanParams(query)
   })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return {
+    ...page,
+    items: page.items.map(normalizeGoods)
+  }
+}
 
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeGoods)
+export async function fetchGoodsDetail(goodsId: Goods['id']) {
+  const { data } = await apiClient.get<unknown>(`/api/admin/goods/${goodsId}`)
+
+  return normalizeGoods(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
 export async function createGoods(payload: GoodsCreatePayload) {
@@ -31,8 +46,18 @@ export async function updateGoods(goodsId: Goods['id'], payload: GoodsCreatePayl
   return normalizeGoods(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
+export async function updateGoodsForBatch(goodsId: Goods['id'], payload: GoodsCreatePayload) {
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/goods/${goodsId}`,
+    normalizeGoodsPayload(payload),
+    { timeout: 60_000 }
+  )
+
+  return normalizeGoods(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
 export async function deleteGoods(goodsId: Goods['id']) {
-  const { data } = await apiClient.post(`/api/admin/goods/${goodsId}/delete`)
+  const { data } = await apiClient.post(`/api/admin/goods/${goodsId}/delete`, undefined, { timeout: 60_000 })
 
   return data
 }

@@ -6,6 +6,7 @@ import { getApiErrorMessage } from '../api/client'
 import { fetchH5OrderDelivery, fetchH5Orders } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import type { H5Order, OrderDelivery } from '../types/h5'
+import { useModalFocus } from '../utils/modalFocus'
 
 const route = useRoute()
 const orders = ref<H5Order[]>([])
@@ -17,9 +18,12 @@ const copyMessage = ref('')
 const securityMessage = ref('')
 const rippleActive = ref(false)
 const repeatConfirmVisible = ref(false)
+const repeatConfirmRef = ref<HTMLElement | null>(null)
 const delivery = ref<OrderDelivery | null>(null)
 const viewedStorageKey = 'xiyiyun-viewed-card-orders'
 let refreshTimer: number | undefined
+
+useModalFocus(repeatConfirmVisible, repeatConfirmRef, cancelRepeatConfirm)
 
 onMounted(() => {
   orderNo.value = String(route.query.orderNo ?? '')
@@ -210,7 +214,15 @@ function getViewedOrders() {
     <section v-else class="empty">输入或选择订单号，即可查看卡号、密码和使用说明。</section>
 
     <Teleport to="body">
-      <div v-if="repeatConfirmVisible" class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="repeatCardTitle">
+      <div
+        v-if="repeatConfirmVisible"
+        ref="repeatConfirmRef"
+        class="confirm-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="repeatCardTitle"
+        tabindex="-1"
+      >
         <div class="confirm-dialog-card">
           <span>安全确认</span>
           <strong id="repeatCardTitle">该订单卡密已查看过</strong>

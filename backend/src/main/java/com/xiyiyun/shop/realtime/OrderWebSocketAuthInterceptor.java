@@ -1,6 +1,6 @@
 package com.xiyiyun.shop.realtime;
 
-import com.xiyiyun.shop.mvp.InMemoryShopRepository;
+import com.xiyiyun.shop.mvp.TokenAuthPort;
 import java.util.Map;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
@@ -11,9 +11,9 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 @Component
 public class OrderWebSocketAuthInterceptor implements HandshakeInterceptor {
-    private final InMemoryShopRepository repository;
+    private final TokenAuthPort repository;
 
-    public OrderWebSocketAuthInterceptor(InMemoryShopRepository repository) {
+    public OrderWebSocketAuthInterceptor(TokenAuthPort repository) {
         this.repository = repository;
     }
 

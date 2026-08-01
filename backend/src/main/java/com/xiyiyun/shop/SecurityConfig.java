@@ -30,6 +30,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/admin/auth/login").permitAll()
                 .requestMatchers("/api/admin/auth/slider").permitAll()
                 .requestMatchers("/api/admin/auth/captcha-config").permitAll()
+                .requestMatchers("/api/admin/auth/altcha-challenge").permitAll()
+                .requestMatchers("/api/h5/auth/altcha-challenge").permitAll()
                 .requestMatchers("/api/admin/auth/sms/send").permitAll()
                 .requestMatchers("/api/admin/**").authenticated()
                 .anyRequest().permitAll()

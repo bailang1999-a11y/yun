@@ -12,6 +12,7 @@ const testing = ref(false)
 const providerOptions = [
   { label: '腾讯云验证码', value: 'TENCENT' },
   { label: 'Cloudflare Turnstile', value: 'TURNSTILE' },
+  { label: 'Altcha（自托管 PoW，推荐）', value: 'ALTCHA' },
   { label: '通用 HTTP 校验', value: 'GENERIC' }
 ]
 
@@ -40,6 +41,9 @@ const form = reactive<CaptchaSettingPayload>({
     content_type: 'application/json; charset=UTF-8',
     body_template: '{"ticket":"{ticket}","randstr":"{randstr}","ip":"{ip}"}',
     success_keyword: ''
+  },
+  altchaConfig: {
+    hmac_key: ''
   }
 })
 
@@ -56,7 +60,8 @@ async function loadSetting() {
       ...setting,
       tencentConfig: { ...form.tencentConfig, ...setting.tencentConfig },
       turnstileConfig: { ...form.turnstileConfig, ...setting.turnstileConfig },
-      genericConfig: { ...form.genericConfig, ...setting.genericConfig }
+      genericConfig: { ...form.genericConfig, ...setting.genericConfig },
+      altchaConfig: { ...form.altchaConfig, ...(setting.altchaConfig || {}) }
     })
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '人机验证配置加载失败')
@@ -77,13 +82,15 @@ async function saveSetting() {
       ...form,
       tencentConfig: trimMap(form.tencentConfig),
       turnstileConfig: trimMap(form.turnstileConfig),
-      genericConfig: trimMap(form.genericConfig)
+      genericConfig: trimMap(form.genericConfig),
+      altchaConfig: trimMap(form.altchaConfig || {})
     })
     Object.assign(form, {
       ...next,
       tencentConfig: { ...form.tencentConfig, ...next.tencentConfig },
       turnstileConfig: { ...form.turnstileConfig, ...next.turnstileConfig },
-      genericConfig: { ...form.genericConfig, ...next.genericConfig }
+      genericConfig: { ...form.genericConfig, ...next.genericConfig },
+      altchaConfig: { ...form.altchaConfig, ...(next.altchaConfig || {}) }
     })
     ElMessage.success('人机验证配置已保存')
   } catch (error) {
@@ -115,14 +122,28 @@ function normalizedPayload(): CaptchaSettingPayload {
     ...form,
     tencentConfig: trimMap(form.tencentConfig),
     turnstileConfig: trimMap(form.turnstileConfig),
-    genericConfig: trimMap(form.genericConfig)
+    genericConfig: trimMap(form.genericConfig),
+    altchaConfig: trimMap(form.altchaConfig || {})
   }
 }
 
+/**
+ * 各服务商的必填项校验。
+ *
+ * 注意最后是「默认落到腾讯云」的写法，所以**每新增一个服务商都必须在此加分支**，
+ * 否则会拿腾讯云的必填项去校验它，报出「腾讯云 SecretId 不能为空」这种
+ * 与所选服务商完全无关的错误，且用户无从下手（页面上根本没有那个输入框）。
+ */
 function validateSetting() {
   if (!needProviderConfig.value) return ''
   if (form.provider === 'GENERIC') {
     return form.genericConfig.url.trim() ? '' : '通用 HTTP 校验请求地址不能为空'
+  }
+  if (form.provider === 'ALTCHA') {
+    const key = (form.altchaConfig?.hmac_key || '').trim()
+    if (!key) return 'Altcha HMAC 密钥不能为空'
+    if (key.length < 32) return 'Altcha HMAC 密钥至少需要 32 位字符'
+    return ''
   }
   if (form.provider === 'TURNSTILE') {
     if (!form.turnstileConfig.site_key.trim()) return 'Cloudflare Turnstile Site Key 不能为空'
@@ -239,6 +260,15 @@ function trimMap(value: Record<string, string>) {
               </el-form-item>
               <el-form-item label="场景"><el-input v-model="form.turnstileConfig.scene" placeholder="login" /></el-form-item>
             </div>
+          </template>
+
+          <template v-else-if="form.provider === 'ALTCHA'">
+            <div class="config-grid">
+              <el-form-item label="HMAC 密钥">
+                <el-input v-model="(form.altchaConfig as Record<string,string>).hmac_key" type="password" show-password placeholder="随机字符串，至少 32 位，用于签名 PoW 挑战" />
+              </el-form-item>
+            </div>
+            <p class="config-hint">Altcha 完全自托管，不依赖第三方服务。用户浏览器静默完成工作量证明（约 0.5-1 秒），无需点击或识图。HMAC 密钥只需随机填写即可，建议 64 位以上。</p>
           </template>
 
           <template v-else>

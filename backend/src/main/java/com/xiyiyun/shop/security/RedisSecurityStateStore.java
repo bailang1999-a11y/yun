@@ -19,6 +19,10 @@ import org.springframework.stereotype.Component;
 public class RedisSecurityStateStore {
     private static final Logger log = LoggerFactory.getLogger(RedisSecurityStateStore.class);
     private static final String MEMBER_API_NONCE_PREFIX = "xiyiyun:member-api:nonce:";
+    private static final String PAYMENT_CALLBACK_NONCE_PREFIX = "xiyiyun:payment-callback:nonce:";
+    private static final String LOGIN_FAIL_PREFIX = "xiyiyun:login:fail:";
+    private static final String LOGIN_LOCK_PREFIX = "xiyiyun:login:lock:";
+    private static final String LOGIN_IP_PREFIX = "xiyiyun:login:ip:";
     private static final String SLIDER_TOKEN_PREFIX = "xiyiyun:slider:";
     private static final String SMS_CODE_PREFIX = "xiyiyun:sms-code:";
     private static final String USER_TOKEN_PREFIX = "xiyiyun:session:user:";
@@ -40,6 +44,104 @@ public class RedisSecurityStateStore {
             return Optional.of(!Boolean.TRUE.equals(inserted));
         } catch (RuntimeException ex) {
             log.warn("Redis member API nonce check failed, falling back to local memory: {}", ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 支付回调 nonce 重放标记（批次5 / B1）。
+     *
+     * <p>语义与 {@link #markMemberApiNonceReplay} 一致：返回 {@code Optional.of(true)} 表示该
+     * nonce 已被用过（重放），{@code Optional.of(false)} 表示首次出现。
+     * Redis 不可用时返回 {@code Optional.empty()}，由调用方退化到本地兜底，而不是直接放行。
+     */
+    public Optional<Boolean> markPaymentCallbackNonceReplay(String nonceKey, Duration ttl) {
+        try {
+            Boolean inserted = redisTemplate.opsForValue()
+                .setIfAbsent(PAYMENT_CALLBACK_NONCE_PREFIX + nonceKey, "1", ttl);
+            return Optional.of(!Boolean.TRUE.equals(inserted));
+        } catch (RuntimeException ex) {
+            log.warn("Redis payment callback nonce check failed, falling back to local memory: {}", ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    // ==================================================== 登录暴力破解防护（批次5 / B2）
+
+    /**
+     * 累加某个登录主体（终端+账号）的失败次数并返回累加后的值。
+     *
+     * <p>每次失败都刷新 TTL 为 {@code window}，即"滑动窗口"：只要攻击者持续尝试，计数就不会过期。
+     * Redis 不可用返回 {@code Optional.empty()}，调用方退化到本地内存计数。
+     */
+    public Optional<Long> incrementLoginFailure(String subjectKey, Duration window) {
+        try {
+            String key = LOGIN_FAIL_PREFIX + subjectKey;
+            Long count = redisTemplate.opsForValue().increment(key);
+            redisTemplate.expire(key, window);
+            return count == null ? Optional.empty() : Optional.of(count);
+        } catch (RuntimeException ex) {
+            log.warn("Redis login failure counter failed, falling back to local memory: {}", ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public Optional<Long> loginFailureCount(String subjectKey) {
+        try {
+            String raw = redisTemplate.opsForValue().get(LOGIN_FAIL_PREFIX + subjectKey);
+            return Optional.of(raw == null ? 0L : Long.parseLong(raw));
+        } catch (RuntimeException ex) {
+            log.warn("Redis login failure read failed, falling back to local memory: {}", ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    public void clearLoginFailures(String subjectKey) {
+        try {
+            redisTemplate.delete(LOGIN_FAIL_PREFIX + subjectKey);
+            redisTemplate.delete(LOGIN_LOCK_PREFIX + subjectKey);
+        } catch (RuntimeException ex) {
+            log.warn("Redis login failure reset failed: {}", ex.getMessage());
+        }
+    }
+
+    public boolean lockLogin(String subjectKey, Duration ttl) {
+        try {
+            redisTemplate.opsForValue().set(LOGIN_LOCK_PREFIX + subjectKey, "1", ttl);
+            return true;
+        } catch (RuntimeException ex) {
+            log.warn("Redis login lock write failed, falling back to local memory: {}", ex.getMessage());
+            return false;
+        }
+    }
+
+    /** 返回锁定剩余时长；未锁定返回 {@link Duration#ZERO}；Redis 不可用返回 empty。 */
+    public Optional<Duration> loginLockRemaining(String subjectKey) {
+        try {
+            Long seconds = redisTemplate.getExpire(LOGIN_LOCK_PREFIX + subjectKey);
+            if (seconds == null || seconds < 0) {
+                // -2 = key 不存在，-1 = 无 TTL（本项目不会出现，保守视为未锁定）
+                return Optional.of(Duration.ZERO);
+            }
+            return Optional.of(Duration.ofSeconds(seconds));
+        } catch (RuntimeException ex) {
+            log.warn("Redis login lock read failed, falling back to local memory: {}", ex.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** 同 IP 维度的登录尝试计数（无论成功失败都记），用于频率限制。 */
+    public Optional<Long> incrementLoginIpAttempt(String ip, Duration window) {
+        try {
+            String key = LOGIN_IP_PREFIX + ip;
+            Long count = redisTemplate.opsForValue().increment(key);
+            if (count != null && count == 1L) {
+                // 只在窗口起点设置 TTL：固定窗口，避免攻击者靠持续请求把窗口无限推后
+                redisTemplate.expire(key, window);
+            }
+            return count == null ? Optional.empty() : Optional.of(count);
+        } catch (RuntimeException ex) {
+            log.warn("Redis login IP counter failed, falling back to local memory: {}", ex.getMessage());
             return Optional.empty();
         }
     }

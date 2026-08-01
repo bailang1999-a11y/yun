@@ -1,6 +1,6 @@
 import { apiClient } from './client'
-import { numberValue, text } from './normalize'
-import { type ApiEnvelope, unwrapResponse, unwrapValue } from './response'
+import { cleanParams, numberValue, text } from './normalize'
+import { type ApiEnvelope, type PageResult, unwrapPage, unwrapValue } from './response'
 import type { OperationLog, PaymentRecord, RefundRecord, SmsLog, SystemSetting } from '../types/operations'
 
 export async function fetchSettings() {
@@ -15,24 +15,46 @@ export async function updateSettings(payload: SystemSetting) {
   return normalizeSettings(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
-export async function fetchPayments() {
-  const { data } = await apiClient.get<unknown>('/api/admin/payments')
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizePayment)
+export type PageQuery = { page?: number; pageSize?: number }
+
+export async function fetchPayments(query: PageQuery = {}) {
+  return (await fetchPaymentsPage(query)).items
 }
 
-export async function fetchRefunds() {
-  const { data } = await apiClient.get<unknown>('/api/admin/refunds')
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeRefund)
+export async function fetchPaymentsPage(query: PageQuery = {}): Promise<PageResult<PaymentRecord>> {
+  const { data } = await apiClient.get<unknown>('/api/admin/payments', { params: cleanParams(query) })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return { ...page, items: page.items.map(normalizePayment) }
 }
 
-export async function fetchSmsLogs() {
-  const { data } = await apiClient.get<unknown>('/api/admin/sms-logs')
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeSmsLog)
+export async function fetchRefunds(query: PageQuery = {}) {
+  return (await fetchRefundsPage(query)).items
 }
 
-export async function fetchOperationLogs() {
-  const { data } = await apiClient.get<unknown>('/api/admin/operation-logs')
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeOperationLog)
+export async function fetchRefundsPage(query: PageQuery = {}): Promise<PageResult<RefundRecord>> {
+  const { data } = await apiClient.get<unknown>('/api/admin/refunds', { params: cleanParams(query) })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return { ...page, items: page.items.map(normalizeRefund) }
+}
+
+export async function fetchSmsLogs(query: PageQuery = {}) {
+  return (await fetchSmsLogsPage(query)).items
+}
+
+export async function fetchSmsLogsPage(query: PageQuery = {}): Promise<PageResult<SmsLog>> {
+  const { data } = await apiClient.get<unknown>('/api/admin/sms-logs', { params: cleanParams(query) })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return { ...page, items: page.items.map(normalizeSmsLog) }
+}
+
+export async function fetchOperationLogs(query: PageQuery = {}) {
+  return (await fetchOperationLogsPage(query)).items
+}
+
+export async function fetchOperationLogsPage(query: PageQuery = {}): Promise<PageResult<OperationLog>> {
+  const { data } = await apiClient.get<unknown>('/api/admin/operation-logs', { params: cleanParams(query) })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return { ...page, items: page.items.map(normalizeOperationLog) }
 }
 
 function normalizeSettings(item: Record<string, unknown>): SystemSetting {

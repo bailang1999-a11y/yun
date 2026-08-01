@@ -131,7 +131,7 @@ import { RouterLink, useRoute } from 'vue-router'
 import WebShell from '../components/WebShell.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import EmptyState from '../components/EmptyState.vue'
-import { fetchGoodsDetail, fetchOrder, fetchOrderDelivery, fetchPaymentChannels, payOrder } from '../api/web'
+import { fetchGoodsDetail, fetchOrder, fetchOrderDelivery, fetchPaymentChannels, payOrder, payOrderViaGateway } from '../api/web'
 import { getApiErrorMessage } from '../api/client'
 import { useCatalogStore } from '../stores/catalog'
 import { useSessionStore } from '../stores/session'
@@ -155,6 +155,10 @@ let durationTimer: number | undefined
 const orderNo = computed(() => String(route.params.orderNo || ''))
 const canPay = computed(() => ['CREATED', 'PENDING_PAY', 'UNPAID'].includes((order.value?.status || '').toUpperCase()))
 const payMethodLabel = computed(() => paymentChannels.value.find((item) => item.code === payMethod.value)?.name || '支付')
+/** 外部网关支付（当前仅支付宝）：需要跳出站点付款，而非站内即时扣款。 */
+const isGatewayChannel = computed(() =>
+  (paymentChannels.value.find((item) => item.code === payMethod.value)?.type || '').toUpperCase() === 'ALIPAY'
+)
 const unfinishedPaidStatuses = new Set(['PAID', 'PROCURING', 'DELIVERING', 'WAITING_MANUAL'])
 const showPaidWaitingDelivery = computed(() => {
   const current = order.value
@@ -245,6 +249,17 @@ async function pay() {
   paying.value = true
   error.value = ''
   try {
+    // 支付宝等外部网关：后端只返回跳转地址，订单要等异步通知才会变成已支付。
+    // 回到本页时 focus / visibilitychange 监听会自动刷新状态，无需额外轮询。
+    if (isGatewayChannel.value) {
+      const { payUrl } = await payOrderViaGateway(orderNo.value, payMethod.value)
+      if (!payUrl) {
+        error.value = '支付宝下单失败，请稍后重试'
+        return
+      }
+      window.location.href = payUrl
+      return
+    }
     order.value = await payOrder(orderNo.value, payMethod.value)
     await session.ensureProfile({ force: true })
     await loadDelivery()

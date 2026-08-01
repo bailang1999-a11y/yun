@@ -2,6 +2,7 @@ package com.xiyiyun.shop.persistence;
 
 import com.xiyiyun.shop.mvp.OpenApiLogItem;
 import com.xiyiyun.shop.mvp.OperationLogItem;
+import com.xiyiyun.shop.mvp.PageSlice;
 import com.xiyiyun.shop.mvp.SmsLogItem;
 import com.xiyiyun.shop.persistence.entity.OpenApiLogRecordEntity;
 import com.xiyiyun.shop.persistence.entity.OperationLogRecordEntity;
@@ -49,14 +50,61 @@ public class AuditPersistenceStore {
         return operationLogRecordMapper.selectSnapshots().stream().map(this::toItem).toList();
     }
 
+    /**
+     * 批次8C：操作日志分页，{@code LIMIT/OFFSET} 与 {@code COUNT(*)} 都下推到 SQL。
+     *
+     * <p>count 与取数是两条独立 SQL，必须共用同一个 WHERE 并跑在同一个只读事务里：
+     * 审计表是高频只追加表，两条语句若落在不同事务，中间新写入的行会让
+     * total 与本页数据来自不同时刻，翻页时出现「总数 41 但第 5 页是空的」。
+     * 同一只读事务下 InnoDB 可重复读保证两者取自同一快照。
+     */
+    @Transactional(readOnly = true)
+    public PageSlice<OperationLogItem> pageOperationLogs(int limit, long offset) {
+        long total = operationLogRecordMapper.countSnapshots();
+        if (total <= offset) {
+            // 越界页不再查数据，但 total 如实返回，前端才能把页码收回有效范围。
+            return new PageSlice<>(List.of(), total);
+        }
+        return new PageSlice<>(
+            operationLogRecordMapper.selectSnapshotPage(limit, offset).stream().map(this::toItem).toList(),
+            total
+        );
+    }
+
     @Transactional(readOnly = true)
     public List<SmsLogItem> listSmsLogs() {
         return smsLogRecordMapper.selectSnapshots().stream().map(this::toItem).toList();
     }
 
+    /** 批次8C：短信日志分页。count 与取数同 WHERE、同只读事务，理由见 {@link #pageOperationLogs}。 */
+    @Transactional(readOnly = true)
+    public PageSlice<SmsLogItem> pageSmsLogs(int limit, long offset) {
+        long total = smsLogRecordMapper.countSnapshots();
+        if (total <= offset) {
+            return new PageSlice<>(List.of(), total);
+        }
+        return new PageSlice<>(
+            smsLogRecordMapper.selectSnapshotPage(limit, offset).stream().map(this::toItem).toList(),
+            total
+        );
+    }
+
     @Transactional(readOnly = true)
     public List<OpenApiLogItem> listOpenApiLogs() {
         return openApiLogRecordMapper.selectSnapshots().stream().map(this::toItem).toList();
+    }
+
+    /** 批次8C：开放接口日志分页。count 与取数同 WHERE、同只读事务，理由见 {@link #pageOperationLogs}。 */
+    @Transactional(readOnly = true)
+    public PageSlice<OpenApiLogItem> pageOpenApiLogs(int limit, long offset) {
+        long total = openApiLogRecordMapper.countSnapshots();
+        if (total <= offset) {
+            return new PageSlice<>(List.of(), total);
+        }
+        return new PageSlice<>(
+            openApiLogRecordMapper.selectSnapshotPage(limit, offset).stream().map(this::toItem).toList(),
+            total
+        );
     }
 
     private OperationLogRecordEntity toEntity(OperationLogItem item) {

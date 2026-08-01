@@ -20,5 +20,7 @@ public record UserItem(
     String realName,
     String subjectName,
     String certificateNo,
-    String verificationStatus
+    String verificationStatus,
+    /** 用户名（可选），仅小写字母/数字/下划线/连字符，最多12字符。null 表示未设置。 */
+    String username
 ) {}

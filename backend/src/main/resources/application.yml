@@ -7,6 +7,10 @@ spring:
       - org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
   application:
     name: xiyiyun-backend
+  task:
+    scheduling:
+      pool:
+        size: ${XIYIYUN_SCHEDULING_POOL_SIZE:5}
   datasource:
     url: jdbc:mysql://localhost:3306/xiyiyun?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai
     username: xiyiyun
@@ -35,9 +39,26 @@ xiyiyun:
     payment-timeout-minutes: 15
   payment:
     callback-secret: ${XIYIYUN_PAYMENT_CALLBACK_SECRET:xiyiyun_mock_payment_secret}
+    # 批次5 / B1：true = 只认 v2 签名串（必须带 amount/timestamp/nonce）。
+    # 过渡期默认 false，让已对接上游可继续用 v1；prod profile 会强制要求为 true。
+    callback-strict-signature: ${XIYIYUN_PAYMENT_CALLBACK_STRICT_SIGNATURE:false}
+    callback-timestamp-tolerance-seconds: ${XIYIYUN_PAYMENT_CALLBACK_TIMESTAMP_TOLERANCE_SECONDS:300}
+  login:
+    # 批次5 / B2：登录失败阶梯锁定与同 IP 频率限制
+    max-failures: ${XIYIYUN_LOGIN_MAX_FAILURES:5}
+    failure-window-seconds: ${XIYIYUN_LOGIN_FAILURE_WINDOW_SECONDS:900}
+    lock-seconds: ${XIYIYUN_LOGIN_LOCK_SECONDS:900}
+    max-lock-seconds: ${XIYIYUN_LOGIN_MAX_LOCK_SECONDS:3600}
+    ip-window-seconds: ${XIYIYUN_LOGIN_IP_WINDOW_SECONDS:300}
+    ip-max-attempts: ${XIYIYUN_LOGIN_IP_MAX_ATTEMPTS:30}
+    admin-captcha-required: ${XIYIYUN_LOGIN_ADMIN_CAPTCHA_REQUIRED:true}
   card:
     encryption-secret: ${XIYIYUN_CARD_ENCRYPTION_SECRET:xiyiyun_dev_card_secret}
   delivery:
     auto-refund-on-card-empty: false
+  agiso:
+    enabled: ${XIYIYUN_AGISO_ENABLED:false}
+    app-id: ${XIYIYUN_AGISO_APP_ID:}
+    app-secret: ${XIYIYUN_AGISO_APP_SECRET:}
   upload:
     dir: ${XIYIYUN_UPLOAD_DIR:uploads}

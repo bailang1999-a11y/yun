@@ -10,8 +10,9 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
-    "axios": "^1.15.2",
-    "echarts": "^6.0.0",
+    "altcha": "^3.2.1",
+    "axios": "^1.18.0",
+    "echarts": "^6.1.0",
     "element-plus": "^2.13.7",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.4",
@@ -23,7 +24,11 @@
     "@vitejs/plugin-vue": "^6.0.6",
     "@vue/tsconfig": "^0.9.1",
     "typescript": "~6.0.2",
-    "vite": "^8.0.10",
+    "vite": "^8.0.16",
     "vue-tsc": "^3.2.7"
+  },
+  "overrides": {
+    "form-data": "^4.0.6",
+    "postcss": "^8.5.18"
   }
 }

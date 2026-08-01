@@ -14,6 +14,7 @@ import {
   syncSupplierGoods,
   updateSupplier
 } from '../api/suppliers'
+import { fetchOutboundProtocolSettings } from '../api/outboundProtocols'
 import type { Goods, RemoteGoods, RemoteGoodsSyncResult, Supplier, SupplierCreatePayload } from '../types/operations'
 import { formatDateTime, formatMoney } from '../utils/formatters'
 
@@ -27,6 +28,13 @@ const FENGZHUSHOU_TEST_BASE_URL = 'http://test-www.phone580.net:9000'
 const CHENGQUAN_BASE_URL = 'https://api.chengquan.cn'
 const FANCHEN_BASE_URL = 'https://www.fanchenrj.cn'
 const JINGZHAO_BASE_URL = 'http://jingzhao.xhygo.cn'
+const callbackPaths: Partial<Record<string, string>> = {
+  FULU: '/api/upstream/fulu/callback/',
+  FENGZHUSHOU: '/api/upstream/fengzhushou/callback/',
+  CHENGQUAN: '/api/upstream/chengquan/callback/',
+  FANCHEN_RJ: '/api/upstream/fanchen/callback/',
+  JINGZHAO: '/api/upstream/jingzhao/callback/'
+}
 
 const platformOptions = [
   { label: '自定义供应商', value: 'CUSTOM' },
@@ -76,7 +84,7 @@ const fuluCapabilityGroups = [
 ]
 
 const fengzhushouCapabilityGroups = [
-  { group: '基础', items: ['接口签名校验', '超时按处理中'] },
+  { group: '基础', items: ['余额查询', '接口签名校验', '超时按处理中'] },
   { group: '商品', items: ['手动绑定 skuCode', '不支持商品列表', '不支持实时价格库存'] },
   { group: '订单', items: ['异步发货', '查询发货结果', '状态刷新'] },
   { group: '回调', items: ['发货结果通知', '失败回调重试'] }
@@ -104,6 +112,7 @@ const jingzhaoCapabilityGroups = [
 ]
 
 const suppliers = ref<Supplier[]>([])
+const publicApiBaseUrl = ref('')
 const goods = ref<Goods[]>([])
 const loading = ref(false)
 const saving = ref(false)
@@ -149,6 +158,20 @@ const isChengquanSelected = computed(() => form.platformType === 'CHENGQUAN')
 const isFanchenSelected = computed(() => form.platformType === 'FANCHEN_RJ')
 const isJingzhaoSelected = computed(() => form.platformType === 'JINGZHAO')
 const isIntegratedSelected = computed(() => isKasushouSelected.value || isKakayunSelected.value || isFuluSelected.value || isFengzhushouSelected.value || isChengquanSelected.value || isFanchenSelected.value || isJingzhaoSelected.value)
+const defaultCallbackUrl = computed(() => {
+  const path = callbackPaths[form.platformType || '']
+  const baseUrl = publicApiBaseUrl.value.trim().replace(/\/+$/, '')
+  if (!path || !baseUrl) return ''
+  return `${baseUrl}${path}${editingSupplierId.value || '{供应商ID}'}`
+})
+const callbackUrlValue = computed({
+  get: () => form.callbackUrl?.trim() || defaultCallbackUrl.value,
+  set: (value: string) => {
+    const normalized = value.trim()
+    form.callbackUrl = normalized === defaultCallbackUrl.value ? '' : normalized
+  }
+})
+const callbackUrlPlaceholder = computed(() => defaultCallbackUrl.value || '可选：填写供应商专属回调地址')
 const currentCapabilityGroups = computed(() => {
   if (isJingzhaoSelected.value) return jingzhaoCapabilityGroups
   if (isFanchenSelected.value) return fanchenCapabilityGroups
@@ -208,6 +231,7 @@ const formSubtitle = computed(() => (editingSupplierId.value ? '更新渠道参�
 onMounted(() => {
   void loadSuppliers()
   void loadBindingGoods()
+  void loadPublicApiBaseUrl()
 })
 
 watch(
@@ -243,6 +267,15 @@ async function loadBindingGoods() {
     if (!bindingGoodsId.value) bindingGoodsId.value = directGoods.value[0]?.id ?? ''
   } catch {
     ElMessage.error('本地商品列表加载失败')
+  }
+}
+
+async function loadPublicApiBaseUrl() {
+  try {
+    const settings = await fetchOutboundProtocolSettings()
+    publicApiBaseUrl.value = settings.baseUrl || ''
+  } catch {
+    ElMessage.error('公共 API 域名加载失败')
   }
 }
 
@@ -407,7 +440,7 @@ function supplierPayload() {
       userId: isIntegratedSelected.value ? normalizedIdentity : form.userId?.trim(),
       appId: normalizedIdentity,
       apiKey: isIntegratedSelected.value ? normalizedSecret : form.apiKey?.trim(),
-      callbackUrl: isKasushouSelected.value ? '' : form.callbackUrl?.trim(),
+      callbackUrl: form.callbackUrl?.trim(),
       timeoutSeconds: normalizedTimeoutSeconds,
       remark: form.remark?.trim(),
       integrationConfig: isIntegratedSelected.value
@@ -416,7 +449,7 @@ function supplierPayload() {
             baseUrl: form.baseUrl.trim(),
             userId: normalizedIdentity,
             appId: normalizedIdentity,
-            callbackUrl: isKasushouSelected.value ? '' : form.callbackUrl?.trim(),
+            callbackUrl: form.callbackUrl?.trim(),
             timeoutSeconds: normalizedTimeoutSeconds
           }
         : undefined
@@ -584,23 +617,8 @@ async function removeSupplier(row: Supplier) {
               <el-input v-model="form.apiKey" type="password" show-password placeholder="用于签名，保存后仅脱敏展示" />
             </el-form-item>
           </div>
-          <el-form-item v-if="isKakayunSelected" label="订单回调地址">
-            <el-input v-model="form.callbackUrl" placeholder="可选：卡卡云订单状态回调地址" />
-          </el-form-item>
-          <el-form-item v-if="isFuluSelected" label="订单回调地址">
-            <el-input v-model="form.callbackUrl" placeholder="可选：例如 https://你的域名/api/upstream/fulu/callback/{供应商ID}" />
-          </el-form-item>
-          <el-form-item v-if="isFengzhushouSelected" label="发货结果通知地址">
-            <el-input v-model="form.callbackUrl" placeholder="可选：例如 https://你的域名/api/upstream/fengzhushou/callback/{供应商ID}" />
-          </el-form-item>
-          <el-form-item v-if="isChengquanSelected" label="订单通知地址">
-            <el-input v-model="form.callbackUrl" placeholder="可选：例如 https://你的域名/api/upstream/chengquan/callback/{供应商ID}" />
-          </el-form-item>
-          <el-form-item v-if="isFanchenSelected" label="订单回调地址">
-            <el-input v-model="form.callbackUrl" placeholder="可选：例如 https://你的域名/api/upstream/fanchen/callback/{供应商ID}" />
-          </el-form-item>
-          <el-form-item v-if="isJingzhaoSelected" label="订单通知地址">
-            <el-input v-model="form.callbackUrl" placeholder="可选：例如 https://你的域名/api/upstream/jingzhao/callback/{供应商ID}" />
+          <el-form-item label="订单通知地址">
+            <el-input v-model="callbackUrlValue" clearable :placeholder="callbackUrlPlaceholder" />
           </el-form-item>
           <p v-if="isKakayunSelected" class="form-tip">测试地址：{{ KAKAYUN_TEST_BASE_URL }}；正式地址默认使用上方固定网关，也可按你的卡卡云配置调整。</p>
           <p v-if="isFuluSelected" class="form-tip">沙箱地址：{{ FULU_SANDBOX_BASE_URL }}；福禄不提供商品列表，商品对接时请手动填写 product_id。</p>

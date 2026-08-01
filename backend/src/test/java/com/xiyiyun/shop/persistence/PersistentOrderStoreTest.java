@@ -53,7 +53,27 @@ class PersistentOrderStoreTest {
         ArgumentCaptor<OrderRecordEntity> captor = ArgumentCaptor.forClass(OrderRecordEntity.class);
         verify(orderRecordMapper).upsertByOrderNo(captor.capture());
         assertThat(captor.getValue().getOrderNo()).isEqualTo("ORD-1");
+        assertThat(captor.getValue().getBuyerAccount()).isEqualTo("buyer");
         assertThat(saved.getId()).isEqualTo(101L);
+    }
+
+    @Test
+    void saveOrderSnapshotRegistersTheMemberCallbackOutboxInTheSameCall() {
+        MemberOrderCallbackTaskStore callbackTaskStore = mock(MemberOrderCallbackTaskStore.class);
+        PersistentOrderStore callbackStore = new PersistentOrderStore(
+            orderRecordMapper,
+            paymentRecordMapper,
+            paymentCallbackLogMapper,
+            refundRecordMapper,
+            cardRecordMapper,
+            cardCipherService,
+            callbackTaskStore
+        );
+        when(orderRecordMapper.findIdByOrderNo("ORD-1")).thenReturn(101L);
+
+        callbackStore.saveOrderSnapshot(order());
+
+        verify(callbackTaskStore).registerTerminalOrder(any(OrderItem.class));
     }
 
     @Test
@@ -65,6 +85,7 @@ class PersistentOrderStoreTest {
 
         assertThat(orders).hasSize(1);
         assertThat(orders.get(0).orderNo()).isEqualTo("ORD-1");
+        assertThat(orders.get(0).buyerAccount()).isEqualTo("buyer");
         assertThat(orders.get(0).paymentNo()).isEqualTo("PAY-1");
         assertThat(orders.get(0).payMethod()).isEqualTo("balance");
     }
@@ -261,6 +282,7 @@ class PersistentOrderStoreTest {
         OrderRecordEntity record = new OrderRecordEntity();
         record.setOrderNo(orderNo);
         record.setUserId(9L);
+        record.setBuyerAccount("buyer");
         record.setGoodsId(11L);
         record.setGoodsName("Tencent Card");
         record.setGoodsType("CARD");

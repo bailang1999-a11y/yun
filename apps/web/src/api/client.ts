@@ -6,7 +6,7 @@ export const tokenKey = 'xiyiyun_web_token'
 
 export const apiClient = axios.create({
   baseURL: configuredBaseUrl && configuredBaseUrl !== '/api' ? configuredBaseUrl : sameOriginBaseUrl,
-  timeout: 9000
+  timeout: 20000
 })
 
 apiClient.interceptors.request.use((config) => {
@@ -27,4 +27,26 @@ export function getApiErrorMessage(error: unknown) {
   }
   if (error instanceof Error && error.message) return error.message
   return '请求失败，请稍后重试。'
+}
+
+export function isAmbiguousRequestError(error: unknown) {
+  if (!(error instanceof AxiosError)) return false
+  return !error.response || ['ECONNABORTED', 'ETIMEDOUT', 'ERR_NETWORK'].includes(error.code || '')
+}
+
+export function isNotFoundError(error: unknown) {
+  if (error instanceof AxiosError) {
+    if (error.response?.status === 404) return true
+    if (error.response?.status) return false
+  }
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /not found|不存在|已下架|已删除/i.test(message)
+}
+
+export function isAuthenticationError(error: unknown) {
+  if (error instanceof AxiosError) {
+    return error.response?.status === 401 || error.response?.status === 403
+  }
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /unauthorized|forbidden|登录(?:已)?失效|请(?:先)?登录/i.test(message)
 }

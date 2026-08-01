@@ -14,6 +14,7 @@ import {
   MessageSquareText,
   KeyRound,
   ScanLine,
+  Share2,
   ShieldCheck,
   Settings,
   ShoppingCart,
@@ -23,6 +24,7 @@ import {
   WalletCards
 } from 'lucide-vue-next'
 import { fetchAdminMe, updateSuperAdminCredentials } from '../api/auth'
+import { isAdminAuthenticationError } from '../api/client'
 import type { AdminCredentialPayload, AdminProfile } from '../types/operations'
 import { formatMoney as formatAmount } from '../utils/formatters'
 
@@ -45,6 +47,7 @@ const navItems = [
   { icon: BarChart3, label: '仪表盘', name: 'dashboard', permission: 'dashboard:read' },
   { icon: PlugZap, label: '供应商管理', name: 'suppliers', permission: 'goods:manage' },
   { icon: PackageCheck, label: '货源对接', name: 'source-connect', permission: 'goods:manage' },
+  { icon: Share2, label: '对外供货', name: 'outbound-protocols', permission: 'goods:manage' },
   { icon: Activity, label: '上游监控', name: 'upstream-monitor', permission: 'goods:manage' },
   { icon: ScanLine, label: '商品监控', name: 'goods-monitor', permission: 'goods:manage' },
   { icon: CreditCard, label: '支付通道', name: 'payment-channels', permission: 'settings:manage' },
@@ -86,11 +89,14 @@ watch(
 onMounted(async () => {
   try {
     profile.value = await fetchAdminMe()
-  } catch {
-    localStorage.removeItem('xiyiyun_admin_token')
-    profile.value = null
-    void router.replace({ name: 'login' })
-    return
+  } catch (error) {
+    if (isAdminAuthenticationError(error)) {
+      localStorage.removeItem('xiyiyun_admin_token')
+      profile.value = null
+      void router.replace({ name: 'login' })
+      return
+    }
+    ElMessage.error('账号资料加载失败，请检查网络后重试')
   } finally {
     sessionReady.value = true
   }

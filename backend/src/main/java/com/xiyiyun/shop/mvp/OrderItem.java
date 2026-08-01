@@ -5,6 +5,7 @@ import com.xiyiyun.shop.OrderStatus;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 
 public record OrderItem(
     String orderNo,
@@ -21,6 +22,7 @@ public record OrderItem(
     BigDecimal payAmount,
     OrderStatus status,
     String rechargeAccount,
+    Map<String, String> rechargeFields,
     String buyerRemark,
     String requestId,
     String paymentNo,
@@ -30,8 +32,96 @@ public record OrderItem(
     String deliveryMessage,
     OffsetDateTime createdAt,
     OffsetDateTime paidAt,
-    OffsetDateTime deliveredAt
+    OffsetDateTime deliveredAt,
+    String upstreamOrderNo
 ) {
+    public OrderItem {
+        rechargeFields = rechargeFields == null ? Map.of() : Map.copyOf(rechargeFields);
+        upstreamOrderNo = upstreamOrderNo == null ? "" : upstreamOrderNo.trim();
+    }
+
+    /**
+     * 批次3(A4)：兼容原 26 参构造，upstreamOrderNo 默认空串。
+     * 保证既有调用点（含测试）零改动，只有真正拿到上游订单号的路径才调用 {@link #withUpstreamOrderNo(String)}。
+     */
+    public OrderItem(
+        String orderNo,
+        Long userId,
+        String buyerAccount,
+        Long goodsId,
+        String goodsName,
+        GoodsType goodsType,
+        String platform,
+        String orderIp,
+        String orderIpLocation,
+        Integer quantity,
+        BigDecimal unitPrice,
+        BigDecimal payAmount,
+        OrderStatus status,
+        String rechargeAccount,
+        Map<String, String> rechargeFields,
+        String buyerRemark,
+        String requestId,
+        String paymentNo,
+        String payMethod,
+        List<String> deliveryItems,
+        List<ChannelAttemptItem> channelAttempts,
+        String deliveryMessage,
+        OffsetDateTime createdAt,
+        OffsetDateTime paidAt,
+        OffsetDateTime deliveredAt
+    ) {
+        this(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            ""
+        );
+    }
+
+    /** 批次3(A4)：记录上游订单号，用于超时未知场景的对账与幂等补单。 */
+    public OrderItem withUpstreamOrderNo(String nextUpstreamOrderNo) {
+        return new OrderItem(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            nextUpstreamOrderNo
+        );
+    }
+
+    public OrderItem(
+        String orderNo,
+        Long userId,
+        String buyerAccount,
+        Long goodsId,
+        String goodsName,
+        GoodsType goodsType,
+        String platform,
+        String orderIp,
+        String orderIpLocation,
+        Integer quantity,
+        BigDecimal unitPrice,
+        BigDecimal payAmount,
+        OrderStatus status,
+        String rechargeAccount,
+        String buyerRemark,
+        String requestId,
+        String paymentNo,
+        String payMethod,
+        List<String> deliveryItems,
+        List<ChannelAttemptItem> channelAttempts,
+        String deliveryMessage,
+        OffsetDateTime createdAt,
+        OffsetDateTime paidAt,
+        OffsetDateTime deliveredAt
+    ) {
+        this(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, Map.of(), buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt
+        );
+    }
+
     public OrderItem(
         String orderNo,
         Long userId,
@@ -71,6 +161,7 @@ public record OrderItem(
             payAmount,
             status,
             rechargeAccount,
+            Map.of(),
             buyerRemark,
             requestId,
             paymentNo,
@@ -101,6 +192,7 @@ public record OrderItem(
             payAmount,
             nextStatus,
             rechargeAccount,
+            rechargeFields,
             buyerRemark,
             requestId,
             paymentNo,
@@ -110,7 +202,8 @@ public record OrderItem(
             nextDeliveryMessage,
             createdAt,
             paidAt,
-            resolvedDeliveredAt
+            resolvedDeliveredAt,
+            upstreamOrderNo
         );
     }
 
@@ -138,6 +231,7 @@ public record OrderItem(
             payAmount,
             nextStatus,
             rechargeAccount,
+            rechargeFields,
             buyerRemark,
             requestId,
             paymentNo,
@@ -147,7 +241,8 @@ public record OrderItem(
             nextDeliveryMessage,
             createdAt,
             nextPaidAt,
-            resolvedDeliveredAt
+            resolvedDeliveredAt,
+            upstreamOrderNo
         );
     }
 
@@ -177,6 +272,7 @@ public record OrderItem(
             payAmount,
             status,
             rechargeAccount,
+            rechargeFields,
             buyerRemark,
             requestId,
             nextPaymentNo,
@@ -186,7 +282,8 @@ public record OrderItem(
             deliveryMessage,
             createdAt,
             paidAt,
-            deliveredAt
+            deliveredAt,
+            upstreamOrderNo
         );
     }
 }

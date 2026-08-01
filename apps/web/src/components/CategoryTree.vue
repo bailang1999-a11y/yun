@@ -14,12 +14,13 @@
       </div>
 
       <nav class="root-tabs" aria-label="一级分类">
-        <button type="button" :class="{ active: !catalog.activeCategoryId }" @click="selectAll">全部商品</button>
+        <button type="button" :class="{ active: !catalog.activeCategoryId }" :disabled="catalog.loading" @click="selectAll">全部商品</button>
         <button
           v-for="item in catalog.rootCategories"
           :key="item.id"
           type="button"
           :class="{ active: selectedRoot?.id === item.id && catalog.activeCategoryId }"
+          :disabled="catalog.loading"
           @click="selectRoot(item)"
         >
           {{ item.name }}
@@ -43,14 +44,15 @@
             type="button"
             class="category-icon-card"
             :class="{ active: isPathActive(item.id) }"
-            @click="catalog.activeCategoryId = item.id"
+            :disabled="catalog.loading"
+            @click="catalog.selectCategory(item.id)"
           >
-            <span class="icon-bubble">
-              <component :is="iconForCategory(item.name)" :size="26" />
+            <span class="icon-bubble" :class="{ 'has-image': item.iconUrl }">
+              <img v-if="item.iconUrl" :src="item.iconUrl" :alt="`${item.name}图标`" />
+              <component v-else :is="iconForCategory(item.name)" :size="26" />
             </span>
             <strong>{{ item.name }}</strong>
             <em>{{ catalog.childrenOf(item.id).length ? `${catalog.childrenOf(item.id).length} 个子类` : `第 ${item.level || level.level} 级` }}</em>
-            <small data-enabled="true">启用</small>
           </button>
           <div v-if="!level.nodes.length" class="category-empty">暂无下级分类</div>
         </div>
@@ -82,11 +84,11 @@ const selectedCategoryName = computed(() => {
 })
 
 function selectAll() {
-  catalog.activeCategoryId = ''
+  void catalog.selectCategory('')
 }
 
 function selectRoot(item: CategoryItem) {
-  catalog.activeCategoryId = item.id
+  void catalog.selectCategory(item.id)
 }
 
 function hasDescendant(parentId: string, targetId: string): boolean {

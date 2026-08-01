@@ -355,6 +355,11 @@ export interface ProductMonitorLog {
 export interface ProductMonitorOverview {
   items: ProductMonitorItem[]
   logs: ProductMonitorLog[]
+  total: number
+  page: number
+  pageSize: number
+  activeTotal: number
+  logTotal: number
 }
 
 export interface CardImportItem {
@@ -674,6 +679,7 @@ export interface CaptchaSetting {
   tencentConfig: Record<string, string>
   turnstileConfig: Record<string, string>
   genericConfig: Record<string, string>
+  altchaConfig?: Record<string, string>
 }
 
 export interface CaptchaSettingPayload extends CaptchaSetting {}
@@ -700,6 +706,7 @@ export interface MemberApiCredential {
   userId: number | string
   appKey: string
   appSecret: string
+  callbackUrl: string
   status: string
   ipWhitelist: string[]
   dailyLimit: number
@@ -711,6 +718,7 @@ export interface MemberApiCredentialPayload {
   enabled: boolean
   appKey: string
   appSecret?: string
+  callbackUrl?: string
   resetSecret?: boolean
   ipWhitelist: string[]
   dailyLimit: number

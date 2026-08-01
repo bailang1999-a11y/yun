@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { RefreshCw } from 'lucide-vue-next'
 import {
   fetchMemberApiCredentials,
-  fetchOpenApiLogs
+  fetchOpenApiLogsPage
 } from '../api/users'
 import {
-  fetchOperationLogs,
-  fetchPayments,
-  fetchRefunds,
-  fetchSmsLogs
+  fetchOperationLogsPage,
+  fetchPaymentsPage,
+  fetchRefundsPage,
+  fetchSmsLogsPage
 } from '../api/operations'
 import type { MemberApiCredential, OpenApiLog, OperationLog, PaymentRecord, RefundRecord, SmsLog } from '../types/operations'
 import { formatMoney } from '../utils/formatters'
@@ -23,6 +23,14 @@ const smsLogs = ref<SmsLog[]>([])
 const operationLogs = ref<OperationLog[]>([])
 const credentials = ref<MemberApiCredential[]>([])
 const openApiLogs = ref<OpenApiLog[]>([])
+const pageState = reactive({
+  payments: { page: 1, pageSize: 10, total: 0 },
+  refunds: { page: 1, pageSize: 10, total: 0 },
+  sms: { page: 1, pageSize: 10, total: 0 },
+  ops: { page: 1, pageSize: 10, total: 0 },
+  api: { page: 1, pageSize: 10, total: 0 }
+})
+const activePagination = computed(() => pageState[activeTab.value as keyof typeof pageState])
 
 onMounted(loadAll)
 
@@ -30,24 +38,34 @@ async function loadAll() {
   loading.value = true
   try {
     const [nextPayments, nextRefunds, nextSmsLogs, nextOperationLogs, nextCredentials, nextOpenApiLogs] = await Promise.all([
-      fetchPayments(),
-      fetchRefunds(),
-      fetchSmsLogs(),
-      fetchOperationLogs(),
+      fetchPaymentsPage(pageState.payments),
+      fetchRefundsPage(pageState.refunds),
+      fetchSmsLogsPage(pageState.sms),
+      fetchOperationLogsPage(pageState.ops),
       fetchMemberApiCredentials(),
-      fetchOpenApiLogs()
+      fetchOpenApiLogsPage(pageState.api)
     ])
-    payments.value = nextPayments
-    refunds.value = nextRefunds
-    smsLogs.value = nextSmsLogs
-    operationLogs.value = nextOperationLogs
+    payments.value = nextPayments.items
+    refunds.value = nextRefunds.items
+    smsLogs.value = nextSmsLogs.items
+    operationLogs.value = nextOperationLogs.items
     credentials.value = nextCredentials
-    openApiLogs.value = nextOpenApiLogs
+    openApiLogs.value = nextOpenApiLogs.items
+    pageState.payments.total = nextPayments.total
+    pageState.refunds.total = nextRefunds.total
+    pageState.sms.total = nextSmsLogs.total
+    pageState.ops.total = nextOperationLogs.total
+    pageState.api.total = nextOpenApiLogs.total
   } catch {
     ElMessage.error('审计数据加载失败')
   } finally {
     loading.value = false
   }
+}
+
+function handlePageChange(page: number) {
+  activePagination.value.page = page
+  void loadAll()
 }
 
 </script>
@@ -122,6 +140,16 @@ async function loadAll() {
         </el-table>
       </section>
     </template>
+    <div class="table-pagination">
+      <el-pagination
+        background
+        layout="prev, pager, next, total"
+        :current-page="activePagination.page"
+        :page-size="activePagination.pageSize"
+        :total="activePagination.total"
+        @current-change="handlePageChange"
+      />
+    </div>
   </article>
 </template>
 
@@ -179,5 +207,11 @@ h2 {
 .api-grid {
   display: grid;
   gap: 14px;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
 }
 </style>

@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, LoaderCircle, ShieldCheck } from 'lucide-vue-next'
-import { getApiErrorMessage } from '../api/client'
-import { createH5Order, fetchH5GoodsDetail, fetchH5RechargeFields } from '../api/h5'
+import { getApiErrorMessage, isAmbiguousRequestError } from '../api/client'
+import { createH5Order, fetchH5GoodsDetail, fetchH5OrderByRequestId, fetchH5RechargeFields } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
-import type { GoodsCard, GoodsType, RechargeField } from '../types/h5'
+import type { CreateOrderPayload, GoodsCard, GoodsType, H5Order, RechargeField } from '../types/h5'
 import { formatMoney } from '../utils/formatters'
+import { useModalFocus } from '../utils/modalFocus'
+import { clearPendingOrderRequest, getPendingOrderRequestId } from '../utils/pendingOrderRequest'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,9 +18,13 @@ const goods = ref<GoodsCard | null>(null)
 const rechargeFields = ref<RechargeField[]>([])
 const loading = ref(false)
 const creating = ref(false)
+const confirmingOrder = ref(false)
 const errorMessage = ref('')
 const restrictionDialogMessage = ref('')
+const restrictionDialogRef = ref<HTMLElement | null>(null)
+useModalFocus(computed(() => Boolean(restrictionDialogMessage.value)), restrictionDialogRef, closeRestrictionDialog)
 const rechargeAccount = ref('')
+const rechargeValues = reactive<Record<string, string>>({})
 const quantity = ref(1)
 
 const typeLabel: Record<GoodsType, string> = {
@@ -31,14 +37,9 @@ const totalAmount = computed(() => (goods.value ? goods.value.price * quantity.v
 const selectedRechargeFields = computed(() => {
   if (!goods.value?.accountTypes?.length) return []
   const selectedCodes = new Set(goods.value.accountTypes)
-  return rechargeFields.value.filter((item) => selectedCodes.has(item.code))
-})
-const primaryRechargeField = computed(() => selectedRechargeFields.value[0])
-const rechargeAccountLabel = computed(() => primaryRechargeField.value?.label || '充值账号')
-const rechargeAccountPlaceholder = computed(() => {
-  if (primaryRechargeField.value?.placeholder) return primaryRechargeField.value.placeholder
-  if (selectedRechargeFields.value.length) return `请输入${selectedRechargeFields.value.map((item) => item.label).join(' / ')}`
-  return '手机号 / QQ / 游戏账号'
+  return rechargeFields.value
+    .filter((item) => selectedCodes.has(item.code))
+    .sort((left, right) => left.sort - right.sort)
 })
 const forbiddenPlatformText = computed(() => {
   const platforms = goods.value?.forbiddenPlatforms || []
@@ -128,11 +129,30 @@ async function createOrder() {
     restrictionDialogMessage.value = purchaseRestrictionReason.value
     return
   }
-  if (goods.value.requireRechargeAccount && !rechargeAccount.value.trim()) {
+  const missingField = selectedRechargeFields.value.find((field) => field.required && !rechargeValues[field.code]?.trim())
+  if (missingField) {
+    errorMessage.value = `请先填写${missingField.label || '充值信息'}。`
+    return
+  }
+  const invalidField = selectedRechargeFields.value.find((field) => {
+    const value = rechargeValues[field.code]?.trim() || ''
+    return value && !accountMatches(field.inputType, value)
+  })
+  if (invalidField) {
+    errorMessage.value = `请输入正确的${invalidField.label || '充值信息'}。`
+    return
+  }
+  const structuredRechargeFields = Object.fromEntries(
+    selectedRechargeFields.value
+      .map((field) => [field.code, rechargeValues[field.code]?.trim() || ''] as const)
+      .filter(([, value]) => value)
+  )
+  const account = Object.values(structuredRechargeFields)[0] || rechargeAccount.value.trim()
+  if (goods.value.requireRechargeAccount && !account) {
     errorMessage.value = '请先填写充值账号。'
     return
   }
-  const validationMessage = validateRechargeAccount(rechargeAccount.value.trim())
+  const validationMessage = validateRechargeAccount(account)
   if (validationMessage) {
     errorMessage.value = validationMessage
     return
@@ -142,13 +162,20 @@ async function createOrder() {
   errorMessage.value = ''
 
   try {
-    const order = await createH5Order({
+    const orderPayload: Omit<CreateOrderPayload, 'requestId'> = {
       goodsId: goods.value.id,
       quantity: quantity.value,
-      rechargeAccount: rechargeAccount.value.trim() || undefined,
-      requestId: `h5_${Date.now()}_${goods.value.id}`,
+      rechargeAccount: account || undefined,
+      rechargeFields: structuredRechargeFields,
       terminal: 'h5'
-    })
+    }
+    const requestId = await getPendingOrderRequestId(orderPayload)
+    const order = await createOrderWithRecovery({ ...orderPayload, requestId })
+    if (!order) {
+      errorMessage.value = '订单结果暂未确认，请稍后重试或在我的订单中查看。'
+      return
+    }
+    clearPendingOrderRequest('h5', requestId)
     await router.push({ path: `/checkout/${order.orderNo}` })
   } catch (error) {
     const message = getApiErrorMessage(error)
@@ -157,6 +184,52 @@ async function createOrder() {
   } finally {
     creating.value = false
   }
+}
+
+async function createOrderWithRecovery(payload: CreateOrderPayload): Promise<H5Order | null> {
+  try {
+    return await createH5Order(payload)
+  } catch (error) {
+    if (!isAmbiguousRequestError(error)) {
+      clearPendingOrderRequest('h5', payload.requestId)
+      throw error
+    }
+  }
+
+  const recovered = await confirmCreatedOrder(payload.requestId)
+  if (recovered) return recovered
+
+  try {
+    return await createH5Order(payload)
+  } catch (error) {
+    if (!isAmbiguousRequestError(error)) {
+      clearPendingOrderRequest('h5', payload.requestId)
+      throw error
+    }
+    return confirmCreatedOrder(payload.requestId)
+  }
+}
+
+async function confirmCreatedOrder(requestId: string): Promise<H5Order | null> {
+  confirmingOrder.value = true
+  try {
+    for (const delay of [0, 400, 800, 1600]) {
+      if (delay) await wait(delay)
+      try {
+        const order = await fetchH5OrderByRequestId(requestId)
+        if (order) return order
+      } catch {
+        // A failed confirmation is inconclusive; the same requestId is retried below.
+      }
+    }
+    return null
+  } finally {
+    confirmingOrder.value = false
+  }
+}
+
+function wait(delay: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, delay))
 }
 
 function platformLabel(value: string) {
@@ -177,10 +250,8 @@ function platformLabel(value: string) {
 }
 
 function validateRechargeAccount(value: string) {
-  if (!goods.value?.requireRechargeAccount || !value || !selectedRechargeFields.value.length) return ''
-  const matched = selectedRechargeFields.value.some((field) => accountMatches(field.inputType, value))
-  if (matched) return ''
-  return `请输入正确的${selectedRechargeFields.value.map((item) => item.label).join(' / ')}`
+  if (!goods.value?.requireRechargeAccount || !value || selectedRechargeFields.value.length) return ''
+  return value.trim() ? '' : '请填写充值账号。'
 }
 
 function accountMatches(inputType: string, value: string) {
@@ -201,6 +272,10 @@ function accountMatches(inputType: string, value: string) {
       return value.trim().length > 0
   }
 }
+
+function closeRestrictionDialog() {
+  restrictionDialogMessage.value = ''
+}
 </script>
 
 <template>
@@ -214,7 +289,7 @@ function accountMatches(inputType: string, value: string) {
       <LoaderCircle class="spin" :size="18" />
       正在加载商品
     </section>
-    <section v-else-if="errorMessage" class="notice danger">{{ errorMessage }}</section>
+    <section v-else-if="errorMessage" class="notice danger" role="alert">{{ errorMessage }}</section>
 
     <template v-if="goods">
       <section class="product-hero liquid-surface">
@@ -253,9 +328,24 @@ function accountMatches(inputType: string, value: string) {
           </div>
         </div>
 
-        <label v-if="goods.requireRechargeAccount" class="account-field">
-          <span>{{ rechargeAccountLabel }}</span>
-          <input v-model.trim="rechargeAccount" :placeholder="rechargeAccountPlaceholder" />
+        <div v-if="selectedRechargeFields.length" class="account-fields">
+          <label v-for="field in selectedRechargeFields" :key="field.id || field.code" class="account-field">
+            <span>{{ field.label || '充值信息' }}<b v-if="field.required"> *</b></span>
+            <input
+              :id="`h5-recharge-field-${field.code}`"
+              v-model.trim="rechargeValues[field.code]"
+              :type="field.inputType === 'email' ? 'email' : field.inputType === 'number' ? 'number' : 'text'"
+              :inputmode="['mobile', 'qq', 'number'].includes(field.inputType) ? 'numeric' : undefined"
+              :placeholder="field.placeholder || `请输入${field.label || '充值信息'}`"
+              :required="field.required"
+              :aria-describedby="field.helpText ? `h5-recharge-help-${field.code}` : undefined"
+            />
+            <small v-if="field.helpText" :id="`h5-recharge-help-${field.code}`">{{ field.helpText }}</small>
+          </label>
+        </div>
+        <label v-else-if="goods.requireRechargeAccount" class="account-field">
+          <span>充值账号</span>
+          <input v-model.trim="rechargeAccount" placeholder="手机号 / QQ / 游戏账号" required />
         </label>
 
         <div class="service-line">
@@ -277,7 +367,7 @@ function accountMatches(inputType: string, value: string) {
 
         <button class="primary-action" type="button" :disabled="buyDisabled" @click="createOrder">
           <span v-if="creating" class="blue-swirl" />
-          {{ creating ? '生成订单中' : purchaseRestrictionReason ? '暂无法购买' : '立即购买' }}
+          {{ creating ? (confirmingOrder ? '正在确认订单' : '生成订单中') : purchaseRestrictionReason ? '暂无法购买' : '立即购买' }}
         </button>
       </section>
 
@@ -290,12 +380,20 @@ function accountMatches(inputType: string, value: string) {
     <AppTabbar />
 
     <Teleport to="body">
-      <div v-if="restrictionDialogMessage" class="limit-dialog" role="dialog" aria-modal="true">
+      <div
+        v-if="restrictionDialogMessage"
+        ref="restrictionDialogRef"
+        class="limit-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="h5-restriction-dialog-title"
+        tabindex="-1"
+      >
         <div class="limit-dialog-card">
           <span>下单限制</span>
-          <strong>暂无法购买该商品</strong>
+          <strong id="h5-restriction-dialog-title">暂无法购买该商品</strong>
           <p>{{ restrictionDialogMessage }}</p>
-          <button type="button" @click="restrictionDialogMessage = ''">我知道了</button>
+          <button type="button" @click="closeRestrictionDialog">我知道了</button>
         </div>
       </div>
     </Teleport>
@@ -516,10 +614,24 @@ h1 {
   text-align: center;
 }
 
+.account-fields,
 .account-field {
   display: grid;
   gap: 8px;
   margin-top: 14px;
+}
+
+.account-fields .account-field {
+  margin-top: 0;
+}
+
+.account-field b {
+  color: #ff9da7;
+}
+
+.account-field small {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 12px;
 }
 
 .account-field input {

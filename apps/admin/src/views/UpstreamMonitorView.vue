@@ -15,6 +15,7 @@ const syncing = ref(false)
 const operating = ref(false)
 const lastSyncedAt = ref('')
 const liveFlash = ref(false)
+const balanceSyncProgress = ref('')
 let unsubscribeRealtime: (() => void) | undefined
 let flashTimer: number | undefined
 
@@ -78,13 +79,26 @@ async function loadMonitor(options: { silent?: boolean } = {}) {
 
 async function syncAllBalances() {
   operating.value = true
+  balanceSyncProgress.value = ''
+  const failed: string[] = []
   try {
-    await Promise.all(suppliers.value.map((supplier) => refreshSupplierBalance(supplier.id)))
-    ElMessage.success('供应商余额已同步')
+    for (let index = 0; index < suppliers.value.length; index += 1) {
+      const supplier = suppliers.value[index]
+      balanceSyncProgress.value = `${index + 1}/${suppliers.value.length}`
+      try {
+        await refreshSupplierBalance(supplier.id)
+      } catch (error) {
+        failed.push(supplier.name || String(supplier.id))
+      }
+    }
+    if (failed.length) {
+      ElMessage.warning(`余额同步完成，失败 ${failed.length} 个：${failed.slice(0, 3).join('、')}`)
+    } else {
+      ElMessage.success('供应商余额已同步')
+    }
     await loadMonitor()
-  } catch {
-    ElMessage.error('同步失败')
   } finally {
+    balanceSyncProgress.value = ''
     operating.value = false
   }
 }
@@ -110,7 +124,9 @@ function triggerFlash() {
           <i :class="{ pulse: syncing || liveFlash }" />
           {{ syncing ? '实时同步中' : lastSyncedAt ? `已同步 ${lastSyncedAt}` : '实时监听中' }}
         </span>
-        <el-button :icon="RotateCw" :loading="operating" @click="syncAllBalances">全量同步余额</el-button>
+        <el-button :icon="RotateCw" :loading="operating" @click="syncAllBalances">
+          {{ operating && balanceSyncProgress ? `同步余额 ${balanceSyncProgress}` : '全量同步余额' }}
+        </el-button>
         <el-button :icon="RefreshCw" :loading="loading || syncing" @click="() => loadMonitor()">刷新</el-button>
       </div>
     </div>

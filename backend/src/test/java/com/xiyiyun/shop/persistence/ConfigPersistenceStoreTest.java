@@ -36,6 +36,8 @@ class ConfigPersistenceStoreTest {
     private final GroupRuleRecordMapper groupRuleRecordMapper = mock(GroupRuleRecordMapper.class);
     private final SystemSettingRecordMapper systemSettingRecordMapper = mock(SystemSettingRecordMapper.class);
     private final CardCipherService cardCipherService = new CardCipherService("test-card-secret");
+    /** 批次7：007 新配置表的读写出口，本用例只验证它被原样转交。 */
+    private final ConfigTableStore configTableStore = mock(ConfigTableStore.class);
     private final ConfigPersistenceStore store = new ConfigPersistenceStore(
         cardKindRecordMapper,
         rechargeFieldRecordMapper,
@@ -44,8 +46,14 @@ class ConfigPersistenceStoreTest {
         userGroupRecordMapper,
         groupRuleRecordMapper,
         systemSettingRecordMapper,
-        cardCipherService
+        cardCipherService,
+        configTableStore
     );
+
+    @Test
+    void configTablesExposesInjectedStore() {
+        assertThat(store.configTables()).isSameAs(configTableStore);
+    }
 
     @Test
     void encryptSecretForSettingRoundTripsWithoutPlaintext() {
@@ -157,6 +165,37 @@ class ConfigPersistenceStoreTest {
         List<SupplierItem> suppliers = store.listSuppliers();
 
         assertThat(suppliers).extracting(SupplierItem::apiKey).containsExactly("api-key", "legacy-api-key");
+    }
+
+    @Test
+    void listSuppliersIsolatesApiKeyDecryptFailureToTheAffectedSupplier() {
+        SupplierRecordEntity unreadable = new SupplierRecordEntity();
+        unreadable.setId(9L);
+        unreadable.setName("旧密钥供应商");
+        unreadable.setPlatformType("KASUSHOU_2");
+        unreadable.setBaseUrl("https://supplier.example.com");
+        unreadable.setApiKeyMasked("ak***ey");
+        unreadable.setBalance(BigDecimal.ZERO);
+        unreadable.setStatus("ENABLED");
+        var encryptedWithAnotherKey = new CardCipherService("another-card-secret").encrypt("api-key");
+        unreadable.setApiKeyCiphertext(encryptedWithAnotherKey.ciphertext());
+        unreadable.setApiKeyNonce(encryptedWithAnotherKey.nonce());
+
+        SupplierRecordEntity readable = new SupplierRecordEntity();
+        readable.setId(10L);
+        readable.setName("正常供应商");
+        readable.setPlatformType("CUSTOM");
+        readable.setBaseUrl("https://local.invalid");
+        readable.setApiKey("plain-local-key");
+        readable.setBalance(BigDecimal.ZERO);
+        readable.setStatus("ENABLED");
+
+        when(supplierRecordMapper.selectActiveSnapshots()).thenReturn(List.of(unreadable, readable));
+
+        List<SupplierItem> suppliers = store.listSuppliers();
+
+        assertThat(suppliers).extracting(SupplierItem::apiKey).containsExactly("", "plain-local-key");
+        assertThat(suppliers.get(0).apiKeyMasked()).isEqualTo("ak***ey");
     }
 
     @Test

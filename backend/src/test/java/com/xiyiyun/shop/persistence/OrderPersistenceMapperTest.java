@@ -54,6 +54,7 @@ class OrderPersistenceMapperTest {
         assertThat(entity.getGoodsType()).isEqualTo("CARD");
         assertThat(entity.getTotalAmount()).isEqualByComparingTo("25.00");
         assertThat(entity.getDeliveryStatus()).isEqualTo("PROCESSING");
+        assertThat(entity.getDeliveryItemsJson()).as("card secrets must not be persisted in order JSON").isNull();
         assertThat(entity.getPaidAt()).isEqualTo(now.plusMinutes(1));
         assertThat(entity.getCreatedAt()).isEqualTo(now);
     }
@@ -74,6 +75,7 @@ class OrderPersistenceMapperTest {
         record.setStatus("DELIVERED");
         record.setDeliveryStatus("DELIVERED");
         record.setRechargeAccount("acct");
+        record.setRechargeFieldsJson("{\"uid\":\"12345\",\"zone\":\"cn\"}");
         record.setBuyerRemark("remark");
         record.setRequestId("req-1");
         record.setCreatedAt(now);
@@ -86,6 +88,7 @@ class OrderPersistenceMapperTest {
         assertThat(item.goodsType()).isEqualTo(GoodsType.CARD);
         assertThat(item.status()).isEqualTo(OrderStatus.DELIVERED);
         assertThat(item.payAmount()).isEqualByComparingTo("25.00");
+        assertThat(item.rechargeFields()).containsEntry("uid", "12345").containsEntry("zone", "cn");
         assertThat(item.createdAt()).isEqualTo(now);
     }
 

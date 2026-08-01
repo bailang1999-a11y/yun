@@ -49,3 +49,8 @@ export async function fetchAdminCaptchaChallenge() {
   const { data } = await apiClient.get<unknown>('/api/admin/auth/captcha-config')
   return normalizeChallenge(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
+
+export async function fetchAdminAltchaChallenge(): Promise<string> {
+  const response = await apiClient.get('/api/admin/auth/altcha-challenge')
+  return typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+}

@@ -15,10 +15,22 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/h5")
 public class H5MvpController {
-    private final InMemoryShopRepository repository;
+    /**
+     * 批次8C：买家订单列表默认页大小。
+     *
+     * <p>取值偏大是为了不动现有前端 —— 前端目前不传分页参数、一次渲染全部订单，
+     * 设成 100 可让绝大多数买家看到的内容与改动前一致，同时给出硬上界，
+     * 使单个请求不再随用户历史订单量无上界增长。前端接入真正的翻页属批次9。
+     */
+    private static final int DEFAULT_ORDER_PAGE_SIZE = 100;
+    private static final int MAX_ORDER_PAGE_SIZE = 200;
 
-    public H5MvpController(InMemoryShopRepository repository) {
+    private final InMemoryShopRepository repository;
+    private final AlipayPaymentFacade alipayPaymentFacade;
+
+    public H5MvpController(InMemoryShopRepository repository, AlipayPaymentFacade alipayPaymentFacade) {
         this.repository = repository;
+        this.alipayPaymentFacade = alipayPaymentFacade;
     }
 
     @GetMapping("/categories")
@@ -71,6 +83,15 @@ public class H5MvpController {
     @GetMapping("/auth/captcha-config")
     public ApiResponse<CaptchaChallengeItem> captchaConfig(@RequestParam(required = false) String terminal) {
         return ApiResponse.ok(repository.captchaChallenge(terminal));
+    }
+
+    @GetMapping("/auth/altcha-challenge")
+    public String altchaChallenge() {
+        try {
+            return repository.altchaChallenge();
+        } catch (IllegalStateException ex) {
+            return "{\"error\":\"" + ex.getMessage() + "\"}";
+        }
     }
 
     @PostMapping("/auth/slider")
@@ -157,26 +178,24 @@ public class H5MvpController {
         @RequestParam(required = false) Integer pageSize
     ) {
         Long effectiveUserGroupId = repository.findUserByToken(token).map(UserItem::groupId).orElse(userGroupId);
-        List<GoodsItem> goods = repository.listGoods(categoryId, search, platform, effectiveUserGroupId, false);
         if (page == null && pageSize == null) {
-            return ApiResponse.ok(goods);
+            return ApiResponse.ok(repository.listPublicGoods(categoryId, search, platform, effectiveUserGroupId));
         }
 
         int safePage = Math.max(page == null ? 1 : page, 1);
         int safePageSize = Math.min(Math.max(pageSize == null ? 20 : pageSize, 1), 100);
-        int from = Math.min((safePage - 1) * safePageSize, goods.size());
-        int to = Math.min(from + safePageSize, goods.size());
-        return ApiResponse.ok(new PageResult<>(goods.subList(from, to), goods.size(), safePage, safePageSize));
+        return ApiResponse.ok(repository.pagePublicGoods(categoryId, search, platform, effectiveUserGroupId, safePage, safePageSize));
     }
 
     @GetMapping("/goods/{id}")
     public ApiResponse<GoodsItem> goodsDetail(
         @PathVariable Long id,
         @RequestHeader(value = "Authorization", required = false) String token,
-        @RequestParam(required = false) Long userGroupId
+        @RequestParam(required = false) Long userGroupId,
+        @RequestParam(required = false) String platform
     ) {
         Long effectiveUserGroupId = repository.findUserByToken(token).map(UserItem::groupId).orElse(userGroupId);
-        return repository.findGoods(id, effectiveUserGroupId, false)
+        return repository.findGoods(id, effectiveUserGroupId, false, platform == null ? "h5" : platform)
             .map(ApiResponse::ok)
             .orElseGet(() -> ApiResponse.fail("goods not found"));
     }
@@ -209,6 +228,29 @@ public class H5MvpController {
         }
     }
 
+    /**
+     * 发起支付宝支付，返回跳转地址。
+     *
+     * <p>与 {@code /pay} 的分工：{@code /pay} 是"付完了"（余额支付当场扣款成功），
+     * 这个接口是"去付款"——只创建 PENDING 支付单并返回支付宝地址，
+     * 订单要等支付宝异步通知到达后才会变成已支付。
+     */
+    @PostMapping("/orders/{orderNo}/pay-gateway")
+    public ApiResponse<AlipayPaymentFacade.PrepareResult> payOrderViaGateway(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @PathVariable String orderNo,
+        @RequestBody(required = false) PayOrderRequest request
+    ) {
+        try {
+            Long userId = repository.findUserByToken(token).map(UserItem::id).orElseThrow(() -> new IllegalArgumentException("unauthorized"));
+            String payMethod = request == null ? "" : request.payMethod();
+            String terminal = request == null ? "" : request.terminal();
+            return ApiResponse.ok(alipayPaymentFacade.prepare(orderNo, userId, payMethod, terminal));
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            return ApiResponse.fail(ex.getMessage());
+        }
+    }
+
     @PostMapping("/orders/{orderNo}/cancel")
     public ApiResponse<OrderItem> cancelOrder(
         @RequestHeader(value = "Authorization", required = false) String token,
@@ -222,10 +264,30 @@ public class H5MvpController {
         }
     }
 
+    /**
+     * 批次8C：买家订单列表改为分页取数。
+     *
+     * <p>原来是把 orders 全表读进内存、再在 Java 里按 userId 过滤，
+     * 即任何一个买家点开「我的订单」都会加载全站订单。现在 userId 直接进 SQL 的
+     * {@code WHERE}，走 {@code idx_orders_user_created}。
+     *
+     * <p>返回类型仍是 {@code List<OrderItem>}，不动前端契约（前端翻页属批次9）。
+     */
     @GetMapping("/orders")
-    public ApiResponse<List<OrderItem>> orders(@RequestHeader(value = "Authorization", required = false) String token) {
+    public ApiResponse<List<OrderItem>> orders(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        int normalizedPage = page == null ? 1 : Math.max(1, page);
+        int normalizedPageSize = pageSize == null
+            ? DEFAULT_ORDER_PAGE_SIZE
+            : Math.max(1, Math.min(pageSize, MAX_ORDER_PAGE_SIZE));
+        long offset = (long) (normalizedPage - 1) * normalizedPageSize;
         return repository.findUserByToken(token)
-            .map(user -> ApiResponse.ok(repository.listOrdersForUser(user.id())))
+            .map(user -> ApiResponse.ok(
+                repository.pageOrders(null, null, null, user.id(), normalizedPageSize, offset).items()
+            ))
             .orElseGet(() -> ApiResponse.fail("unauthorized"));
     }
 
@@ -239,6 +301,20 @@ public class H5MvpController {
             return ApiResponse.fail("unauthorized");
         }
         return repository.findOrderForUser(orderNo, userId)
+            .map(ApiResponse::ok)
+            .orElseGet(() -> ApiResponse.fail("order not found"));
+    }
+
+    @GetMapping("/orders/by-request/{requestId}")
+    public ApiResponse<OrderItem> orderByRequest(
+        @RequestHeader(value = "Authorization", required = false) String token,
+        @PathVariable String requestId
+    ) {
+        Long userId = repository.findUserByToken(token).map(UserItem::id).orElse(null);
+        if (userId == null) {
+            return ApiResponse.fail("unauthorized");
+        }
+        return repository.findOrderByRequestId(userId, requestId)
             .map(ApiResponse::ok)
             .orElseGet(() -> ApiResponse.fail("order not found"));
     }

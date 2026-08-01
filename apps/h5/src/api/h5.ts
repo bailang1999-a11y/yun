@@ -1,4 +1,4 @@
-import { apiClient } from './client'
+import { apiClient, isNotFoundError } from './client'
 import type {
   AuthSession,
   CaptchaChallenge,
@@ -144,7 +144,10 @@ function normalizeCategory(item: unknown): H5Category {
   const parentId = rawParentId && rawParentId !== '0' ? rawParentId : undefined
   const levelValue = item.level ?? item.categoryLevel
   const level = levelValue === undefined ? undefined : numberValue(levelValue)
-  return { id, name, parentId, level }
+  const icon = text(item.icon ?? item.iconKey).trim() || undefined
+  const iconUrl = mediaUrl(item.iconUrl ?? item.icon_url)
+  const customIconUrl = mediaUrl(item.customIconUrl ?? item.custom_icon_url)
+  return { id, name, parentId, level, icon, iconUrl, customIconUrl }
 }
 
 function normalizeGoods(item: unknown, categories: H5Category[]): GoodsCard {
@@ -224,6 +227,7 @@ function normalizeOrder(item: unknown): H5Order {
     goodsId: text(record.goodsId ?? record.goods_id) || undefined,
     goodsName: text(record.goodsName ?? record.goods_name ?? record.name, '未知商品'),
     goodsType: record.goodsType || record.goods_type ? mapGoodsType(record.goodsType ?? record.goods_type) : undefined,
+    platform: text(record.platform ?? record.sourcePlatformCode ?? record.source_platform_code).toLowerCase() || undefined,
     quantity: numberValue(record.quantity, 1),
     totalAmount: numberValue(record.totalAmount ?? record.total_amount ?? record.amount ?? record.payAmount),
     status: text(record.status, 'UNKNOWN'),
@@ -356,6 +360,12 @@ export async function fetchH5CaptchaChallenge(terminal: 'h5' | 'web' = 'h5'): Pr
   }
 }
 
+export async function fetchH5AltchaChallenge(): Promise<string> {
+  const response = await apiClient.get('/api/h5/auth/altcha-challenge')
+  if (typeof response.data === 'string') return response.data
+  return JSON.stringify(response.data)
+}
+
 export async function sendH5LoginSms(account: string, captchaTicket = '', captchaRandstr = '', mode: 'login' | 'register' | 'forgot' = 'login') {
   const response = await apiClient.post('/api/h5/auth/sms/send', { account, terminal: 'h5', captchaTicket, captchaRandstr, mode })
   return text(unwrap(response.data), '验证码已发送')
@@ -403,9 +413,9 @@ export async function fetchH5GoodsPage(
   }
 }
 
-export async function fetchH5GoodsDetail(goodsId: string, categories: H5Category[] = []) {
+export async function fetchH5GoodsDetail(goodsId: string, categories: H5Category[] = [], platform = 'h5') {
   const response = await apiClient.get(`/api/h5/goods/${encodeURIComponent(goodsId)}`, {
-    params: { terminal: 'h5', platform: 'h5' }
+    params: { terminal: 'h5', platform }
   })
   return normalizeGoods(unwrap(response.data), categories)
 }
@@ -415,12 +425,41 @@ export async function createH5Order(payload: CreateOrderPayload) {
   return normalizeOrder(unwrap(response.data))
 }
 
+export async function fetchH5OrderByRequestId(requestId: string) {
+  try {
+    const response = await apiClient.get(`/api/h5/orders/by-request/${encodeURIComponent(requestId)}`, { timeout: 3000 })
+    return normalizeOrder(unwrap(response.data))
+  } catch (error) {
+    if (isNotFoundError(error)) return null
+    throw error
+  }
+}
+
 export async function payH5Order(orderNo: string, payMethod = 'wechat') {
   const response = await apiClient.post(`/api/h5/orders/${encodeURIComponent(orderNo)}/pay`, {
     payMethod,
     terminal: 'h5'
   })
   return normalizeOrder(unwrap(response.data))
+}
+
+/**
+ * 发起支付宝支付，返回跳转地址。
+ *
+ * 与 payH5Order 的区别：这个接口不代表"已付款"，只是拿到支付宝的付款地址；
+ * 订单要等支付宝异步通知到达后才会变成已支付。
+ */
+export async function payH5OrderViaGateway(orderNo: string, payMethod: string) {
+  const response = await apiClient.post(`/api/h5/orders/${encodeURIComponent(orderNo)}/pay-gateway`, {
+    payMethod,
+    terminal: 'h5'
+  })
+  const data = unwrap(response.data)
+  const record = isRecord(data) ? data : {}
+  return {
+    paymentNo: text(record.paymentNo),
+    payUrl: text(record.payUrl)
+  }
 }
 
 export async function fetchH5PaymentChannels(terminal: 'h5' | 'web' | 'api' = 'h5') {
@@ -433,6 +472,32 @@ export async function fetchH5PaymentChannels(terminal: 'h5' | 'web' | 'api' = 'h
 export async function cancelH5Order(orderNo: string) {
   const response = await apiClient.post(`/api/h5/orders/${encodeURIComponent(orderNo)}/cancel`)
   return normalizeOrder(unwrap(response.data))
+}
+
+export async function changeH5Password(currentPassword: string, newPassword: string, confirmPassword: string) {
+  const response = await apiClient.post('/api/h5/users/me/password', { currentPassword, newPassword, confirmPassword })
+  return normalizeUser(unwrap(response.data))
+}
+
+export async function fetchH5MemberApi() {
+  const response = await apiClient.get('/api/h5/member-api')
+  return normalizeMemberApi(unwrap(response.data))
+}
+
+export async function saveH5MemberApi(callbackUrl: string) {
+  const response = await apiClient.post('/api/h5/member-api', { callbackUrl })
+  return normalizeMemberApi(unwrap(response.data))
+}
+
+function normalizeMemberApi(data: unknown) {
+  if (!isRecord(data)) return null
+  return {
+    appKey: text(data.appKey),
+    appSecret: text(data.appSecret),
+    callbackUrl: text(data.callbackUrl),
+    status: text(data.status),
+    dailyLimit: typeof data.dailyLimit === 'number' ? data.dailyLimit : 0
+  }
 }
 
 export async function fetchH5Orders() {

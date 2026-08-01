@@ -1,6 +1,6 @@
 import { apiClient } from './client'
-import { booleanValue, numberValue, stringArray, text } from './normalize'
-import { type ApiEnvelope, unwrapResponse, unwrapValue } from './response'
+import { booleanValue, cleanParams, numberValue, stringArray, text } from './normalize'
+import { type ApiEnvelope, type PageResult, unwrapPage, unwrapResponse, unwrapValue } from './response'
 import type {
   GroupRule,
   GroupRulePatchPayload,
@@ -29,9 +29,16 @@ export async function saveUserMemberApiCredential(userId: UserAccount['id'], pay
   return normalizeMemberApiCredential(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
-export async function fetchOpenApiLogs() {
-  const { data } = await apiClient.get<unknown>('/api/admin/open-api-logs')
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeOpenApiLog)
+export type PageQuery = { page?: number; pageSize?: number }
+
+export async function fetchOpenApiLogs(query: PageQuery = {}) {
+  return (await fetchOpenApiLogsPage(query)).items
+}
+
+export async function fetchOpenApiLogsPage(query: PageQuery = {}): Promise<PageResult<OpenApiLog>> {
+  const { data } = await apiClient.get<unknown>('/api/admin/open-api-logs', { params: cleanParams(query) })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return { ...page, items: page.items.map(normalizeOpenApiLog) }
 }
 
 export async function fetchUserGroups() {
@@ -46,10 +53,19 @@ export async function createUserGroup(payload: UserGroupCreatePayload) {
   return normalizeUserGroup(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
-export async function fetchUsers() {
-  const { data } = await apiClient.get<unknown>('/api/admin/users')
+export async function createUser(payload: { account: string; nickname?: string; password?: string; confirmPassword?: string }) {
+  const { data } = await apiClient.post<unknown>('/api/admin/users', payload)
+  return normalizeUser(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
 
-  return unwrapResponse<Record<string, unknown>[]>(data as ApiEnvelope<Record<string, unknown>[]>).map(normalizeUser)
+export async function fetchUsers(query: PageQuery = {}) {
+  return (await fetchUsersPage(query)).items
+}
+
+export async function fetchUsersPage(query: PageQuery = {}): Promise<PageResult<UserAccount>> {
+  const { data } = await apiClient.get<unknown>('/api/admin/users', { params: cleanParams(query) })
+  const page = unwrapPage<Record<string, unknown>>(data)
+  return { ...page, items: page.items.map(normalizeUser) }
 }
 
 export async function updateGroupRules(groupId: UserGroup['id'], payload: GroupRulePatchPayload) {
@@ -145,6 +161,7 @@ function normalizeMemberApiCredential(item: Record<string, unknown>): MemberApiC
     userId: text(item.userId),
     appKey: text(item.appKey),
     appSecret: text(item.appSecret),
+    callbackUrl: text(item.callbackUrl),
     status: text(item.status),
     ipWhitelist: stringArray(item.ipWhitelist),
     dailyLimit: numberValue(item.dailyLimit),

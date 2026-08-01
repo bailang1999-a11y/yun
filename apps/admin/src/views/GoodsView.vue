@@ -1,24 +1,28 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRawFile } from 'element-plus'
-import { Edit3, Eye, PlugZap, Plus, RefreshCw, Trash2, Upload, X } from 'lucide-vue-next'
+import { Edit3, Eye, PackageCheck, PlugZap, Plus, RefreshCw, Search, Trash2, Upload, X } from 'lucide-vue-next'
 import {
   createGoods,
   createGoodsChannel,
   deleteGoods,
   deleteGoodsChannel,
-  fetchGoods,
+  fetchGoodsPage,
   fetchGoodsCards,
   fetchGoodsChannels,
+  fetchGoodsDetail,
   fetchRemoteGoodsSnapshot,
   importGoodsCards,
-  updateGoods
+  updateGoods,
+  updateGoodsForBatch
 } from '../api/goods'
 import { fetchCardKinds } from '../api/cardKinds'
-import { fetchCategories, fetchRechargeFields } from '../api/catalog'
+import { fetchRechargeFields } from '../api/catalog'
 import { fetchPriceTemplates } from '../api/priceTemplates'
 import { fetchSuppliers } from '../api/suppliers'
+import { uploadImage } from '../api/uploads'
 import type {
   CardImportItem,
   CardKind,
@@ -55,6 +59,7 @@ import type { PriceTemplate } from '../utils/priceTemplates'
 const DEFAULT_SALE_PLATFORMS = goodsSalePlatformOptions.map((item) => item.value)
 const GOODS_SALE_PLATFORM_VALUES = new Set(DEFAULT_SALE_PLATFORMS)
 
+const route = useRoute()
 const goods = ref<Goods[]>([])
 const cards = ref<GoodsCard[]>([])
 const cardKinds = ref<CardKind[]>([])
@@ -63,8 +68,13 @@ const categories = ref<Category[]>([])
 const suppliers = ref<Supplier[]>([])
 const rechargeFields = ref<RechargeField[]>([])
 const loading = ref(false)
+const goodsLoading = ref(false)
+const goodsLoaded = ref(false)
+const goodsLoadError = ref('')
 const categoryLoading = ref(false)
 const cardKindLoading = ref(false)
+const goodsDetailLoading = ref(false)
+const goodsDetailLoadingId = ref<Goods['id']>()
 const saving = ref(false)
 const cardLoading = ref(false)
 const channelLoading = ref(false)
@@ -92,12 +102,21 @@ const goodsFilters = reactive({
   platform: '',
   search: ''
 })
+const focusedGoodsIds = ref(new Set<string>())
+const goodsPagination = reactive({
+  page: 1,
+  pageSize: 10,
+  total: 0
+})
+let goodsFilterRefreshTimer: ReturnType<typeof window.setTimeout> | undefined
 
 const batchEditVisible = ref(false)
 const batchSaving = ref(false)
 const batchEdit = reactive({
   categoryEnabled: false,
   categoryId: undefined as GoodsCreatePayload['categoryId'],
+  coverEnabled: false,
+  coverUrl: '',
   statusEnabled: false,
   status: 'ON_SALE',
   benefitDurationsEnabled: false,
@@ -243,6 +262,8 @@ const parsedCards = computed<CardImportItem[]>(() =>
 const filteredGoods = computed(() =>
   goods.value.filter((item) => {
     const keyword = goodsFilters.search.trim().toLowerCase()
+    const focusedMatched =
+      !focusedGoodsIds.value.size || focusedGoodsIds.value.has(String(item.id))
     const categoryMatched =
       !goodsFilters.categoryId || selectedFilterCategoryIds.value.has(String(item.categoryId))
     const platformMatched =
@@ -250,13 +271,26 @@ const filteredGoods = computed(() =>
     const keywordMatched =
       !keyword ||
       item.name.toLowerCase().includes(keyword) ||
-      String(item.id).includes(keyword) ||
+      String(item.id) === keyword ||
       (item.categoryName || '').toLowerCase().includes(keyword) ||
       (item.tags || []).some((tag) => tag.toLowerCase().includes(keyword))
 
-    return categoryMatched && platformMatched && keywordMatched
+    return focusedMatched && categoryMatched && platformMatched && keywordMatched
   })
 )
+const hasActiveGoodsFilters = computed(() => Boolean(goodsFilters.categoryId || goodsFilters.platform || goodsFilters.search.trim() || focusedGoodsIds.value.size))
+const goodsEmptyTitle = computed(() => {
+  if (goodsLoadError.value) return '商品列表加载失败'
+  if (!goodsLoaded.value && goodsLoading.value) return '商品加载中'
+  if (hasActiveGoodsFilters.value) return '当前筛选没有商品'
+  return '暂无商品'
+})
+const goodsEmptyDesc = computed(() => {
+  if (goodsLoadError.value) return goodsLoadError.value
+  if (!goodsLoaded.value && goodsLoading.value) return '正在获取商品列表，请稍候。'
+  if (hasActiveGoodsFilters.value) return '当前分类、平台或关键词没有匹配商品，可以清空筛选后查看全部商品。'
+  return '还没有创建商品，可以先新建商品或从货源对接生成。'
+})
 
 const formTitle = computed(() => (editingGoodsId.value ? '编辑商品' : '新增商品'))
 const formSubtitle = computed(() => (editingGoodsId.value ? '更新商品资料与销售配置' : '卡密/直充/代充商品资料'))
@@ -276,18 +310,19 @@ function validateImageFile(file: UploadRawFile) {
   return true
 }
 
-function fileToDataUrl(file: UploadRawFile) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
-
 async function handleCoverUpload(file: UploadRawFile) {
   if (!validateImageFile(file)) return false
-  form.coverUrl = await fileToDataUrl(file)
+  try {
+    const result = await uploadImage(file)
+    if (!result.url) {
+      ElMessage.error('商品主图上传失败')
+      return false
+    }
+    form.coverUrl = result.url
+    ElMessage.success('商品主图已上传')
+  } catch (error) {
+    ElMessage.error(error instanceof Error && error.message ? error.message : '商品主图上传失败')
+  }
   return false
 }
 
@@ -305,10 +340,54 @@ function mediaSrc(url?: string) {
   return value
 }
 
+function isEmbeddedImage(value?: string) {
+  return Boolean(value && /^data:image\//i.test(value.trim()))
+}
+
+function dataUrlToFile(dataUrl: string, filename: string) {
+  const [meta = '', payload = ''] = dataUrl.split(',')
+  const mime = /data:([^;]+);base64/i.exec(meta)?.[1] || 'image/png'
+  const binary = atob(payload)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  const extension = mime.split('/')[1] || 'png'
+  return new File([bytes], `${filename}.${extension}`, { type: mime })
+}
+
+async function ensureStoredImageUrl(value?: string, filename = 'goods-image') {
+  const imageValue = value?.trim() || ''
+  if (!isEmbeddedImage(imageValue)) return imageValue
+  const result = await uploadImage(dataUrlToFile(imageValue, filename))
+  return result.url
+}
+
+async function ensurePayloadImages(payload: GoodsCreatePayload, goodsId: Goods['id'] | 'new') {
+  payload.coverUrl = await ensureStoredImageUrl(payload.coverUrl, `goods-cover-${goodsId}`)
+  const blocks = await Promise.all((payload.detailBlocks || []).map(async (item, index) => ({
+    ...item,
+    imageUrl: await ensureStoredImageUrl(item.imageUrl, `goods-detail-${goodsId}-${index + 1}`)
+  })))
+  payload.detailBlocks = blocks
+  payload.detailImages = blocks.map((item) => item.imageUrl || '').filter(Boolean)
+  return payload
+}
+
 async function handleDetailUpload(file: UploadRawFile, block: GoodsDetailBlock) {
   if (!validateImageFile(file)) return false
-  block.type = 'image'
-  block.imageUrl = await fileToDataUrl(file)
+  try {
+    const result = await uploadImage(file)
+    if (!result.url) {
+      ElMessage.error('详情图片上传失败')
+      return false
+    }
+    block.type = 'image'
+    block.imageUrl = result.url
+    ElMessage.success('详情图片已上传')
+  } catch (error) {
+    ElMessage.error(error instanceof Error && error.message ? error.message : '详情图片上传失败')
+  }
   return false
 }
 
@@ -379,6 +458,42 @@ function removeIntegration(index: number) {
   form.integrations = (form.integrations || []).filter((_, itemIndex) => itemIndex !== index)
 }
 
+function isFuluSupplier(supplier?: Supplier) {
+  const raw = String(supplier?.platformType || '').trim()
+  const normalized = raw.toLowerCase()
+  return normalized === 'fulu'
+    || normalized === 'fulu_new'
+    || normalized === 'fulu_new_platform'
+    || raw === '福禄'
+    || raw === '福禄新平台'
+}
+
+function isFuluIntegration(item: GoodsIntegration) {
+  const supplier = suppliers.value.find((entry) => String(entry.id) === String(item.supplierId))
+  const platformCode = String(item.platformCode || '').trim()
+  return isFuluSupplier(supplier)
+    || platformCode.toLowerCase() === 'fulu'
+    || platformCode.toLowerCase() === 'fulu_new'
+    || platformCode.toLowerCase() === 'fulu_new_platform'
+    || platformCode === '福禄'
+    || platformCode === '福禄新平台'
+}
+
+function normalizeFuluIntegration(item: GoodsIntegration, supplier?: Supplier): GoodsIntegration {
+  return {
+    ...item,
+    supplierId: item.supplierId || supplier?.id,
+    supplierName: supplier?.name || item.supplierName || '',
+    platformCode: String(supplier?.platformType || item.platformCode || 'FULU'),
+    supplierGoodsName: '',
+    supplierPrice: 0,
+    upstreamStatus: '手动绑定',
+    upstreamStock: 0,
+    upstreamTitle: '',
+    enabled: true
+  }
+}
+
 async function refreshIntegration(index: number) {
   const item = form.integrations?.[index]
   if (!item) return
@@ -389,6 +504,12 @@ async function refreshIntegration(index: number) {
   }
   if (!item.supplierGoodsId?.trim()) {
     ElMessage.warning('请填写上游商品 ID')
+    return
+  }
+
+  if (isFuluSupplier(supplier)) {
+    Object.assign(item, normalizeFuluIntegration(item, supplier))
+    ElMessage.success('福禄渠道已保存上游商品 ID，名称、售价和库存以后台手动填写为准')
     return
   }
 
@@ -406,8 +527,23 @@ async function refreshIntegration(index: number) {
   }
 }
 
+function integrationSnapshotText(item: GoodsIntegration, field: 'name' | 'price' | 'stock' | 'status') {
+  if (isFuluIntegration(item)) {
+    if (field === 'status') return item.upstreamStatus || '手动绑定'
+    return '以本地填写为准'
+  }
+  if (field === 'name') return item.supplierGoodsName || item.upstreamTitle || '填入 ID 后自动获取'
+  if (field === 'price') return item.supplierPrice || 0
+  if (field === 'stock') return item.upstreamStock || 0
+  return item.upstreamStatus || '待刷新'
+}
+
 function handleCategoriesLoaded(loadedCategories: Category[]) {
   categories.value = normalizeLoadedCategories(loadedCategories || [])
+  if (!form.categoryId) {
+    const firstLeaf = categoryOptions.value.find((item) => !categoryOptions.value.some((child) => child.parentId === item.id))
+    form.categoryId = firstLeaf?.id
+  }
 }
 
 function stockText(row: Goods) {
@@ -455,12 +591,23 @@ function integrationSupplierName(item: GoodsIntegration) {
 
 function goodsSubtitle(row: Goods) {
   const subTitle = row.subTitle?.trim()
+  const integrationSubtitle = goodsIntegrationSubtitle(row)
+  if (integrationSubtitle) return integrationSubtitle
   if (!subTitle) return ''
   const sourceName = primarySupplierName(row)
   if (sourceName && /^由\s*.+?\s*一键对接创建$/.test(subTitle)) {
     return `由 ${sourceName} 一键对接创建`
   }
+  if (subTitle === 'MVP 内存商品') return ''
   return subTitle
+}
+
+function goodsIntegrationSubtitle(row: Goods) {
+  const integration = (row.integrations || []).find((item) => integrationSupplierName(item) || item.supplierGoodsId?.trim())
+  if (!integration) return ''
+  const sourceName = integrationSupplierName(integration) || '上游平台'
+  const goodsId = integration.supplierGoodsId?.trim()
+  return goodsId ? `已对接 ${sourceName} · 商品ID ${goodsId}` : `已对接 ${sourceName}`
 }
 
 function primarySupplierName(row: Goods) {
@@ -514,6 +661,14 @@ function normalizeGoodsSalePlatforms(values?: string[]) {
 
 function normalizeForbiddenSalePlatforms(values?: string[]) {
   return values?.filter((item) => GOODS_SALE_PLATFORM_VALUES.has(item)) || []
+}
+
+function normalizeIntegrationsForSubmit(values?: GoodsIntegration[]) {
+  return (values || []).map((item) => {
+    if (!isFuluIntegration(item)) return item
+    const supplier = suppliers.value.find((entry) => String(entry.id) === String(item.supplierId))
+    return normalizeFuluIntegration(item, supplier)
+  })
 }
 
 function statusMeta(value = '') {
@@ -713,42 +868,91 @@ function openCreate() {
   goodsEditorVisible.value = true
 }
 
-function openEdit(row: Goods) {
-  fillForm(row)
-  goodsEditorVisible.value = true
+async function openEdit(row: Goods) {
+  goodsDetailLoading.value = true
+  goodsDetailLoadingId.value = row.id
+  try {
+    const detail = await fetchGoodsDetail(row.id)
+    fillForm(detail)
+    goodsEditorVisible.value = true
+  } catch (error) {
+    ElMessage.error(error instanceof Error && error.message ? error.message : '商品详情加载失败')
+  } finally {
+    goodsDetailLoading.value = false
+    goodsDetailLoadingId.value = undefined
+  }
 }
 
 function isDirectGoods(row: Goods) {
   return row.deliveryType === 'DIRECT' || row.deliveryType === 'AUTO'
 }
 
-async function loadCategories() {
-  categoryLoading.value = true
+async function loadGoods() {
+  if (goodsLoading.value) return
+  goodsLoading.value = true
+  goodsLoadError.value = ''
 
   try {
-    categories.value = await fetchCategories()
-    if (!form.categoryId) {
-      const firstLeaf = categoryOptions.value.find((item) => !categoryOptions.value.some((child) => child.parentId === item.id))
-      form.categoryId = firstLeaf?.id
-    }
-  } catch {
-    ElMessage.error('分类列表加载失败')
+    const result = await fetchGoodsPage({
+      categoryId: goodsFilters.categoryId,
+      platform: goodsFilters.platform,
+      search: goodsFilters.search,
+      page: goodsPagination.page,
+      pageSize: goodsPagination.pageSize
+    })
+    goods.value = result.items.sort((a, b) => Number(b.id) - Number(a.id))
+    goodsPagination.total = result.total
+    selectedTableGoods.value = []
+    goodsTableRef.value?.clearSelection()
+    goodsLoaded.value = true
+  } catch (error) {
+    goodsLoadError.value = error instanceof Error && error.message ? error.message : '商品列表加载失败'
+    ElMessage.error(goodsLoadError.value)
   } finally {
-    categoryLoading.value = false
+    goodsLoading.value = false
   }
 }
 
-async function loadGoods() {
-  loading.value = true
+function clearGoodsFilters() {
+  goodsFilters.categoryId = ''
+  goodsFilters.platform = ''
+  goodsFilters.search = ''
+  focusedGoodsIds.value = new Set()
+  goodsPagination.page = 1
+  void loadGoods()
+}
 
-  try {
-    goods.value = await fetchGoods()
-    selectedTableGoods.value = []
-    goodsTableRef.value?.clearSelection()
-  } catch {
-    ElMessage.error('商品列表加载失败')
-  } finally {
-    loading.value = false
+function searchGoods() {
+  goodsPagination.page = 1
+  void loadGoods()
+}
+
+function scheduleGoodsFilterRefresh(delay = 0) {
+  if (goodsFilterRefreshTimer) {
+    window.clearTimeout(goodsFilterRefreshTimer)
+  }
+  goodsFilterRefreshTimer = window.setTimeout(() => {
+    goodsPagination.page = 1
+    void loadGoods()
+  }, delay)
+}
+
+function handleGoodsPageChange(page: number) {
+  goodsPagination.page = page
+  void loadGoods()
+}
+
+function applyRouteGoodsFocus() {
+  const raw = route.query.goodsIds
+  const ids = (Array.isArray(raw) ? raw.join(',') : String(raw || ''))
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  focusedGoodsIds.value = new Set(ids)
+  if (ids.length) {
+    goodsFilters.categoryId = ''
+    goodsFilters.platform = ''
+    goodsFilters.search = ''
   }
 }
 
@@ -811,22 +1015,27 @@ async function submitGoods() {
 
   try {
     syncTagsFromInput()
-    const normalizedBlocks = detailBlocks.value
+    const normalizedBlocks = await Promise.all(detailBlocks.value
       .map((item) => ({
         type: item.type || (item.imageUrl ? 'image' : 'text'),
         imageUrl: item.imageUrl?.trim() || '',
         text: item.text?.trim() || ''
       }))
       .filter((item) => item.imageUrl || item.text)
+      .map(async (item, index) => ({
+        ...item,
+        imageUrl: await ensureStoredImageUrl(item.imageUrl, `goods-detail-${editingGoodsId.value || 'new'}-${index + 1}`)
+      })))
+    const coverUrl = await ensureStoredImageUrl(form.coverUrl, `goods-cover-${editingGoodsId.value || 'new'}`)
     const payload = {
       ...form,
       name: form.name.trim(),
       cardKindId: form.deliveryType === 'CARD' ? form.cardKindId : undefined,
       subTitle: form.subTitle?.trim(),
-      coverUrl: form.coverUrl?.trim(),
+      coverUrl,
       detailImages: normalizedBlocks.map((item) => item.imageUrl).filter(Boolean),
       detailBlocks: normalizedBlocks,
-      integrations: form.integrations || [],
+      integrations: normalizeIntegrationsForSubmit(form.integrations),
       availablePlatforms: normalizeGoodsSalePlatforms(form.availablePlatforms),
       forbiddenPlatforms: normalizeForbiddenSalePlatforms(form.forbiddenPlatforms),
       benefitDurations: form.benefitDurations || [],
@@ -846,8 +1055,8 @@ async function submitGoods() {
     resetForm()
     goodsEditorVisible.value = false
     await loadGoods()
-  } catch {
-    ElMessage.error(editingGoodsId.value ? '更新商品失败' : '新增商品失败')
+  } catch (error) {
+    ElMessage.error(error instanceof Error && error.message ? error.message : editingGoodsId.value ? '更新商品失败' : '新增商品失败')
   } finally {
     saving.value = false
   }
@@ -982,6 +1191,8 @@ function clearGoodsSelection() {
 function resetBatchEdit(source?: Goods) {
   batchEdit.categoryEnabled = false
   batchEdit.categoryId = source?.categoryId
+  batchEdit.coverEnabled = false
+  batchEdit.coverUrl = source?.coverUrl || ''
   batchEdit.statusEnabled = false
   batchEdit.status = source?.status || 'ON_SALE'
   batchEdit.benefitDurationsEnabled = false
@@ -1015,6 +1226,7 @@ function openBatchEdit() {
 function hasBatchPatch() {
   return [
     batchEdit.categoryEnabled,
+    batchEdit.coverEnabled,
     batchEdit.statusEnabled,
     batchEdit.benefitDurationsEnabled,
     batchEdit.benefitTypeEnabled,
@@ -1040,6 +1252,10 @@ async function submitBatchEdit() {
     ElMessage.warning('请选择商品分类')
     return
   }
+  if (batchEdit.coverEnabled && !batchEdit.coverUrl.trim()) {
+    ElMessage.warning('请上传或填写商品主图')
+    return
+  }
   if (batchEdit.availablePlatformsEnabled && !batchEdit.availablePlatforms.length) {
     ElMessage.warning('请选择可售平台，或选择无限制')
     return
@@ -1048,11 +1264,16 @@ async function submitBatchEdit() {
   const rows = [...selectedTableGoods.value]
   batchSaving.value = true
   try {
-    await Promise.all(
-      rows.map((row) => {
-        const payload = goodsToPayload(row)
+    const failed: string[] = []
+    let successCount = 0
+
+    for (const row of rows) {
+      try {
+        const detail = await fetchGoodsDetail(row.id)
+        const payload = goodsToPayload(detail)
 
         if (batchEdit.categoryEnabled) payload.categoryId = batchEdit.categoryId
+        if (batchEdit.coverEnabled) payload.coverUrl = await ensureStoredImageUrl(batchEdit.coverUrl, `goods-cover-batch-${row.id}`)
         if (batchEdit.statusEnabled) payload.status = batchEdit.status
         if (batchEdit.benefitDurationsEnabled) payload.benefitDurations = [...batchEdit.benefitDurations]
         if (batchEdit.benefitTypeEnabled) payload.benefitType = batchEdit.benefitType.trim()
@@ -1068,18 +1289,39 @@ async function submitBatchEdit() {
         if (batchEdit.availablePlatformsEnabled) payload.availablePlatforms = normalizeGoodsSalePlatforms(batchEdit.availablePlatforms)
         if (batchEdit.forbiddenPlatformsEnabled) payload.forbiddenPlatforms = normalizeForbiddenSalePlatforms(batchEdit.forbiddenPlatforms)
 
-        return updateGoods(row.id, payload)
-      })
-    )
+        await updateGoodsForBatch(row.id, await ensurePayloadImages(payload, row.id))
+        successCount += 1
+      } catch (error) {
+        const message = error instanceof Error && error.message ? error.message : '保存失败'
+        failed.push(`ID ${row.id}: ${message}`)
+      }
+    }
 
-    ElMessage.success(`已批量修改 ${rows.length} 个商品`)
-    batchEditVisible.value = false
+    if (failed.length) {
+      ElMessage.warning(`已修改 ${successCount} 个，失败 ${failed.length} 个：${failed.slice(0, 2).join('；')}`)
+    } else {
+      ElMessage.success(`已批量修改 ${successCount} 个商品`)
+      batchEditVisible.value = false
+    }
     await loadGoods()
   } catch (error) {
     ElMessage.error(error instanceof Error && error.message ? error.message : '批量修改失败')
   } finally {
     batchSaving.value = false
   }
+}
+
+async function handleBatchCoverUpload(file: UploadRawFile) {
+  if (!validateImageFile(file)) return false
+  try {
+    const result = await uploadImage(file)
+    batchEdit.coverUrl = result.url
+    batchEdit.coverEnabled = true
+    ElMessage.success('商品主图已上传')
+  } catch (error) {
+    ElMessage.error(error instanceof Error && error.message ? error.message : '商品主图上传失败')
+  }
+  return false
 }
 
 async function deleteSelectedGoods() {
@@ -1097,7 +1339,7 @@ async function deleteSelectedGoods() {
         type: 'warning',
         confirmButtonText: '确认删除',
         cancelButtonText: '取消',
-        customClass: 'xiyiyun-glass-dialog goods-delete-confirm'
+        customClass: 'xiyiyun-glass-message-box goods-delete-confirm'
       }
     )
   } catch {
@@ -1105,9 +1347,20 @@ async function deleteSelectedGoods() {
   }
 
   loading.value = true
+  const failed: string[] = []
   try {
-    await Promise.all(selectedTableGoods.value.map((item) => deleteGoods(item.id)))
-    ElMessage.success(`已删除 ${count} 个商品`)
+    for (const item of selectedTableGoods.value) {
+      try {
+        await deleteGoods(item.id)
+      } catch (error) {
+        failed.push(item.name || String(item.id))
+      }
+    }
+    if (failed.length) {
+      ElMessage.warning(`已处理 ${count} 个商品，失败 ${failed.length} 个：${failed.slice(0, 3).join('、')}`)
+    } else {
+      ElMessage.success(`已删除 ${count} 个商品`)
+    }
     clearGoodsSelection()
     await loadGoods()
   } catch (error) {
@@ -1126,7 +1379,7 @@ async function deleteSingleGoods(row: Goods) {
         type: 'warning',
         confirmButtonText: '确认删除',
         cancelButtonText: '取消',
-        customClass: 'xiyiyun-glass-dialog goods-delete-confirm'
+        customClass: 'xiyiyun-glass-message-box goods-delete-confirm'
       }
     )
   } catch {
@@ -1156,8 +1409,18 @@ watch(
   }
 )
 
+watch(
+  () => route.query.goodsIds,
+  applyRouteGoodsFocus,
+  { immediate: true }
+)
+
+watch(
+  () => [goodsFilters.categoryId, goodsFilters.platform],
+  () => scheduleGoodsFilterRefresh()
+)
+
 onMounted(() => {
-  void loadCategories()
   void loadCardKinds()
   void loadRechargeFields()
   void loadPriceTemplates()
@@ -1175,7 +1438,7 @@ onMounted(() => {
           <h2>商品列表</h2>
         </div>
         <div class="goods-table-stats">
-          <span>全部 {{ goods.length }}</span>
+          <span>全部 {{ goodsPagination.total }}</span>
           <span>当前 {{ filteredGoods.length }}</span>
           <span :class="{ active: selectedTableGoods.length }">已选 {{ selectedTableGoods.length }}</span>
         </div>
@@ -1189,7 +1452,13 @@ onMounted(() => {
 
       <div class="table-toolbar">
         <div class="table-filters">
-          <el-input v-model="goodsFilters.search" clearable placeholder="搜索商品名称 / ID" />
+          <el-input
+            v-model="goodsFilters.search"
+            clearable
+            placeholder="搜索商品名称 / 系统商品 ID"
+            @clear="scheduleGoodsFilterRefresh"
+            @keyup.enter="searchGoods"
+          />
           <el-tree-select
             v-model="goodsFilters.categoryId"
             :data="categoryTreeOptions"
@@ -1207,8 +1476,9 @@ onMounted(() => {
           </el-select>
         </div>
         <div class="primary-actions">
+          <el-button :icon="Search" :loading="goodsLoading" @click="searchGoods">查询</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新建商品</el-button>
-          <el-button :icon="RefreshCw" :loading="loading" @click="loadGoods">刷新</el-button>
+          <el-button :icon="RefreshCw" :loading="goodsLoading" :disabled="goodsLoading" @click="loadGoods">刷新</el-button>
         </div>
       </div>
 
@@ -1241,9 +1511,13 @@ onMounted(() => {
       </div>
 
       <div class="goods-table-shell">
+      <div v-if="goodsLoading && goodsLoaded" class="goods-refresh-indicator">
+        <RefreshCw :size="14" />
+        <span>正在刷新商品列表</span>
+      </div>
       <el-table
         ref="goodsTableRef"
-        v-loading="loading"
+        v-loading="goodsLoading && !goodsLoaded"
         :data="filteredGoods"
         class="goods-data-table"
         height="620"
@@ -1251,6 +1525,17 @@ onMounted(() => {
         row-key="id"
         @selection-change="handleGoodsSelectionChange"
       >
+        <template #empty>
+          <div class="goods-empty-state">
+            <PackageCheck :size="28" />
+            <strong>{{ goodsEmptyTitle }}</strong>
+            <span>{{ goodsEmptyDesc }}</span>
+            <div v-if="hasActiveGoodsFilters || goodsLoadError" class="goods-empty-actions">
+              <el-button v-if="hasActiveGoodsFilters" size="small" @click="clearGoodsFilters">清空筛选</el-button>
+              <el-button v-if="goodsLoadError" size="small" type="primary" :loading="goodsLoading" @click="loadGoods">重新加载</el-button>
+            </div>
+          </div>
+        </template>
         <el-table-column type="selection" width="50" />
         <el-table-column label="商品信息" min-width="270">
           <template #default="{ row }">
@@ -1351,7 +1636,7 @@ onMounted(() => {
         <el-table-column label="操作" width="96">
           <template #default="{ row }">
             <el-button-group class="goods-row-actions">
-              <el-button size="small" :icon="Edit3" @click="openEdit(row)">编辑</el-button>
+              <el-button size="small" :icon="Edit3" :loading="goodsDetailLoading && String(goodsDetailLoadingId) === String(row.id)" @click="openEdit(row)">编辑</el-button>
               <el-button v-if="isDirectGoods(row)" size="small" :icon="PlugZap" @click="openChannels(row)">渠道</el-button>
               <el-button v-else size="small" :icon="Upload" @click="openImport(row)">导入</el-button>
               <el-button v-if="!isDirectGoods(row)" size="small" :icon="Eye" @click="openCards(row)">查看</el-button>
@@ -1360,6 +1645,16 @@ onMounted(() => {
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination">
+        <el-pagination
+          background
+          layout="prev, pager, next, total"
+          :current-page="goodsPagination.page"
+          :page-size="goodsPagination.pageSize"
+          :total="goodsPagination.total"
+          @current-change="handleGoodsPageChange"
+        />
+      </div>
       </div>
     </article>
   </section>
@@ -1395,6 +1690,27 @@ onMounted(() => {
           placeholder="选择商品分类"
           :props="{ label: 'name', children: 'children', value: 'id', disabled: 'disabled' }"
         />
+      </section>
+
+      <section class="batch-edit-card batch-edit-card--media">
+        <el-checkbox v-model="batchEdit.coverEnabled">商品头像 / 主图</el-checkbox>
+        <div class="batch-cover-field" :class="{ disabled: !batchEdit.coverEnabled }">
+          <el-upload :before-upload="handleBatchCoverUpload" :show-file-list="false" :accept="imageAccept">
+            <button type="button" class="batch-cover-preview" :disabled="!batchEdit.coverEnabled">
+              <img v-if="batchEdit.coverUrl" :src="mediaSrc(batchEdit.coverUrl)" alt="批量商品主图预览" />
+              <span v-else>
+                <Upload :size="18" />
+                上传
+              </span>
+            </button>
+          </el-upload>
+          <el-input
+            v-model="batchEdit.coverUrl"
+            :disabled="!batchEdit.coverEnabled"
+            clearable
+            placeholder="上传图片或粘贴图片地址"
+          />
+        </div>
       </section>
 
       <section class="batch-edit-card">
@@ -1661,10 +1977,10 @@ onMounted(() => {
                   <div class="upstream-snapshot">
                     <span>渠道：{{ item.supplierName || '未选择渠道' }}</span>
                     <span>商品ID：{{ item.supplierGoodsId || '-' }}</span>
-                    <span>名称：{{ item.supplierGoodsName || item.upstreamTitle || '填入 ID 后自动获取' }}</span>
-                    <span>售价：{{ item.supplierPrice || 0 }}</span>
-                    <span>库存：{{ item.upstreamStock || 0 }}</span>
-                    <span>状态：{{ item.upstreamStatus || '待刷新' }}</span>
+                    <span>名称：{{ integrationSnapshotText(item, 'name') }}</span>
+                    <span>售价：{{ integrationSnapshotText(item, 'price') }}</span>
+                    <span>库存：{{ integrationSnapshotText(item, 'stock') }}</span>
+                    <span>状态：{{ integrationSnapshotText(item, 'status') }}</span>
                     <span>同步：{{ item.lastSyncAt || '未同步' }}</span>
                   </div>
                 </div>
@@ -2092,6 +2408,53 @@ onMounted(() => {
   grid-column: 1 / -1;
 }
 
+.batch-edit-card--media {
+  min-height: 116px;
+}
+
+.batch-cover-field {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.batch-cover-preview {
+  width: 78px;
+  height: 78px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  overflow: hidden;
+  color: rgba(233, 245, 255, 0.84);
+  border-radius: 16px;
+  border: 1px solid rgba(116, 238, 255, 0.18);
+  background:
+    linear-gradient(135deg, rgba(15, 44, 60, 0.9), rgba(22, 35, 55, 0.82)),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+
+.batch-cover-preview:disabled {
+  cursor: not-allowed;
+}
+
+.batch-cover-preview img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.batch-cover-preview span {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+
 .batch-edit-card :deep(.el-checkbox) {
   height: 24px;
   margin-right: 0;
@@ -2124,6 +2487,16 @@ onMounted(() => {
 @media (max-width: 860px) {
   .batch-edit-body {
     grid-template-columns: 1fr;
+  }
+
+  .batch-cover-field {
+    grid-template-columns: 64px minmax(0, 1fr);
+  }
+
+  .batch-cover-preview {
+    width: 64px;
+    height: 64px;
+    border-radius: 14px;
   }
 }
 
@@ -3122,6 +3495,92 @@ onMounted(() => {
   border-radius: 16px;
   background: rgba(3, 12, 24, 0.24);
   border: 0.5px solid rgba(255, 255, 255, 0.09);
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 14px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+}
+
+.goods-refresh-indicator {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  color: rgba(210, 255, 246, 0.92);
+  background: rgba(4, 20, 34, 0.78);
+  border: 0.5px solid rgba(0, 255, 195, 0.24);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.22);
+  font-size: 12px;
+}
+
+.goods-refresh-indicator svg {
+  animation: spin 1s linear infinite;
+}
+
+.goods-data-table :deep(.el-table__empty-block) {
+  min-height: 360px;
+  background:
+    linear-gradient(180deg, rgba(11, 24, 39, 0.92), rgba(9, 19, 33, 0.96)),
+    rgba(9, 19, 33, 0.94);
+}
+
+.goods-data-table :deep(.el-table__empty-text) {
+  width: 100%;
+}
+
+.goods-data-table :deep(.el-loading-mask) {
+  background:
+    linear-gradient(180deg, rgba(11, 24, 39, 0.78), rgba(9, 19, 33, 0.9)),
+    rgba(9, 19, 33, 0.82);
+  backdrop-filter: blur(6px);
+}
+
+.goods-empty-state {
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 40px 24px;
+  color: rgba(218, 232, 247, 0.72);
+  text-align: center;
+}
+
+.goods-empty-state svg {
+  color: rgba(0, 255, 195, 0.62);
+}
+
+.goods-empty-state strong {
+  color: rgba(246, 250, 255, 0.9);
+  font-size: 15px;
+}
+
+.goods-empty-state span {
+  max-width: 420px;
+  color: rgba(214, 226, 240, 0.56);
+  line-height: 1.6;
+  font-size: 13px;
+}
+
+.goods-empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .goods-table-shell :deep(.el-table__inner-wrapper),

@@ -5,6 +5,9 @@ export interface H5Category {
   name: string
   parentId?: string
   level?: number
+  icon?: string
+  iconUrl?: string
+  customIconUrl?: string
 }
 
 export interface GoodsCard {
@@ -71,6 +74,7 @@ export interface H5Order {
   goodsId?: string
   goodsName: string
   goodsType?: GoodsType
+  platform?: string
   quantity: number
   totalAmount: number
   status: string
@@ -87,6 +91,7 @@ export interface CreateOrderPayload {
   goodsId: string
   quantity: number
   rechargeAccount?: string
+  rechargeFields?: Record<string, string>
   buyerRemark?: string
   requestId: string
   terminal?: 'h5' | 'web' | 'api'
@@ -135,6 +140,7 @@ export interface AuthPayload {
   captchaTicket?: string
   captchaRandstr?: string
   mode: 'login' | 'register' | 'forgot'
+  username?: string
 }
 
 export interface CaptchaChallenge {

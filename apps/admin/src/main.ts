@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import 'altcha'
 import {
   ElButton,
   ElButtonGroup,
@@ -18,6 +19,7 @@ import {
   ElPagination,
   ElRadio,
   ElRadioGroup,
+  ElSegmented,
   ElSelect,
   ElSwitch,
   ElTable,
@@ -51,6 +53,7 @@ const app = createApp(App)
   ElPagination,
   ElRadio,
   ElRadioGroup,
+  ElSegmented,
   ElSelect,
   ElSwitch,
   ElTable,

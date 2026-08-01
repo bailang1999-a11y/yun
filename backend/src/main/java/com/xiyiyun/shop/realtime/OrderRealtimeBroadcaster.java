@@ -2,6 +2,7 @@ package com.xiyiyun.shop.realtime;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xiyiyun.shop.mvp.OrderEventPublisher;
 import com.xiyiyun.shop.mvp.OrderItem;
 import com.xiyiyun.shop.mvp.ProductMonitorLogItem;
 import java.io.IOException;
@@ -12,7 +13,7 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
 @Component
-public class OrderRealtimeBroadcaster {
+public class OrderRealtimeBroadcaster implements OrderEventPublisher {
     private final ObjectMapper objectMapper;
     private final Set<WebSocketSession> sessions = ConcurrentHashMap.newKeySet();
 
@@ -28,10 +29,12 @@ public class OrderRealtimeBroadcaster {
         sessions.remove(session);
     }
 
+    @Override
     public void publish(OrderItem order) {
         publishEvent(OrderRealtimeEvent.updated(order));
     }
 
+    @Override
     public void publishProductMonitorLog(ProductMonitorLogItem log) {
         publishEvent(OrderRealtimeEvent.productMonitor(log));
     }

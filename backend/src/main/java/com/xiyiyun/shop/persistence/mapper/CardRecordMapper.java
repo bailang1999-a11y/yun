@@ -75,6 +75,18 @@ public interface CardRecordMapper extends BaseMapper<CardRecordEntity> {
         @Param("soldAt") OffsetDateTime soldAt
     );
 
+    @Select("""
+        SELECT id, goods_id, card_kind_id, batch_no, card_ciphertext, card_nonce, card_key_version,
+               card_hash, card_preview, status, locked_order_id, sold_order_id, sold_at,
+               created_at, updated_at, deleted_at, version
+        FROM cards
+        WHERE sold_order_id = #{orderId}
+          AND status = 'SOLD'
+          AND deleted_at IS NULL
+        ORDER BY id
+        """)
+    List<CardRecordEntity> selectSoldByOrderId(@Param("orderId") Long orderId);
+
     @Delete("DELETE FROM cards WHERE goods_id = #{goodsId}")
     int hardDeleteByGoods(@Param("goodsId") Long goodsId);
 

@@ -7,6 +7,13 @@ export interface ApiEnvelope<T> {
   items?: T
 }
 
+export interface PageResult<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+}
+
 export function assertApiOk(payload: unknown) {
   const envelope = payload as ApiEnvelope<unknown>
   if (envelope && typeof envelope === 'object' && typeof envelope.code === 'number' && envelope.code !== 0) {
@@ -69,4 +76,29 @@ export function unwrapResponse<T>(payload: T | ApiEnvelope<T>): T {
   }
 
   return payload as T
+}
+
+export function unwrapPage<T>(payload: unknown): PageResult<T> {
+  assertApiOk(payload)
+  const value = unwrapValue<unknown>(payload as ApiEnvelope<unknown>)
+  if (Array.isArray(value)) {
+    return { items: value as T[], total: value.length, page: 1, pageSize: value.length || 10 }
+  }
+  const record = (value || {}) as Record<string, unknown>
+  const items = Array.isArray(record.items)
+    ? record.items
+    : Array.isArray(record.records)
+      ? record.records
+      : Array.isArray(record.list)
+        ? record.list
+        : []
+  const total = Number(record.total ?? items.length)
+  const page = Number(record.page ?? 1)
+  const pageSize = Number(record.pageSize ?? record.size ?? 10)
+  return {
+    items: items as T[],
+    total: Number.isFinite(total) ? total : items.length,
+    page: Number.isFinite(page) && page > 0 ? page : 1,
+    pageSize: Number.isFinite(pageSize) && pageSize > 0 ? pageSize : 10
+  }
 }

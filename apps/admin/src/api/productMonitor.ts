@@ -3,13 +3,18 @@ import { numberValue, stringArray, text } from './normalize'
 import { type ApiEnvelope, unwrapResponse, unwrapValue } from './response'
 import type { ProductMonitorItem, ProductMonitorLog, ProductMonitorOverview } from '../types/operations'
 
-export async function fetchProductMonitorOverview(): Promise<ProductMonitorOverview> {
-  const { data } = await apiClient.get<unknown>('/api/admin/goods-monitor')
+export async function fetchProductMonitorOverview(params: { page?: number, pageSize?: number } = {}): Promise<ProductMonitorOverview> {
+  const { data } = await apiClient.get<unknown>('/api/admin/goods-monitor', { params })
   const overview = unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>)
 
   return {
     items: Array.isArray(overview.items) ? overview.items.map((item) => normalizeProductMonitorItem(item as Record<string, unknown>)) : [],
-    logs: Array.isArray(overview.logs) ? overview.logs.map((item) => normalizeProductMonitorLog(item as Record<string, unknown>)) : []
+    logs: Array.isArray(overview.logs) ? overview.logs.map((item) => normalizeProductMonitorLog(item as Record<string, unknown>)) : [],
+    total: numberValue(overview.total, 0),
+    page: numberValue(overview.page, params.page ?? 1),
+    pageSize: numberValue(overview.pageSize, params.pageSize ?? 10),
+    activeTotal: numberValue(overview.activeTotal, 0),
+    logTotal: numberValue(overview.logTotal, 0)
   }
 }
 

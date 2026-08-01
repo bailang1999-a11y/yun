@@ -13,11 +13,15 @@ const loading = ref(false)
 const scanning = ref(false)
 const lastSyncedAt = ref('')
 const nowTick = ref(Date.now())
+const page = ref(1)
+const pageSize = ref(10)
+const total = ref(0)
+const activeTotal = ref(0)
+const logTotal = ref(0)
 let unsubscribeRealtime: (() => void) | undefined
 let ticker: number | undefined
 
 const failedLogs = computed(() => logs.value.filter((item) => item.result === 'FAILED'))
-const activeItems = computed(() => items.value.filter((item) => item.status !== 'FAILED'))
 
 onMounted(() => {
   void loadOverview()
@@ -39,15 +43,25 @@ onBeforeUnmount(() => {
 async function loadOverview(options: { silent?: boolean } = {}) {
   if (!options.silent) loading.value = true
   try {
-    const overview = await fetchProductMonitorOverview()
+    const overview = await fetchProductMonitorOverview({ page: page.value, pageSize: pageSize.value })
     items.value = overview.items
     logs.value = overview.logs
+    total.value = overview.total
+    page.value = overview.page
+    pageSize.value = overview.pageSize
+    activeTotal.value = overview.activeTotal
+    logTotal.value = overview.logTotal
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   } catch {
     if (!options.silent) ElMessage.error('商品监控数据加载失败')
   } finally {
     loading.value = false
   }
+}
+
+function handlePageChange(nextPage: number) {
+  page.value = nextPage
+  void loadOverview()
 }
 
 async function scanAllNow() {
@@ -129,17 +143,17 @@ function resultTone(result: string) {
       <article class="metric-card">
         <ScanLine :size="18" />
         <span>监控渠道</span>
-        <strong>{{ items.length }}</strong>
+        <strong>{{ total }}</strong>
       </article>
       <article class="metric-card">
         <Activity :size="18" />
         <span>运行中</span>
-        <strong>{{ activeItems.length }}</strong>
+        <strong>{{ activeTotal }}</strong>
       </article>
       <article class="metric-card" :data-warn="failedLogs.length > 0">
         <RefreshCw :size="18" />
         <span>近日日志</span>
-        <strong>{{ logs.length }}</strong>
+        <strong>{{ logTotal }}</strong>
       </article>
     </div>
 
@@ -149,7 +163,7 @@ function resultTone(result: string) {
           <h2>已绑定货源扫描</h2>
           <span>只扫描本地商品绑定的上游商品ID，每个渠道结束后 60s 再继续</span>
         </div>
-        <el-table v-loading="loading" :data="items" height="470" style="width: 100%">
+        <el-table v-loading="loading" :data="items" height="430" class="monitor-table" style="width: 100%">
           <el-table-column prop="goodsName" label="本地商品" min-width="180" show-overflow-tooltip />
           <el-table-column prop="supplierName" label="供应商" width="150" show-overflow-tooltip />
           <el-table-column prop="supplierGoodsId" label="上游商品ID" min-width="150" show-overflow-tooltip />
@@ -183,6 +197,16 @@ function resultTone(result: string) {
         <section v-if="!items.length && !loading" class="empty">
           暂无绑定货源。请先在商品中绑定上游渠道；未绑定货源的商品视为本地货源，不进入监控。
         </section>
+        <div v-if="total > pageSize" class="monitor-pagination">
+          <el-pagination
+            background
+            layout="prev, pager, next, total"
+            :current-page="page"
+            :page-size="pageSize"
+            :total="total"
+            @current-change="handlePageChange"
+          />
+        </div>
       </article>
 
       <article class="panel liquid-admin-panel">
@@ -349,5 +373,42 @@ function resultTone(result: string) {
 
 .empty {
   color: rgba(255, 255, 255, 0.56);
+}
+
+.monitor-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
+}
+
+.monitor-table :deep(.el-loading-mask) {
+  background: rgba(5, 12, 24, 0.78);
+  backdrop-filter: blur(18px);
+}
+
+.monitor-table :deep(.el-loading-spinner .path) {
+  stroke: #00ffc3;
+}
+
+.monitor-table :deep(.el-loading-text),
+.monitor-table :deep(.el-table__empty-text) {
+  color: rgba(255, 255, 255, 0.68);
+}
+
+.monitor-pagination :deep(.el-pagination__total) {
+  color: rgba(255, 255, 255, 0.58);
+}
+
+.monitor-pagination :deep(.btn-prev),
+.monitor-pagination :deep(.btn-next),
+.monitor-pagination :deep(.el-pager li) {
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.06);
+  border: 0.5px solid rgba(255, 255, 255, 0.09);
+}
+
+.monitor-pagination :deep(.el-pager li.is-active) {
+  color: #06111f;
+  background: #00ffc3;
 }
 </style>

@@ -18,19 +18,34 @@ public class ProductionSafetyConfigValidator {
     private final String paymentCallbackSecret;
     private final String cardEncryptionSecret;
     private final String corsAllowedOrigins;
+    private final boolean paymentCallbackStrictSignature;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public ProductionSafetyConfigValidator(
         Environment environment,
         @Value("${xiyiyun.admin.password-bcrypt:}") String adminPasswordBcrypt,
         @Value("${xiyiyun.payment.callback-secret:}") String paymentCallbackSecret,
         @Value("${xiyiyun.card.encryption-secret:}") String cardEncryptionSecret,
-        @Value("${xiyiyun.cors.allowed-origins:}") String corsAllowedOrigins
+        @Value("${xiyiyun.cors.allowed-origins:}") String corsAllowedOrigins,
+        @Value("${xiyiyun.payment.callback-strict-signature:false}") boolean paymentCallbackStrictSignature
     ) {
         this.environment = environment;
         this.adminPasswordBcrypt = adminPasswordBcrypt;
         this.paymentCallbackSecret = paymentCallbackSecret;
         this.cardEncryptionSecret = cardEncryptionSecret;
         this.corsAllowedOrigins = corsAllowedOrigins;
+        this.paymentCallbackStrictSignature = paymentCallbackStrictSignature;
+    }
+
+    /** 兼容既有调用：默认按"已开启强制新版验签"构造，仅用于不关心该开关的场景。 */
+    public ProductionSafetyConfigValidator(
+        Environment environment,
+        String adminPasswordBcrypt,
+        String paymentCallbackSecret,
+        String cardEncryptionSecret,
+        String corsAllowedOrigins
+    ) {
+        this(environment, adminPasswordBcrypt, paymentCallbackSecret, cardEncryptionSecret, corsAllowedOrigins, true);
     }
 
     @PostConstruct
@@ -52,6 +67,12 @@ public class ProductionSafetyConfigValidator {
         }
         if (!validCorsAllowedOrigins(corsAllowedOrigins)) {
             throw new IllegalStateException("prod profile requires explicit HTTPS CORS origins and must not use wildcards or placeholder domains");
+        }
+        // 批次5 / B1：过渡期开关只允许在非 prod 环境保持 false，生产必须强制 v2 验签
+        if (!paymentCallbackStrictSignature) {
+            throw new IllegalStateException(
+                "prod profile requires xiyiyun.payment.callback-strict-signature=true so payment callbacks must carry amount/timestamp/nonce"
+            );
         }
     }
 

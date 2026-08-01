@@ -22,13 +22,30 @@
           </dl>
           <div class="button-row">
             <button class="ghost-button" type="button" :disabled="saving" @click="resetSecret">重置密钥</button>
-            <button class="primary-button" type="button" :disabled="saving" @click="saveWhitelist">保存白名单</button>
+            <button class="primary-button" type="button" :disabled="saving" @click="saveConfig">保存配置</button>
           </div>
-          <p v-if="message" class="success-line">{{ message }}</p>
-          <p v-if="error" class="alert-line">{{ error }}</p>
+          <p v-if="message" class="success-line" role="status">{{ message }}</p>
+          <p v-if="error" class="alert-line" role="alert">{{ error }}</p>
         </section>
 
         <section class="info-panel">
+          <label class="callback-field" for="callback-url">
+            <span>订单状态回调地址</span>
+            <input
+              id="callback-url"
+              v-model.trim="callbackUrl"
+              type="url"
+              inputmode="url"
+              autocomplete="url"
+              placeholder="可选，例如 https://example.com/api/order/callback"
+              :aria-invalid="Boolean(callbackUrlError)"
+              :aria-describedby="callbackUrlError ? 'callback-url-help callback-url-error' : 'callback-url-help'"
+              :class="{ 'input-error': callbackUrlError }"
+              @input="callbackUrlError = ''"
+            />
+          </label>
+          <p id="callback-url-help" class="field-help">留空不接收通知；回调请求使用当前 App Secret 验签。</p>
+          <p v-if="callbackUrlError" id="callback-url-error" class="field-error" role="alert">{{ callbackUrlError }}</p>
           <label>
             <span>IP 白名单</span>
             <textarea v-model="ipWhitelist" rows="8" placeholder="每行一个 IP" />
@@ -56,6 +73,8 @@ import type { ApiCredential } from '../types/web'
 
 const session = useSessionStore()
 const credential = ref<ApiCredential | null>(null)
+const callbackUrl = ref('')
+const callbackUrlError = ref('')
 const ipWhitelist = ref('')
 const saving = ref(false)
 const message = ref('')
@@ -64,15 +83,25 @@ const error = ref('')
 onMounted(async () => {
   await session.ensureProfile({ force: true })
   credential.value = await fetchApiCredential()
+  callbackUrl.value = credential.value.callbackUrl
   ipWhitelist.value = credential.value.ipWhitelist.join('\n')
 })
 
-async function saveCredential(payload: { enabled?: boolean; resetSecret?: boolean; ipWhitelist?: string[] }) {
-  saving.value = true
+async function saveCredential(payload: { enabled?: boolean; resetSecret?: boolean; callbackUrl?: string; ipWhitelist?: string[] }) {
   message.value = ''
   error.value = ''
+  callbackUrlError.value = ''
+
+  const normalizedCallbackUrl = callbackUrl.value.trim()
+  if (!isHttpUrl(normalizedCallbackUrl)) {
+    callbackUrlError.value = '请输入有效的 http 或 https 地址。'
+    return
+  }
+
+  saving.value = true
   try {
-    credential.value = await saveApiCredential(payload)
+    credential.value = await saveApiCredential({ ...payload, callbackUrl: normalizedCallbackUrl })
+    callbackUrl.value = credential.value.callbackUrl
     ipWhitelist.value = credential.value.ipWhitelist.join('\n')
     message.value = payload.resetSecret ? '密钥已重置。' : '接口配置已保存。'
   } catch (err) {
@@ -86,7 +115,17 @@ function whitelistRows() {
   return ipWhitelist.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
 }
 
-function saveWhitelist() {
+function isHttpUrl(value: string) {
+  if (!value) return true
+  try {
+    const url = new URL(value)
+    return Boolean(url.hostname) && (url.protocol === 'http:' || url.protocol === 'https:')
+  } catch {
+    return false
+  }
+}
+
+function saveConfig() {
   void saveCredential({ ipWhitelist: whitelistRows(), enabled: credential.value?.status === 'ENABLED' })
 }
 
@@ -98,3 +137,29 @@ function toggleEnabled() {
   void saveCredential({ enabled: credential.value?.status !== 'ENABLED', ipWhitelist: whitelistRows() })
 }
 </script>
+
+<style scoped>
+.callback-field {
+  display: block;
+}
+
+.field-help,
+.field-error {
+  margin: 7px 0 16px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.field-help {
+  color: var(--faint-ink);
+}
+
+.field-error {
+  color: var(--danger);
+}
+
+input.input-error {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 4px oklch(65% 0.18 29 / 0.12);
+}
+</style>

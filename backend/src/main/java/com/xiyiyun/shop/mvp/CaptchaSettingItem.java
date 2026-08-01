@@ -10,6 +10,7 @@ public record CaptchaSettingItem(
     String provider,
     Map<String, String> tencentConfig,
     Map<String, String> turnstileConfig,
-    Map<String, String> genericConfig
+    Map<String, String> genericConfig,
+    Map<String, String> altchaConfig
 ) {
 }

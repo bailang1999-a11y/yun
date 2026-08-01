@@ -3,7 +3,17 @@ import vue from '@vitejs/plugin-vue'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue({
+      template: {
+        compilerOptions: {
+          // altcha-widget 是 Web Component，交给浏览器解析，
+          // 否则 Vue 会打印 "Failed to resolve component" 警告。
+          isCustomElement: (tag) => tag === 'altcha-widget'
+        }
+      }
+    })
+  ],
   build: {
     rollupOptions: {
       output: {

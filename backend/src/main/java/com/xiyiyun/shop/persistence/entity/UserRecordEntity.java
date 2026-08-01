@@ -16,6 +16,13 @@ public class UserRecordEntity {
     private String nickname;
     private Long groupId;
     private BigDecimal balance;
+    private BigDecimal deposit;
+    private String realNameType;
+    private String realName;
+    private String subjectName;
+    private String certificateNo;
+    private String verificationStatus;
+    private String username;
     private String status;
     private OffsetDateTime lastLoginAt;
     private OffsetDateTime createdAt;
@@ -34,6 +41,20 @@ public class UserRecordEntity {
     public void setGroupId(Long groupId) { this.groupId = groupId; }
     public BigDecimal getBalance() { return balance; }
     public void setBalance(BigDecimal balance) { this.balance = balance; }
+    public BigDecimal getDeposit() { return deposit; }
+    public void setDeposit(BigDecimal deposit) { this.deposit = deposit; }
+    public String getRealNameType() { return realNameType; }
+    public void setRealNameType(String realNameType) { this.realNameType = realNameType; }
+    public String getRealName() { return realName; }
+    public void setRealName(String realName) { this.realName = realName; }
+    public String getSubjectName() { return subjectName; }
+    public void setSubjectName(String subjectName) { this.subjectName = subjectName; }
+    public String getCertificateNo() { return certificateNo; }
+    public void setCertificateNo(String certificateNo) { this.certificateNo = certificateNo; }
+    public String getVerificationStatus() { return verificationStatus; }
+    public void setVerificationStatus(String verificationStatus) { this.verificationStatus = verificationStatus; }
+    public String getUsername() { return username; }
+    public void setUsername(String username) { this.username = username; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public OffsetDateTime getLastLoginAt() { return lastLoginAt; }

@@ -9,6 +9,8 @@ import type {
   RechargeFieldPayload
 } from '../types/operations'
 
+const CATEGORY_WRITE_TIMEOUT_MS = 60_000
+
 export async function fetchRechargeFields(query: { enabled?: boolean } = {}) {
   const { data } = await apiClient.get<unknown>('/api/admin/recharge-fields', {
     params: cleanParams(query)
@@ -54,26 +56,26 @@ export async function fetchCategories() {
 }
 
 export async function createCategory(payload: CategoryCreatePayload) {
-  const { data } = await apiClient.post<unknown>('/api/admin/categories', payload)
+  const { data } = await apiClient.post<unknown>('/api/admin/categories', payload, { timeout: CATEGORY_WRITE_TIMEOUT_MS })
 
   return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
 export async function updateCategory(categoryId: Category['id'], payload: CategoryUpdatePayload) {
-  const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}`, payload)
+  const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}`, payload, { timeout: CATEGORY_WRITE_TIMEOUT_MS })
 
   return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
 export async function deleteCategory(categoryId: Category['id']) {
-  const { data } = await apiClient.post(`/api/admin/categories/${categoryId}/delete`)
+  const { data } = await apiClient.post(`/api/admin/categories/${categoryId}/delete`, undefined, { timeout: CATEGORY_WRITE_TIMEOUT_MS })
 
   return data
 }
 
 export async function setCategoryEnabled(categoryId: Category['id'], enabled: boolean) {
   const action = enabled ? 'enable' : 'disable'
-  const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}/${action}`)
+  const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}/${action}`, undefined, { timeout: CATEGORY_WRITE_TIMEOUT_MS })
 
   return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }

@@ -19,6 +19,8 @@ import com.xiyiyun.shop.persistence.entity.RefundRecordEntity;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
+import org.springframework.util.StringUtils;
 
 public class OrderPersistenceMapper {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
@@ -28,11 +30,14 @@ public class OrderPersistenceMapper {
     };
     private static final TypeReference<List<ChannelAttemptItem>> CHANNEL_ATTEMPT_LIST_TYPE = new TypeReference<>() {
     };
+    private static final TypeReference<Map<String, String>> STRING_MAP_TYPE = new TypeReference<>() {
+    };
 
     public OrderRecordEntity toOrderRecord(OrderItem order) {
         OrderRecordEntity entity = new OrderRecordEntity();
         entity.setOrderNo(order.orderNo());
         entity.setUserId(order.userId());
+        entity.setBuyerAccount(order.buyerAccount());
         entity.setSourcePlatformCode(order.platform());
         entity.setGoodsId(order.goodsId());
         entity.setGoodsName(order.goodsName());
@@ -46,11 +51,14 @@ public class OrderPersistenceMapper {
         entity.setStatus(order.status() == null ? null : order.status().name());
         entity.setDeliveryStatus(deliveryStatus(order.status()));
         entity.setDeliveryMessage(order.deliveryMessage());
-        entity.setDeliveryItemsJson(toJson(order.deliveryItems()));
+        entity.setDeliveryItemsJson(order.goodsType() == GoodsType.CARD ? null : toJson(order.deliveryItems()));
         entity.setChannelAttemptsJson(toJson(order.channelAttempts()));
         entity.setRechargeAccount(order.rechargeAccount());
+        entity.setRechargeFieldsJson(toJson(order.rechargeFields()));
         entity.setBuyerRemark(order.buyerRemark());
         entity.setRequestId(order.requestId());
+        // 批次3(A4)：空串按 NULL 落库，避免多个订单在 uk_orders_upstream 上撞唯一键。
+        entity.setUpstreamOrderNo(StringUtils.hasText(order.upstreamOrderNo()) ? order.upstreamOrderNo().trim() : null);
         entity.setPaidAt(order.paidAt());
         entity.setDeliveredAt(order.deliveredAt());
         entity.setClosedAt(closedAt(order.status(), order.deliveredAt()));
@@ -64,11 +72,15 @@ public class OrderPersistenceMapper {
     }
 
     public OrderItem toOrderItem(OrderRecordEntity entity, PaymentRecordEntity payment) {
+        return toOrderItem(entity, payment, null);
+    }
+
+    public OrderItem toOrderItem(OrderRecordEntity entity, PaymentRecordEntity payment, List<String> resolvedDeliveryItems) {
         OrderStatus status = parseOrderStatus(entity.getStatus());
         return new OrderItem(
             entity.getOrderNo(),
             entity.getUserId(),
-            "",
+            entity.getBuyerAccount(),
             entity.getGoodsId(),
             entity.getGoodsName(),
             parseGoodsType(entity.getGoodsType()),
@@ -80,17 +92,23 @@ public class OrderPersistenceMapper {
             entity.getPayAmount(),
             status,
             entity.getRechargeAccount(),
+            fromStringMapJson(entity.getRechargeFieldsJson()),
             entity.getBuyerRemark(),
             entity.getRequestId(),
             payment == null ? null : payment.getPaymentNo(),
             payment == null ? null : payment.getChannel(),
-            fromJson(entity.getDeliveryItemsJson(), STRING_LIST_TYPE),
+            resolvedDeliveryItems == null ? fromJson(entity.getDeliveryItemsJson(), STRING_LIST_TYPE) : List.copyOf(resolvedDeliveryItems),
             fromJson(entity.getChannelAttemptsJson(), CHANNEL_ATTEMPT_LIST_TYPE),
             deliveryMessage(status, entity.getDeliveryStatus(), entity.getDeliveryMessage()),
             entity.getCreatedAt(),
             entity.getPaidAt(),
-            entity.getDeliveredAt()
+            entity.getDeliveredAt(),
+            entity.getUpstreamOrderNo()
         );
+    }
+
+    public String toCardIdsJson(List<Long> cardIds) {
+        return toJson(cardIds == null ? List.of() : cardIds);
     }
 
     public PaymentRecordEntity toPaymentRecord(PaymentItem payment, Long orderId) {
@@ -100,7 +118,16 @@ public class OrderPersistenceMapper {
         entity.setOrderNo(payment.orderNo());
         entity.setUserId(payment.userId());
         entity.setChannel(payment.method());
-        entity.setOutTradeNo(payment.channelTradeNo() == null ? payment.paymentNo() : payment.channelTradeNo());
+        // 空白也要回退到 paymentNo，不能只判 null：
+        // out_trade_no 上有唯一键 uk_payment_out_trade_no(channel, out_trade_no)，
+        // 一旦写成空串，同渠道所有待支付流水会全部撞在 ('alipay','') 这一行上，
+        // upsert 把旧行的 order_no 改成新订单、却保留旧的 payment_no，
+        // 结果两笔支付被合并成一行，钱记到错误的订单上。
+        entity.setOutTradeNo(
+            payment.channelTradeNo() == null || payment.channelTradeNo().isBlank()
+                ? payment.paymentNo()
+                : payment.channelTradeNo()
+        );
         entity.setAmount(payment.amount());
         entity.setStatus(payment.status());
         entity.setPaidAt(payment.paidAt());
@@ -230,7 +257,18 @@ public class OrderPersistenceMapper {
         try {
             return OBJECT_MAPPER.writeValueAsString(value);
         } catch (JsonProcessingException ex) {
-            return null;
+            throw new IllegalStateException("order snapshot JSON serialization failed", ex);
+        }
+    }
+
+    private Map<String, String> fromStringMapJson(String value) {
+        if (value == null || value.isBlank()) {
+            return Map.of();
+        }
+        try {
+            return Map.copyOf(OBJECT_MAPPER.readValue(value, STRING_MAP_TYPE));
+        } catch (Exception ex) {
+            return Map.of();
         }
     }
 

@@ -1,6 +1,8 @@
 package com.xiyiyun.shop.mvp;
 
 import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.ExcelWriter;
+import com.alibaba.excel.write.metadata.WriteSheet;
 import com.xiyiyun.shop.ApiResponse;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
@@ -32,6 +34,15 @@ import org.springframework.web.multipart.MultipartFile;
 @RequestMapping("/api/admin")
 public class AdminMvpController {
     private static final long MAX_UPLOAD_IMAGE_BYTES = 5L * 1024 * 1024;
+    /** 批次8C：导出每批的取数条数，控制单个请求的常驻内存。 */
+    private static final int ORDER_EXPORT_BATCH_SIZE = 2000;
+    /**
+     * 批次8C：单次导出的行数上限。
+     *
+     * <p>xlsx 单表最多 1048576 行（含表头），这里留出余量并把内存/耗时压在可控范围。
+     * 需要更大范围时应按时间段分多次导出，而不是让一个 HTTP 请求无上界地跑。
+     */
+    private static final long ORDER_EXPORT_MAX_ROWS = 200_000L;
 
     private final InMemoryShopRepository repository;
     private final Path uploadDir;
@@ -42,12 +53,21 @@ public class AdminMvpController {
     }
 
     @GetMapping("/goods")
-    public ApiResponse<List<GoodsItem>> goods(
+    public ApiResponse<PageResult<GoodsListItem>> goods(
         @RequestParam(required = false) Long categoryId,
         @RequestParam(required = false) String search,
-        @RequestParam(required = false) String platform
+        @RequestParam(required = false) String platform,
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
     ) {
-        return ApiResponse.ok(repository.listGoods(categoryId, search, platform, true));
+        return page(repository.listAdminGoods(categoryId, search, platform), page, pageSize);
+    }
+
+    @GetMapping("/goods/{id}")
+    public ApiResponse<GoodsItem> goodsDetail(@PathVariable Long id) {
+        return repository.findGoods(id)
+            .map(ApiResponse::ok)
+            .orElseGet(() -> ApiResponse.fail("goods not found"));
     }
 
     @PostMapping("/auth/login")
@@ -72,6 +92,15 @@ public class AdminMvpController {
     @GetMapping("/auth/captcha-config")
     public ApiResponse<CaptchaChallengeItem> adminCaptchaConfig() {
         return ApiResponse.ok(repository.captchaChallenge("admin"));
+    }
+
+    @GetMapping("/auth/altcha-challenge")
+    public String adminAltchaChallenge() {
+        try {
+            return repository.altchaChallenge();
+        } catch (IllegalStateException ex) {
+            return "{\"error\":\"" + ex.getMessage() + "\"}";
+        }
     }
 
     @GetMapping("/captcha-settings")
@@ -270,9 +299,17 @@ public class AdminMvpController {
         return safe(() -> repository.createUserGroup(request));
     }
 
+    @PostMapping("/users")
+    public ApiResponse<UserItem> createUser(@RequestBody AdminCreateUserRequest request) {
+        return safe(() -> repository.adminCreateUser(request));
+    }
+
     @GetMapping("/users")
-    public ApiResponse<List<UserItem>> users() {
-        return ApiResponse.ok(repository.listUsers());
+    public ApiResponse<PageResult<UserItem>> users(
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        return page(repository.pageUsers(normalizePageSize(pageSize), pageOffset(page, pageSize)), page, pageSize);
     }
 
     @PostMapping("/user-groups/{groupId}/rules")
@@ -342,12 +379,18 @@ public class AdminMvpController {
 
     @PostMapping("/goods")
     public ApiResponse<GoodsItem> createGoods(@RequestBody CreateGoodsRequest request) {
-        return safe(() -> repository.createGoods(request));
+        return safe(() -> {
+            validateGoodsImages(request);
+            return repository.createGoods(request);
+        });
     }
 
     @PostMapping("/goods/{id}")
     public ApiResponse<GoodsItem> updateGoods(@PathVariable Long id, @RequestBody CreateGoodsRequest request) {
-        return safe(() -> repository.updateGoods(id, request));
+        return safe(() -> {
+            validateGoodsImages(request);
+            return repository.updateGoods(id, request);
+        });
     }
 
     @PostMapping("/goods/{id}/delete")
@@ -465,8 +508,11 @@ public class AdminMvpController {
     }
 
     @GetMapping("/goods-monitor")
-    public ApiResponse<ProductMonitorOverview> goodsMonitor() {
-        return ApiResponse.ok(repository.productMonitorOverview());
+    public ApiResponse<ProductMonitorOverview> goodsMonitor(
+        @RequestParam(value = "page", required = false) Integer page,
+        @RequestParam(value = "pageSize", required = false) Integer pageSize
+    ) {
+        return ApiResponse.ok(repository.productMonitorOverview(page, pageSize));
     }
 
     @GetMapping("/goods-monitor/logs")
@@ -507,12 +553,18 @@ public class AdminMvpController {
     }
 
     @GetMapping("/orders")
-    public ApiResponse<List<OrderItem>> orders(
+    public ApiResponse<PageResult<OrderItem>> orders(
         @RequestParam(required = false) String search,
         @RequestParam(required = false) String status,
-        @RequestParam(required = false) String goodsType
+        @RequestParam(required = false) String goodsType,
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
     ) {
-        return ApiResponse.ok(repository.listOrders(search, status, goodsType));
+        return page(
+            repository.pageOrders(search, status, goodsType, null, normalizePageSize(pageSize), pageOffset(page, pageSize)),
+            page,
+            pageSize
+        );
     }
 
     @GetMapping("/orders/export")
@@ -527,10 +579,27 @@ public class AdminMvpController {
         response.setCharacterEncoding("utf-8");
         response.setHeader("Content-Disposition", "attachment; filename*=UTF-8''" + filename);
 
-        EasyExcel.write(response.getOutputStream())
-            .head(orderExportHead())
-            .sheet("订单")
-            .doWrite(orderExportRows(repository.listOrders(search, status, goodsType)));
+        // 批次8C：分批取、分批写。
+        // 原实现是 listOrders() 全表读出后一次性交给 EasyExcel，堆里同时存在
+        // 「全部 OrderItem」+「全部导出行」两份数据，订单表一大就是必然 OOM，
+        // 而且是管理员点一下导出就把整个后端拖垮。
+        // 现在每次只驻留一个批次，并对总导出量设上限，避免单个请求无上界占用内存。
+        try (ExcelWriter writer = EasyExcel.write(response.getOutputStream()).head(orderExportHead()).build()) {
+            WriteSheet sheet = EasyExcel.writerSheet("订单").build();
+            long offset = 0;
+            while (offset < ORDER_EXPORT_MAX_ROWS) {
+                int limit = (int) Math.min(ORDER_EXPORT_BATCH_SIZE, ORDER_EXPORT_MAX_ROWS - offset);
+                PageSlice<OrderItem> slice = repository.pageOrders(search, status, goodsType, null, limit, offset);
+                if (slice.items().isEmpty()) {
+                    break;
+                }
+                writer.write(orderExportRows(slice.items()), sheet);
+                offset += slice.items().size();
+                if (offset >= slice.total()) {
+                    break;
+                }
+            }
+        }
     }
 
     @GetMapping("/orders/{orderNo}")
@@ -586,23 +655,35 @@ public class AdminMvpController {
     }
 
     @GetMapping("/payments")
-    public ApiResponse<List<PaymentItem>> payments() {
-        return ApiResponse.ok(repository.listPayments());
+    public ApiResponse<PageResult<PaymentItem>> payments(
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        return page(repository.pagePayments(normalizePageSize(pageSize), pageOffset(page, pageSize)), page, pageSize);
     }
 
     @GetMapping("/refunds")
-    public ApiResponse<List<RefundItem>> refunds() {
-        return ApiResponse.ok(repository.listRefunds());
+    public ApiResponse<PageResult<RefundItem>> refunds(
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        return page(repository.pageRefunds(normalizePageSize(pageSize), pageOffset(page, pageSize)), page, pageSize);
     }
 
     @GetMapping("/sms-logs")
-    public ApiResponse<List<SmsLogItem>> smsLogs() {
-        return ApiResponse.ok(repository.listSmsLogs());
+    public ApiResponse<PageResult<SmsLogItem>> smsLogs(
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        return page(repository.pageSmsLogs(normalizePageSize(pageSize), pageOffset(page, pageSize)), page, pageSize);
     }
 
     @GetMapping("/operation-logs")
-    public ApiResponse<List<OperationLogItem>> operationLogs() {
-        return ApiResponse.ok(repository.listOperationLogs());
+    public ApiResponse<PageResult<OperationLogItem>> operationLogs(
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        return page(repository.pageOperationLogs(normalizePageSize(pageSize), pageOffset(page, pageSize)), page, pageSize);
     }
 
     @GetMapping("/member-api-credentials")
@@ -624,8 +705,50 @@ public class AdminMvpController {
     }
 
     @GetMapping("/open-api-logs")
-    public ApiResponse<List<OpenApiLogItem>> openApiLogs() {
-        return ApiResponse.ok(repository.listOpenApiLogs());
+    public ApiResponse<PageResult<OpenApiLogItem>> openApiLogs(
+        @RequestParam(required = false) Integer page,
+        @RequestParam(required = false) Integer pageSize
+    ) {
+        return page(repository.pageOpenApiLogs(normalizePageSize(pageSize), pageOffset(page, pageSize)), page, pageSize);
+    }
+
+    /**
+     * 内存切页：仅用于<b>规模有界</b>的配置类列表（分类、商品、供应商、员工等）。
+     *
+     * <p>批次8C 起，随业务量无上界增长的表（订单、支付、退款、各类日志、会员）
+     * 一律改走仓储层的分页方法，不再进这里 —— 那些表用本方法等于每次请求全表加载。
+     */
+    private <T> ApiResponse<PageResult<T>> page(List<T> items, Integer page, Integer pageSize) {
+        int normalizedPage = normalizePage(page);
+        int normalizedPageSize = normalizePageSize(pageSize);
+        int total = items == null ? 0 : items.size();
+        int fromIndex = Math.min((normalizedPage - 1) * normalizedPageSize, total);
+        int toIndex = Math.min(fromIndex + normalizedPageSize, total);
+        List<T> pageItems = items == null ? List.of() : items.subList(fromIndex, toIndex);
+        return ApiResponse.ok(new PageResult<>(pageItems, total, normalizedPage, normalizedPageSize));
+    }
+
+    /** 批次8C：把仓储层已切好的一页包成对外契约，total 来自 SQL 的 COUNT(*)。 */
+    private <T> ApiResponse<PageResult<T>> page(PageSlice<T> slice, Integer page, Integer pageSize) {
+        return ApiResponse.ok(new PageResult<>(
+            slice.items(),
+            slice.total(),
+            normalizePage(page),
+            normalizePageSize(pageSize)
+        ));
+    }
+
+    private int normalizePage(Integer page) {
+        return page == null ? 1 : Math.max(1, page);
+    }
+
+    private int normalizePageSize(Integer pageSize) {
+        return pageSize == null ? 10 : Math.max(1, Math.min(pageSize, 100));
+    }
+
+    /** 分页偏移量。用 long 承接，避免 page 传入极大值时 {@code (page-1)*pageSize} 溢出成负数。 */
+    private long pageOffset(Integer page, Integer pageSize) {
+        return (long) (normalizePage(page) - 1) * normalizePageSize(pageSize);
     }
 
     private List<List<String>> orderExportHead() {
@@ -766,9 +889,30 @@ public class AdminMvpController {
         };
     }
 
+    private void validateGoodsImages(CreateGoodsRequest request) {
+        if (request == null) {
+            return;
+        }
+        rejectEmbeddedImage(request.coverUrl());
+        if (request.detailImages() != null) {
+            request.detailImages().forEach(this::rejectEmbeddedImage);
+        }
+        if (request.detailBlocks() != null) {
+            request.detailBlocks().forEach(block -> rejectEmbeddedImage(block == null ? "" : block.imageUrl()));
+        }
+    }
+
+    private void rejectEmbeddedImage(String value) {
+        if (text(value).toLowerCase(Locale.ROOT).startsWith("data:image/")) {
+            throw new IllegalArgumentException("图片请先上传为文件后再保存，不能保存 base64 图片");
+        }
+    }
+
     private <T> ApiResponse<T> safe(ApiAction<T> action) {
         try {
             return ApiResponse.ok(action.run());
+        } catch (SupplierBusinessException ex) {
+            return ApiResponse.fail(ex.getMessage());
         } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
@@ -778,6 +922,8 @@ public class AdminMvpController {
         try {
             action.run();
             return ApiResponse.ok("deleted");
+        } catch (SupplierBusinessException ex) {
+            return ApiResponse.fail(ex.getMessage());
         } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }

@@ -26,12 +26,16 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 @Service
 public class ConfigPersistenceStore {
+    private static final Logger log = LoggerFactory.getLogger(ConfigPersistenceStore.class);
+
     private final CardKindRecordMapper cardKindRecordMapper;
     private final RechargeFieldRecordMapper rechargeFieldRecordMapper;
     private final SupplierRecordMapper supplierRecordMapper;
@@ -40,6 +44,15 @@ public class ConfigPersistenceStore {
     private final GroupRuleRecordMapper groupRuleRecordMapper;
     private final SystemSettingRecordMapper systemSettingRecordMapper;
     private final CardCipherService cardCipherService;
+    /**
+     * 批次7 / 任务A：007 新建配置表的读写出口。
+     *
+     * <p>为什么从这里转交、而不是直接注入 {@code ConfigService}：{@code ConfigService}
+     * 是在 {@code InMemoryShopRepository} 的构造函数里 new 出来的，拿不到 Spring 注入；
+     * 给仓储构造函数加参数又会波及十余处直接 new 仓储的测试。仓储已经通过
+     * {@code ObjectProvider} 拿到本类，顺着这条既有通道传递代价最小。
+     */
+    private final ConfigTableStore configTableStore;
 
     public ConfigPersistenceStore(
         CardKindRecordMapper cardKindRecordMapper,
@@ -49,7 +62,8 @@ public class ConfigPersistenceStore {
         UserGroupRecordMapper userGroupRecordMapper,
         GroupRuleRecordMapper groupRuleRecordMapper,
         SystemSettingRecordMapper systemSettingRecordMapper,
-        CardCipherService cardCipherService
+        CardCipherService cardCipherService,
+        ConfigTableStore configTableStore
     ) {
         this.cardKindRecordMapper = cardKindRecordMapper;
         this.rechargeFieldRecordMapper = rechargeFieldRecordMapper;
@@ -59,6 +73,12 @@ public class ConfigPersistenceStore {
         this.groupRuleRecordMapper = groupRuleRecordMapper;
         this.systemSettingRecordMapper = systemSettingRecordMapper;
         this.cardCipherService = cardCipherService;
+        this.configTableStore = configTableStore;
+    }
+
+    /** 007 新建配置表的读写出口，见字段注释。 */
+    public ConfigTableStore configTables() {
+        return configTableStore;
     }
 
     @Transactional(readOnly = true)
@@ -315,7 +335,12 @@ public class ConfigPersistenceStore {
 
     private String decryptedSupplierApiKey(SupplierRecordEntity entity) {
         if (entity.getApiKeyCiphertext() != null && entity.getApiKeyNonce() != null) {
-            return cardCipherService.decrypt(entity.getApiKeyCiphertext(), entity.getApiKeyNonce());
+            try {
+                return cardCipherService.decrypt(entity.getApiKeyCiphertext(), entity.getApiKeyNonce());
+            } catch (RuntimeException ex) {
+                log.warn("Supplier API key decrypt failed; loading supplier with an empty key: id={}", entity.getId());
+                return "";
+            }
         }
         return entity.getApiKey();
     }

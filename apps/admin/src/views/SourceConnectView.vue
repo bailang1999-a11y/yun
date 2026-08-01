@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { UploadRawFile } from 'element-plus'
 import { ImagePlus, Layers3, PackageCheck, RefreshCw, Search, Settings2, Upload as UploadIcon, Wand2 } from 'lucide-vue-next'
@@ -7,12 +8,12 @@ import { fetchCategories, fetchRechargeFields } from '../api/catalog'
 import { cloneSourceGoods, fetchSourceConnectGoods, fetchSuppliers } from '../api/suppliers'
 import { fetchPriceTemplates } from '../api/priceTemplates'
 import { uploadImage } from '../api/uploads'
-import type { Category, RechargeField, RemoteCategory, RemoteGoods, SourceCloneConfig, SourceCloneResult, Supplier } from '../types/operations'
+import type { Category, RechargeField, RemoteCategory, RemoteGoods, SourceCloneConfig, SourceCloneItem, SourceCloneResult, Supplier } from '../types/operations'
 import { formatMoney as formatAmount } from '../utils/formatters'
 import { benefitDurationOptions, goodsSalePlatformOptions } from '../utils/goodsOptions'
 import { type PriceTemplate } from '../utils/priceTemplates'
 
-type SourceCloneDraft = Omit<SourceCloneConfig, 'requireRechargeAccount'> & { requireRechargeAccount?: boolean }
+type SourceCloneDraft = Omit<SourceCloneConfig, 'requireRechargeAccount'> & { requireRechargeAccount?: boolean; type?: string }
 type RequiredBatchNumber = number | undefined
 const UNLIMITED_PLATFORM = '__all__'
 
@@ -20,6 +21,8 @@ const suppliers = ref<Supplier[]>([])
 const categories = ref<Category[]>([])
 const rechargeFields = ref<RechargeField[]>([])
 const priceTemplates = ref<PriceTemplate[]>([])
+const priceTemplateLoading = ref(false)
+const priceTemplateLoaded = ref(false)
 const remoteGoods = ref<RemoteGoods[]>([])
 const remoteTotal = ref(0)
 const remoteCategories = ref<RemoteCategory[]>([])
@@ -28,6 +31,10 @@ const draftItems = ref<SourceCloneDraft[]>([])
 const cloneResult = ref<SourceCloneResult>()
 const loading = ref(false)
 const cloning = ref(false)
+const cloneProgress = reactive({
+  total: 0,
+  completed: 0
+})
 const batchApplied = ref(false)
 const draftPanelRef = ref<HTMLElement>()
 const draftTableRef = ref<{ toggleRowExpansion: (row: SourceCloneDraft, expanded?: boolean) => void }>()
@@ -35,6 +42,8 @@ const coverPreviewVisible = ref(false)
 const coverPreviewUrl = ref('')
 const coverPreviewTitle = ref('商品主图预览')
 const imageAccept = 'image/jpeg,image/png,image/webp,image/gif'
+let priceTemplateRequest: Promise<PriceTemplate[]> | null = null
+const router = useRouter()
 
 const form = reactive({
   supplierId: '',
@@ -72,6 +81,12 @@ const remotePageCount = computed(() => Math.max(1, Math.ceil(remoteTotal.value /
 const accountFieldOptions = computed(() => rechargeFields.value.filter((item) => item.enabled))
 const priceTemplateOptions = computed(() => priceTemplates.value)
 const categoryTreeOptions = computed(() => buildCategoryTree(categories.value))
+const resultGoodsIds = computed(() =>
+  (cloneResult.value?.items || [])
+    .map((item) => item.goodsId)
+    .filter((id) => id !== undefined && id !== null && String(id).trim())
+    .map((id) => String(id))
+)
 const salePlatformOptions = computed(() => [
   { label: '无限制', value: UNLIMITED_PLATFORM, logo: 'all' },
   ...goodsSalePlatformOptions
@@ -84,9 +99,17 @@ const remoteRangeLabel = computed(() => {
   const end = Math.min(start + remoteGoods.value.length - 1, remoteTotal.value)
   return `第 ${start}-${end} 条，共 ${remoteTotal.value} 条`
 })
+const cloneStatusText = computed(() => {
+  if (cloning.value && cloneProgress.total > 0) {
+    return `正在对接 ${cloneProgress.completed} / ${cloneProgress.total}，成功 ${cloneResult.value?.createdCount || 0}，跳过 ${cloneResult.value?.skippedCount || 0}，失败 ${cloneResult.value?.failedCount || 0}`
+  }
+  return cloneResult.value
+    ? `成功 ${cloneResult.value.createdCount}，跳过 ${cloneResult.value.skippedCount}，失败 ${cloneResult.value.failedCount}`
+    : '等待操作'
+})
 
 onMounted(async () => {
-  await Promise.all([loadSuppliers(), loadCategories(), loadRechargeFields(), refreshPriceTemplates()])
+  await Promise.all([loadSuppliers(), loadCategories(), loadRechargeFields(), ensurePriceTemplates()])
   if (!form.supplierId && enabledSuppliers.value.length) form.supplierId = String(enabledSuppliers.value[0].id)
 })
 
@@ -185,6 +208,7 @@ async function prepareDrafts() {
   draftItems.value = selectedGoods.value.map((item) => ({
     supplierGoodsId: item.supplierGoodsId,
     name: item.name,
+    type: item.type,
     categoryId: batchForm.categoryId,
     price: numeric(item.price),
     originalPrice: numeric(item.faceValue) || numeric(item.price),
@@ -241,19 +265,49 @@ async function runClone() {
   if (!validateDraftSettings()) return
 
   cloning.value = true
+  cloneProgress.total = draftItems.value.length
+  cloneProgress.completed = 0
+  cloneResult.value = { createdCount: 0, skippedCount: 0, failedCount: 0, items: [] }
+  const pendingDrafts = draftItems.value.map((item) => ({ ...item }))
   try {
-    cloneResult.value = await cloneSourceGoods(form.supplierId, {
-      items: draftItems.value.map(toCloneConfig)
-    })
+    for (const draft of pendingDrafts) {
+      try {
+        const result = await cloneSourceGoods(form.supplierId, {
+          items: [toCloneConfig(draft)]
+        })
+        appendCloneResult(result)
+      } catch (error) {
+        appendCloneResultItem({
+          supplierGoodsId: draft.supplierGoodsId,
+          supplierGoodsName: draft.name || draft.supplierGoodsId,
+          status: 'FAILED',
+          message: cloneErrorMessage(error)
+        })
+      } finally {
+        cloneProgress.completed += 1
+      }
+    }
     ElMessage.success(`创建 ${cloneResult.value.createdCount} 个，跳过 ${cloneResult.value.skippedCount} 个`)
     selectedGoods.value = []
     draftItems.value = []
     batchApplied.value = false
-  } catch (error) {
-    ElMessage.error(cloneErrorMessage(error))
   } finally {
     cloning.value = false
   }
+}
+
+function appendCloneResult(result: SourceCloneResult) {
+  result.items.forEach(appendCloneResultItem)
+}
+
+function appendCloneResultItem(item: SourceCloneItem) {
+  if (!cloneResult.value) {
+    cloneResult.value = { createdCount: 0, skippedCount: 0, failedCount: 0, items: [] }
+  }
+  if (item.status === 'CREATED') cloneResult.value.createdCount += 1
+  else if (item.status === 'SKIPPED') cloneResult.value.skippedCount += 1
+  else if (item.status === 'FAILED') cloneResult.value.failedCount += 1
+  cloneResult.value.items = [item, ...cloneResult.value.items]
 }
 
 function cloneErrorMessage(error: unknown) {
@@ -300,13 +354,24 @@ function removeDraft(id: string) {
   draftItems.value = draftItems.value.filter((item) => item.supplierGoodsId !== id)
 }
 
+function goToResultGoods() {
+  if (!resultGoodsIds.value.length) return
+  router.push({
+    name: 'goods',
+    query: { goodsIds: resultGoodsIds.value.join(',') }
+  })
+}
+
 function validateDraftSettings() {
   const missing = new Set<string>()
   draftItems.value.forEach((item) => {
     if (!item.categoryId) missing.add('本地分类')
     if (!item.status) missing.add('商品状态')
-    if (!item.accountTypes?.length) missing.add('充值字段')
-    if (typeof item.requireRechargeAccount !== 'boolean') missing.add('是否需要充值账号')
+    const isCard = item.type === '1' || item.type?.toUpperCase() === 'CARD'
+    if (!isCard) {
+      if (!item.accountTypes?.length) missing.add('充值字段')
+      if (typeof item.requireRechargeAccount !== 'boolean') missing.add('是否需要充值账号')
+    }
     if (!item.priceTemplateId) missing.add('价格模板')
   })
   if (missing.size) {
@@ -317,6 +382,7 @@ function validateDraftSettings() {
 }
 
 function toCloneConfig(item: SourceCloneDraft): SourceCloneConfig {
+  const isCard = item.type === '1' || item.type?.toUpperCase() === 'CARD'
   return {
     supplierGoodsId: item.supplierGoodsId,
     name: item.name.trim(),
@@ -330,8 +396,8 @@ function toCloneConfig(item: SourceCloneDraft): SourceCloneConfig {
     benefitBrand: item.benefitBrand?.trim(),
     coverUrl: item.coverUrl?.trim(),
     description: item.description?.trim(),
-    accountTypes: item.accountTypes,
-    requireRechargeAccount: item.requireRechargeAccount === true,
+    accountTypes: isCard ? [] : item.accountTypes,
+    requireRechargeAccount: isCard ? false : item.requireRechargeAccount === true,
     priceTemplateId: item.priceTemplateId,
     priceMode: item.priceMode,
     priceCoefficient: item.priceCoefficient,
@@ -404,16 +470,38 @@ function draftCoverUploadHandler(row: SourceCloneDraft) {
   return (file: UploadRawFile) => handleDraftCoverUpload(row, file)
 }
 
-async function refreshPriceTemplates() {
-  priceTemplates.value = await fetchPriceTemplates()
+async function ensurePriceTemplates(options: { force?: boolean } = {}) {
+  if (!options.force && priceTemplateLoaded.value) return priceTemplates.value
+  if (priceTemplateRequest) return priceTemplateRequest
+
+  priceTemplateLoading.value = true
+  priceTemplateRequest = fetchPriceTemplates()
+    .then((templates) => {
+      priceTemplates.value = templates
+      priceTemplateLoaded.value = true
+      return templates
+    })
+    .catch((error) => {
+      ElMessage.error('价格模板加载失败，请稍后重试')
+      throw error
+    })
+    .finally(() => {
+      priceTemplateLoading.value = false
+      priceTemplateRequest = null
+    })
+
+  return priceTemplateRequest
 }
 
 function handlePriceTemplateVisible(visible: boolean) {
-  if (visible) void refreshPriceTemplates()
+  if (visible && !priceTemplateLoaded.value) void ensurePriceTemplates().catch(() => undefined)
 }
 
 async function applyBatchPriceTemplate(templateId?: string) {
-  await refreshPriceTemplates()
+  if (!templateId) return
+  if (!priceTemplateOptions.value.length) {
+    await ensurePriceTemplates().catch(() => undefined)
+  }
   const template = priceTemplateOptions.value.find((item) => item.id === templateId && item.enabled !== false)
   if (!template) return
   batchForm.priceTemplateId = template.id
@@ -849,6 +937,8 @@ function buildCategoryTree(items: Category[]) {
               <el-select
                 v-model="batchForm.priceTemplateId"
                 filterable
+                :loading="priceTemplateLoading"
+                :no-data-text="priceTemplateLoading ? '价格模板加载中' : '暂无价格模板'"
                 placeholder="选择价格模板"
                 @visible-change="handlePriceTemplateVisible"
                 @change="applyBatchPriceTemplate"
@@ -970,6 +1060,8 @@ function buildCategoryTree(items: Category[]) {
                       <el-select
                         v-model="row.priceTemplateId"
                         filterable
+                        :loading="priceTemplateLoading"
+                        :no-data-text="priceTemplateLoading ? '价格模板加载中' : '暂无价格模板'"
                         placeholder="选择价格模板"
                         @visible-change="handlePriceTemplateVisible"
                       >
@@ -1009,6 +1101,7 @@ function buildCategoryTree(items: Category[]) {
                       <span>权益品牌</span>
                       <el-input v-model.trim="row.benefitBrand" placeholder="例如：腾讯视频 / 芒果TV" />
                     </label>
+                    <template v-if="row.type !== '1' && row.type?.toUpperCase() !== 'CARD'">
                     <label class="draft-mini-field">
                       <span>充值字段</span>
                       <el-select
@@ -1029,6 +1122,7 @@ function buildCategoryTree(items: Category[]) {
                         <el-option label="不需要" :value="false" />
                       </el-select>
                     </label>
+                    </template>
                     <label class="draft-mini-field">
                       <span>可售平台</span>
                       <el-select
@@ -1111,9 +1205,9 @@ function buildCategoryTree(items: Category[]) {
                 <span :class="{ muted: !row.benefitDurations?.length }">{{ row.benefitDurations?.join('、') || '未设置权益' }}</span>
                 <span :class="{ muted: !row.benefitType }">{{ row.benefitType || '未设置类型' }}</span>
                 <span :class="{ muted: !row.benefitBrand }">{{ row.benefitBrand || '未设置品牌' }}</span>
-                <span :class="{ muted: !row.accountTypes?.length }">{{ accountFieldLabels(row.accountTypes) }}</span>
+                <span :class="{ muted: !row.accountTypes?.length }">{{ row.type === '1' || row.type?.toUpperCase() === 'CARD' ? '卡密（无需充值字段）' : accountFieldLabels(row.accountTypes) }}</span>
                 <span :class="{ muted: typeof row.requireRechargeAccount !== 'boolean' }">
-                  {{ typeof row.requireRechargeAccount === 'boolean' ? (row.requireRechargeAccount ? '需要账号' : '不需要账号') : '未设置账号' }}
+                  {{ row.type === '1' || row.type?.toUpperCase() === 'CARD' ? '卡密自动发货' : (typeof row.requireRechargeAccount === 'boolean' ? (row.requireRechargeAccount ? '需要账号' : '不需要账号') : '未设置账号') }}
                 </span>
               </div>
             </template>
@@ -1157,7 +1251,7 @@ function buildCategoryTree(items: Category[]) {
           <div>
             <small class="stage-kicker">执行反馈</small>
             <h2>对接结果</h2>
-            <span>{{ cloneResult ? `成功 ${cloneResult.createdCount}，跳过 ${cloneResult.skippedCount}，失败 ${cloneResult.failedCount}` : '等待操作' }}</span>
+            <span>{{ cloneStatusText }}</span>
           </div>
         </div>
         <div v-if="cloneResult" class="result-summary">
@@ -1174,8 +1268,18 @@ function buildCategoryTree(items: Category[]) {
             <strong>{{ cloneResult.failedCount }}</strong>
           </article>
         </div>
+        <el-button
+          v-if="resultGoodsIds.length"
+          class="result-goods-link"
+          type="primary"
+          plain
+          :icon="PackageCheck"
+          @click="goToResultGoods"
+        >
+          去商品列表查看
+        </el-button>
         <div class="result-feed">
-          <article v-for="item in cloneResult?.items || []" :key="`${item.supplierGoodsId}-${item.status}`">
+          <article v-for="(item, index) in cloneResult?.items || []" :key="`${item.supplierGoodsId}-${item.status}-${index}`">
             <div>
               <strong>{{ item.supplierGoodsName || item.supplierGoodsId }}</strong>
               <el-tag :type="statusTone(item.status)" effect="plain">{{ item.status }}</el-tag>
@@ -1594,6 +1698,11 @@ function buildCategoryTree(items: Category[]) {
 
 .result-summary strong {
   font-size: 18px;
+}
+
+.result-goods-link {
+  width: 100%;
+  margin-bottom: 12px;
 }
 
 .result-feed {

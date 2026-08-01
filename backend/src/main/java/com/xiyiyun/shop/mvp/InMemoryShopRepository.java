@@ -9,10 +9,14 @@ import com.xiyiyun.shop.OrderStatus;
 import com.xiyiyun.shop.persistence.AuditPersistenceStore;
 import com.xiyiyun.shop.persistence.CatalogPersistenceStore;
 import com.xiyiyun.shop.persistence.ConfigPersistenceStore;
+import com.xiyiyun.shop.persistence.FundsLedgerStore;
+import com.xiyiyun.shop.persistence.MemberOrderCallbackTaskStore;
+import com.xiyiyun.shop.persistence.OrderCreationStore;
 import com.xiyiyun.shop.persistence.PersistentOrderStore;
-import com.xiyiyun.shop.realtime.OrderRealtimeBroadcaster;
+import com.xiyiyun.shop.security.LoginAttemptGuard;
 import com.xiyiyun.shop.security.RedisSecurityStateStore;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -48,40 +52,28 @@ import javax.crypto.spec.SecretKeySpec;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.env.Environment;
+import org.springframework.core.task.TaskExecutor;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 @Component
-public class InMemoryShopRepository {
+public class InMemoryShopRepository implements TokenAuthPort {
+    private static final Logger LOG = LoggerFactory.getLogger(InMemoryShopRepository.class);
     private static final Charset GBK_CHARSET = Charset.forName("GBK");
-    private static final PasswordEncoder ADMIN_PASSWORD_ENCODER = new BCryptPasswordEncoder();
     private static final String DEFAULT_ADMIN_PASSWORD_BCRYPT = "$2y$10$nj5upOsCRbbEPg1csaQlcOyosbleuZVG7BfL45uh81kG5FpDYWCIq";
     private static final Duration PAYMENT_TIMEOUT = Duration.ofMinutes(15);
-    private static final Duration USER_TOKEN_TTL = Duration.ofDays(30);
-    private static final Duration ADMIN_TOKEN_TTL = Duration.ofHours(12);
-    private static final Duration MEMBER_API_NONCE_TTL = Duration.ofMinutes(5);
+    private static final long SLOW_ORDER_CREATION_MILLIS = 1_000L;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
     private static final TypeReference<List<Map<String, Object>>> LIST_MAP_TYPE = new TypeReference<>() {
     };
-    private static final String PAYMENT_CHANNEL_SETTING_KEY = "payment.channels";
-    private static final String PRICE_TEMPLATE_SETTING_KEY = "price.templates";
-    private static final String ADMIN_STAFF_SETTING_KEY = "admin.staff.accounts";
-    private static final String SUPER_ADMIN_USERNAME_KEY = "admin.super.username";
-    private static final String SUPER_ADMIN_PASSWORD_KEY = "admin.super.passwordHash";
-    private static final String SUPER_ADMIN_NICKNAME_KEY = "admin.super.nickname";
-    private static final List<String> ALL_ADMIN_PERMISSIONS = List.of(
-        "dashboard:read",
-        "goods:manage",
-        "orders:manage",
-        "users:manage",
-        "settings:manage",
-        "staff:manage"
-    );
     private static final int KASUSHOU_CATEGORY_ENRICH_LIMIT = 100;
     private static final int KASUSHOU_CATEGORY_ENRICH_MAX_PAGES = 2;
     private static final int KASUSHOU_CATEGORY_ENRICH_MAX_REQUESTS = 120;
@@ -91,46 +83,36 @@ public class InMemoryShopRepository {
     private static final ZoneId CHINA_ZONE = ZoneId.of("Asia/Shanghai");
     private static final Set<String> SALES_TERMINAL_PLATFORMS = Set.of("all", "h5", "web", "pc", "api");
     private static final Set<String> LEGACY_SYSTEM_GOODS_TAGS = Set.of("new", "api-source");
-    private static final String SMS_LOGIN_SETTING_KEY = "sms.login.setting";
-    private static final String CAPTCHA_SETTING_KEY = "captcha.setting";
-    private static final String DEFAULT_PRICE_LIMIT_NOTICE = "当前会员组暂未开放限价商品购买权限，请联系平台客服处理。";
-    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
-    private final Map<Long, CategoryItem> categories = new ConcurrentHashMap<>();
-    private final Map<Long, CardKindItem> cardKinds = new ConcurrentHashMap<>();
-    private final Map<Long, GoodsItem> goods = new ConcurrentHashMap<>();
     private final Map<Long, CardSecret> cards = new ConcurrentHashMap<>();
     private final Map<String, OrderItem> orders = new ConcurrentHashMap<>();
     private final Map<String, PaymentItem> payments = new ConcurrentHashMap<>();
     private final Map<Long, PaymentCallbackLogItem> paymentCallbackLogs = new ConcurrentHashMap<>();
     private final Map<String, RefundItem> refunds = new ConcurrentHashMap<>();
-    private final Map<Long, SmsLogItem> smsLogs = new ConcurrentHashMap<>();
-    private final Map<String, SmsVerificationCode> smsVerificationCodes = new ConcurrentHashMap<>();
-    private final Map<String, OffsetDateTime> sliderTokens = new ConcurrentHashMap<>();
-    private final Map<Long, OperationLogItem> operationLogs = new ConcurrentHashMap<>();
     private final Map<Long, SupplierItem> suppliers = new ConcurrentHashMap<>();
     private final Map<Long, String> supplierApiKeys = new ConcurrentHashMap<>();
     private final Map<Long, RemoteGoodsSyncResult> remoteGoodsSyncResults = new ConcurrentHashMap<>();
-    private final Map<Long, GoodsChannelItem> goodsChannels = new ConcurrentHashMap<>();
-    private final Map<Long, ProductMonitorState> productMonitorStates = new ConcurrentHashMap<>();
-    private final Map<Long, ProductMonitorLogItem> productMonitorLogs = new ConcurrentHashMap<>();
-    private final Map<Long, RechargeFieldItem> rechargeFields = new ConcurrentHashMap<>();
+    /**
+     * 批次7B / 任务B：分类锁与商品锁<b>仍在仓储声明</b>，但同一个对象引用会传给
+     * {@link CatalogService}。
+     *
+     * <p>不能把它们搬进 CatalogService：仓储的订单侧代码（货源克隆、退款回补库存等）
+     * 也在同一把 {@code goodsLock} 上同步。两边共用同一监视器，{@code synchronized} 块
+     * 才继续互斥，重构前后的并发语义逐字等价。
+     */
+    private final Object categoryLock = new Object();
+    private final Object supplierLock = new Object();
+    private final Object goodsLock = new Object();
+    private final Object orderLock = new Object();
+    private final Object cardLock = new Object();
     private final Map<Long, PaymentChannelItem> paymentChannels = new ConcurrentHashMap<>();
-    private final List<PriceTemplateItem> priceTemplates = new ArrayList<>();
-    private final Map<Long, UserGroupItem> userGroups = new ConcurrentHashMap<>();
-    private final Map<Long, UserItem> users = new ConcurrentHashMap<>();
-    private final Map<String, MemberApiCredentialItem> memberCredentials = new ConcurrentHashMap<>();
-    private final Map<String, OffsetDateTime> memberNonceExpiresAt = new ConcurrentHashMap<>();
-    private final Map<Long, OpenApiLogItem> openApiLogs = new ConcurrentHashMap<>();
-    private final Map<String, GroupRuleItem> groupRules = new ConcurrentHashMap<>();
-    private final Map<Long, String> userPasswordHashes = new ConcurrentHashMap<>();
-    private final Map<String, Long> userTokens = new ConcurrentHashMap<>();
-    private final Map<String, AdminProfile> adminTokens = new ConcurrentHashMap<>();
-    private final Map<Long, AdminStaffItem> adminStaff = new ConcurrentHashMap<>();
-    private final Map<Long, String> adminStaffPasswordHashes = new ConcurrentHashMap<>();
-    private final Map<String, OffsetDateTime> userTokenExpiresAt = new ConcurrentHashMap<>();
-    private final Map<String, OffsetDateTime> adminTokenExpiresAt = new ConcurrentHashMap<>();
-    private volatile SystemSettingItem systemSetting = new SystemSettingItem(
+    /**
+     * 批次6 / 任务C：站点设置的内存默认值。
+     *
+     * <p>真正的持有者是 {@link ConfigService}；这里只保留一份「库里读不到时的出厂值」，
+     * 构造时交给 ConfigService，之后仓储一律通过 {@code configService.systemSetting()} 读。
+     */
+    private static final SystemSettingItem DEFAULT_SYSTEM_SETTING = new SystemSettingItem(
         "喜易云",
         "",
         "工作日 09:00-23:00 在线客服",
@@ -150,89 +132,138 @@ public class InMemoryShopRepository {
         1L,
         Map.of("ops", "ops@example.com")
     );
-    private volatile SmsLoginSettingItem smsLoginSetting = new SmsLoginSettingItem(
-        false,
-        false,
-        false,
-        false,
-        "TENCENT",
-        "",
-        6,
-        300,
-        60,
-        5,
-        Map.of(),
-        Map.of(
-            "secret_id", "",
-            "secret_key", "",
-            "sdk_app_id", "",
-            "sign_name", "",
-            "template_id", "",
-            "region", "ap-guangzhou",
-            "template_param_json", "[\"{code}\"]"
-        ),
-        Map.of(
-            "access_key_id", "",
-            "access_key_secret", "",
-            "sign_name", "",
-            "template_code", "",
-            "region", "cn-hangzhou",
-            "template_param_json", "{\"code\":\"{code}\"}"
-        )
-    );
-    private volatile CaptchaSettingItem captchaSetting = new CaptchaSettingItem(
-        false,
-        false,
-        false,
-        false,
-        "TENCENT",
-        Map.of(
-            "secret_id", "",
-            "secret_key", "",
-            "captcha_app_id", "",
-            "app_secret_key", "",
-            "region", "ap-guangzhou",
-            "scene", "login"
-        ),
-        Map.of(
-            "site_key", "",
-            "secret_key", "",
-            "scene", "login"
-        ),
-        Map.of()
-    );
     private final Set<String> viewedDeliveryOrders = ConcurrentHashMap.newKeySet();
-    private final AtomicLong goodsId = new AtomicLong(10003);
     private final AtomicLong cardId = new AtomicLong(1);
     private final AtomicLong orderSeq = new AtomicLong(1);
     private final AtomicLong paymentSeq = new AtomicLong(1);
     private final AtomicLong paymentCallbackLogId = new AtomicLong(1);
     private final AtomicLong refundSeq = new AtomicLong(1);
-    private final AtomicLong smsLogId = new AtomicLong(1);
-    private final AtomicLong operationLogId = new AtomicLong(1);
-    private final AtomicLong categoryId = new AtomicLong(40000);
-    private final AtomicLong cardKindId = new AtomicLong(1);
     private final AtomicLong supplierId = new AtomicLong(20002);
-    private final AtomicLong channelId = new AtomicLong(30002);
-    private final AtomicLong productMonitorLogId = new AtomicLong(1);
-    private final AtomicLong rechargeFieldId = new AtomicLong(7);
     private final AtomicLong paymentChannelId = new AtomicLong(5);
-    private final AtomicLong userId = new AtomicLong(90003);
-    private final AtomicLong adminStaffId = new AtomicLong(1000);
-    private final AtomicLong openApiLogId = new AtomicLong(1);
-    private final OrderRealtimeBroadcaster realtimeBroadcaster;
+    private final OrderEventPublisher realtimeBroadcaster;
     private final PersistentOrderStore persistentOrderStore;
     private final CatalogPersistenceStore catalogPersistenceStore;
-    private final AuditPersistenceStore auditPersistenceStore;
-    private final ConfigPersistenceStore configPersistenceStore;
     private final RedisSecurityStateStore securityStateStore;
+    /**
+     * 批次6 / 任务B：审计与日志。
+     *
+     * <p>仓储不再直接持有 {@link AuditPersistenceStore} —— id 分配、内存态、DB 镜像、
+     * 读降级全在 {@link AuditService} 里。仓储只调 {@link #appendOperation}。
+     */
+    private final AuditService auditService;
+    /**
+     * 批次6 / 任务C：系统配置（站点设置 + KV 配置项）。
+     *
+     * <p>配置项的 key 与存储形状全部收在 {@link ConfigService}，为批次7 的建表迁移留出单点。
+     */
+    private final ConfigService configService;
+    /**
+     * 实体类持久化（会员组 / 组规则 —— 卡类、充值字段、供应商、商品渠道已随批次7B 交给
+     * {@link CatalogService}）。
+     *
+     * <p>批次6 刻意没搬这些：它们是实体表 CRUD，不属于「配置」职责，塞进
+     * {@link ConfigService} 只会让它变成第二个上帝类。批次7B 把其中的商品域四组
+     * （卡类 / 充值字段 / 供应商 / 商品渠道）收进了 {@link CatalogService}，
+     * 仓储这边只剩会员组与组规则还在直接用。
+     */
+    private final ConfigPersistenceStore configPersistenceStore;
+    /** 批次6 / 任务A：商品监控。 */
+    private final ProductMonitorService productMonitorService;
+    /**
+     * 批次7B / 任务B：商品目录域（商品 / 分类 / 卡类 / 商品渠道 / 充值字段 / 价格模板）。
+     *
+     * <p>这五组实体的内存 Map、id 序列、DB 镜像、读降级、字段归一化全在
+     * {@link CatalogService}。仓储自己不再持有 {@code goods} / {@code categories} /
+     * {@code cardKinds} / {@code goodsChannels} / {@code rechargeFields} 任何一张表。
+     */
+    private final CatalogService catalogService;
+    /**
+     * 批次7C / 任务C1：会员域（会员 / 会员组 / 组规则 / 会员 API 凭据）。
+     *
+     * <p>这四组实体的内存 Map、id 序列、DB 镜像、组规则匹配、开放接口签名校验全在
+     * {@link UserService}。仓储自己不再持有 {@code users} / {@code userGroups} /
+     * {@code groupRules} / {@code memberCredentials} 任何一张表。
+     *
+     * <p><b>资金铁律</b>：会员域只<b>调用</b> {@link com.xiyiyun.shop.persistence.FundsLedgerStore}
+     * 的 {@code creditByAdmin} / {@code debitByAdmin}，批次4 的条件 UPDATE + 受影响行数判定 +
+     * {@code user_balance_transactions} 幂等流水一行都没有复制进去。
+     */
+    private final UserService userService;
+    /**
+     * 批次8D / 任务D1：鉴权域（会员登录 / 管理端登录 / 令牌 / 口令 / 短信验证码 /
+     * 人机验证 / 员工账号）的唯一出口。
+     *
+     * <p>仓储不再持有 {@code userTokens} / {@code adminTokens} / {@code userPasswordHashes} /
+     * {@code adminStaff} / {@code smsVerificationCodes} / {@code smsLoginSetting} /
+     * {@code captchaSetting} 任何一张表或任何一份设置，下面那些登录域公开方法全部退化为转发壳。
+     *
+     * <p>批次5 / B2 的四条登录加固红线（账号+IP 双维度阶梯锁定、统一失败文案、
+     * BCrypt 时间侧信道补偿、「员工已停用」必须在口令校验通过后才提示）整块由
+     * {@link AuthService} 承接，调用顺序逐字未动。
+     */
+    private final AuthService authService;
+
+    @Autowired(required = false)
+    private AltchaCaptchaService altchaCaptchaService;
+    /**
+     * 批次4：资金 / 库存 / 订单状态的原子操作出口。
+     *
+     * <p>用<b>字段注入</b>而非构造器参数，有两个硬理由：
+     * <ol>
+     *   <li>{@code @Transactional} 靠 Spring 代理生效，<b>同类内部自调用会绕过代理</b>。
+     *       事务方法必须住在另一个 bean 里，由本类作为外部调用方进入，事务边界才真实存在。</li>
+     *   <li>现有 4 个测试类（RepositoryProductionPersistenceTest / PersistentOrderStoreTest /
+     *       CatalogPersistenceStoreTest / BackendCoreFixesTest）直接 new 本类的构造器，
+     *       加参数会把原本绿的用例全部编译失败。</li>
+     * </ol>
+     * 为 null 时（纯内存单测）退化到内存路径。
+     */
+    @Autowired(required = false)
+    private FundsLedgerStore fundsLedgerStore;
+    @Autowired(required = false)
+    private OrderCreationStore orderCreationStore;
+    @Autowired(required = false)
+    @Qualifier("applicationTaskExecutor")
+    private TaskExecutor orderEventExecutor;
+    @Autowired(required = false)
+    private MemberOrderCallbackTaskStore memberOrderCallbackTaskStore;
+    /**
+     * 批次5 / B2：登录失败计数 + 阶梯锁定 + 同 IP 频率限制。
+     *
+     * <p>与 {@link #fundsLedgerStore} 同理走<b>字段注入</b>：现有 4 个测试类直接 new 本类构造器，
+     * 加构造参数会把原本绿的用例全部编译失败。为 null 时（纯内存单测）退化为
+     * {@code AuthService.loginGuard()} 里惰性创建的进程内实例，防护逻辑依旧生效。
+     *
+     * <p>批次8D / 任务D1：字段留在仓储，但读取方一律经 {@code RepositoryAuthGateway}
+     * <b>每次现取</b>——{@link #replaceLoginAttemptGuardForTest} 会在运行期整个换掉实现，
+     * 缓存一份就等于把测试注入的阶梯参数丢掉。
+     */
+    @Autowired(required = false)
+    private LoginAttemptGuard loginAttemptGuard;
+    /**
+     * 批次5 / B2：管理端登录强制人机验证。
+     *
+     * <p>为 true 时，只要人机验证「已配置好凭据」，管理端登录一律要求验证码，
+     * 不再受 {@code captchaSetting.enabled()} / {@code adminLoginEnabled()} 两个后台开关影响
+     * （原实现两个开关默认 false，等于管理端登录裸奔）。
+     * 走字段注入的原因同 {@link #loginAttemptGuard}。
+     */
+    @Value("${xiyiyun.login.admin-captcha-required:true}")
+    private boolean adminCaptchaRequired = true;
+    /** 批次3：替换 6 处 platformType 分发链的唯一落点。 */
+    private final SupplierAdapterRegistry supplierAdapters = SupplierAdapterRegistry.defaultRegistry();
+    /**
+     * 批次3：统一连接池 / 超时 / 重试；供应商差异由 SupplierHttpProfile 声明。
+     * 非 final 仅为便于测试注入桩（见 {@link #replaceSupplierHttpClientForTest}）。
+     */
+    private SupplierHttpClient supplierHttp = new SupplierHttpClient();
     private final boolean prodProfile;
     private volatile String adminUsername;
     private volatile String adminPasswordBcrypt;
     private volatile String adminNickname;
 
     public InMemoryShopRepository(
-        OrderRealtimeBroadcaster realtimeBroadcaster,
+        OrderEventPublisher realtimeBroadcaster,
         @Value("${xiyiyun.admin.username:admin}") String adminUsername,
         @Value("${xiyiyun.admin.password-bcrypt:" + DEFAULT_ADMIN_PASSWORD_BCRYPT + "}") String adminPasswordBcrypt,
         @Value("${xiyiyun.admin.nickname:运营管理员}") String adminNickname
@@ -253,7 +284,7 @@ public class InMemoryShopRepository {
 
     @Autowired
     public InMemoryShopRepository(
-        OrderRealtimeBroadcaster realtimeBroadcaster,
+        OrderEventPublisher realtimeBroadcaster,
         ObjectProvider<PersistentOrderStore> persistentOrderStoreProvider,
         ObjectProvider<CatalogPersistenceStore> catalogPersistenceStoreProvider,
         ObjectProvider<AuditPersistenceStore> auditPersistenceStoreProvider,
@@ -279,7 +310,7 @@ public class InMemoryShopRepository {
     }
 
     private InMemoryShopRepository(
-        OrderRealtimeBroadcaster realtimeBroadcaster,
+        OrderEventPublisher realtimeBroadcaster,
         PersistentOrderStore persistentOrderStore,
         CatalogPersistenceStore catalogPersistenceStore,
         AuditPersistenceStore auditPersistenceStore,
@@ -293,20 +324,69 @@ public class InMemoryShopRepository {
         this.realtimeBroadcaster = realtimeBroadcaster;
         this.persistentOrderStore = persistentOrderStore;
         this.catalogPersistenceStore = catalogPersistenceStore;
-        this.auditPersistenceStore = auditPersistenceStore;
-        this.configPersistenceStore = configPersistenceStore;
         this.securityStateStore = securityStateStore;
+        this.configPersistenceStore = configPersistenceStore;
+        // 顺序有讲究：ConfigService 落库失败时要写审计，所以 AuditService 必须先就位。
+        this.auditService = new AuditService(auditPersistenceStore);
+        this.configService = new ConfigService(
+            configPersistenceStore,
+            this.auditService,
+            DEFAULT_SYSTEM_SETTING,
+            this::normalizeRegistrationType,
+            this::validDefaultUserGroupId
+        );
+        this.productMonitorService = new ProductMonitorService(
+            new RepositoryMonitorGateway(),
+            realtimeBroadcaster,
+            this.configService
+        );
+        // 批次7B / 任务B：商品域。锁传的是仓储自己那两个监视器对象，两边继续互斥。
+        this.catalogService = new CatalogService(
+            new RepositoryCatalogGateway(),
+            this.auditService,
+            this.configService,
+            catalogPersistenceStore,
+            configPersistenceStore,
+            this.goodsLock,
+            this.categoryLock
+        );
+        // 批次7C / 任务C1：会员域。CatalogService 先构造没问题 —— 它对会员域的调用
+        // 全走 RepositoryCatalogGateway，都是运行期才转到 userService 的晚绑定。
+        this.userService = new UserService(
+            new RepositoryUserGateway(),
+            this.auditService,
+            this.configService,
+            catalogPersistenceStore,
+            configPersistenceStore,
+            securityStateStore
+        );
         this.prodProfile = prodProfile;
         this.adminUsername = normalize(defaultText(adminUsername, "admin"));
         this.adminPasswordBcrypt = defaultText(adminPasswordBcrypt, DEFAULT_ADMIN_PASSWORD_BCRYPT);
         this.adminNickname = defaultText(adminNickname, "运营管理员");
-        loadPersistentSystemSetting();
-        loadSuperAdminCredentials();
-        loadSmsLoginSetting();
-        loadCaptchaSetting();
-        loadAdminStaff();
+        // 批次8D / 任务D1：鉴权域。必须排在上面三行归一化之后 —— 超级管理员的出厂账号 /
+        // 口令哈希 / 昵称要以「归一后」的值交给 AuthService，它自此成为唯一持有者。
+        this.authService = new AuthService(
+            new RepositoryAuthGateway(),
+            this.auditService,
+            this.configService,
+            configPersistenceStore,
+            securityStateStore,
+            new AltchaCaptchaService(),
+            this.adminUsername,
+            this.adminPasswordBcrypt,
+            this.adminNickname
+        );
+        configService.loadPersistentSystemSetting();
+        // 四份登录域 DB 镜像的读回也随实现搬到了 AuthService，这里只保留调用次序。
+        authService.loadSuperAdminCredentials();
+        authService.loadSmsLoginSetting();
+        authService.loadCaptchaSetting();
+        authService.loadAdminStaff();
         loadPaymentChannels();
         loadPriceTemplates();
+        // 批次6 / 任务A：把已落库的扫描计划读回，避免重启后所有渠道同时打上游。
+        productMonitorService.loadPersistedStates();
         if (prodProfile && !fullPersistenceEnabled()) {
             throw new IllegalStateException("prod profile requires order, catalog, audit and config persistence stores");
         }
@@ -334,14 +414,32 @@ public class InMemoryShopRepository {
     private boolean persistenceEnabled() {
         return persistentOrderStore != null
             || catalogPersistenceStore != null
-            || auditPersistenceStore != null
+            || auditService.persistenceEnabled()
             || configPersistenceStore != null;
+    }
+
+    /**
+     * 资金 / 库存是否走 DB 原子路径。
+     *
+     * <p>要求同时具备订单持久化与流水 store：两者缺一，条件 UPDATE 就没有可写的真实数据行。
+     */
+    private boolean fundsLedgerEnabled() {
+        return fundsLedgerStore != null && persistentOrderStore != null;
+    }
+
+    private boolean persistentOrderCreationEnabled() {
+        return orderCreationStore != null && persistentOrderStore != null;
+    }
+
+    /** 仅供测试注入资金 store（生产由 Spring 注入）。 */
+    void replaceFundsLedgerStoreForTest(FundsLedgerStore store) {
+        this.fundsLedgerStore = store;
     }
 
     private boolean fullPersistenceEnabled() {
         return persistentOrderStore != null
             && catalogPersistenceStore != null
-            && auditPersistenceStore != null
+            && auditService.persistenceEnabled()
             && configPersistenceStore != null;
     }
 
@@ -350,517 +448,115 @@ public class InMemoryShopRepository {
             && List.of(environment.getActiveProfiles()).stream().anyMatch("prod"::equalsIgnoreCase);
     }
 
-    public List<CategoryItem> listCategories() {
-        Optional<List<CategoryItem>> persistent = persistentCategories();
-        if (persistent.isPresent()) {
-            return persistent.get();
-        }
-        List<CategoryItem> snapshot = categories.values().stream()
-            .sorted(Comparator.comparing(CategoryItem::sort).thenComparing(CategoryItem::id))
-            .toList();
-        Map<Long, CategoryItem> byId = snapshot.stream()
-            .collect(java.util.stream.Collectors.toMap(CategoryItem::id, item -> item, (left, right) -> left));
-        Set<Long> parentIds = snapshot.stream()
-            .map(CategoryItem::parentId)
-            .filter(parentId -> parentId != null && parentId != 0L)
-            .collect(java.util.stream.Collectors.toSet());
-        return snapshot.stream()
-            .map(item -> enrichCategory(item, byId, parentIds))
-            .toList();
-    }
 
-    public List<CardKindItem> listCardKinds() {
-        Optional<List<CardKindItem>> persistent = persistentCardKinds();
-        if (persistent.isPresent()) {
-            return persistent.get().stream()
-                .map(this::enrichCardKind)
-                .toList();
-        }
-        return cardKinds.values().stream()
-            .sorted(Comparator.comparing(CardKindItem::id))
-            .map(this::enrichCardKind)
-            .toList();
-    }
 
-    public synchronized CardKindItem createCardKind(CreateCardKindRequest request) {
-        if (request == null || !StringUtils.hasText(request.name())) {
-            throw new IllegalArgumentException("card kind name is required");
-        }
-        String type = normalizeCardKindType(request.type());
-        if (request.cost() != null && request.cost().compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalArgumentException("card kind cost cannot be negative");
-        }
-        Long id = allocateNextCandidateId(cardKindId, maxCardKindId());
-        CardKindItem item = new CardKindItem(
-            id,
-            request.name().trim(),
-            type,
-            request.cost() == null ? BigDecimal.ZERO : request.cost()
-        );
-        cardKinds.put(id, item);
-        persistCardKind(item);
-        return enrichCardKind(item);
-    }
 
-    public synchronized CategoryItem createCategory(CreateCategoryRequest request) {
-        if (request == null || !StringUtils.hasText(request.name())) {
-            throw new IllegalArgumentException("category name is required");
-        }
-        Long parentId = request.parentId() == null ? 0L : request.parentId();
-        if (parentId != 0L && findCategorySnapshot(parentId).isEmpty()) {
-            throw new IllegalArgumentException("parent category not found");
-        }
-        int level = categoryLevel(parentId);
-        if (level >= 5) {
-            throw new IllegalStateException("category depth cannot exceed 5");
-        }
-        Long id = allocateIncrementingId(categoryId, maxCategoryId());
-        CategoryItem item = new CategoryItem(
-            id,
-            request.name().trim(),
-            defaultText(request.nickname(), ""),
-            parentId,
-            normalizeCategoryIcon(request.icon()),
-            normalizeCategoryIcon(request.iconUrl()),
-            normalizeCategoryIcon(request.customIconUrl()),
-            request.sort() == null ? (int) (id % 1000) : request.sort(),
-            categoryEnabled(request.enabled(), request.status()),
-            categoryStatus(categoryEnabled(request.enabled(), request.status())),
-            categoryLevel(parentId) + 1,
-            false
-        );
-        categories.put(id, item);
-        persistCategorySnapshot(item);
-        return enrichCategory(item);
-    }
 
-    public synchronized CategoryItem updateCategory(Long id, UpdateCategoryRequest request) {
-        CategoryItem current = findCategorySnapshot(id).orElse(null);
-        if (current == null) {
-            throw new IllegalArgumentException("category not found");
-        }
-        if (request == null) {
-            throw new IllegalArgumentException("category update request is required");
-        }
-        Long parentId = request.parentId() == null ? current.parentId() : request.parentId();
-        validateCategoryParent(id, parentId);
-        String name = request.name() == null ? current.name() : request.name().trim();
-        if (!StringUtils.hasText(name)) {
-            throw new IllegalArgumentException("category name is required");
-        }
-        int newLevel = categoryLevel(parentId) + 1;
-        if (newLevel + categorySubtreeHeight(id) - 1 > 5) {
-            throw new IllegalStateException("category depth cannot exceed 5");
-        }
-        boolean enabled = request.enabled() == null && !StringUtils.hasText(request.status())
-            ? current.enabled() == null || current.enabled()
-            : categoryEnabled(request.enabled(), request.status());
-        CategoryItem next = new CategoryItem(
-            current.id(),
-            name,
-            request.nickname() == null ? current.nickname() : defaultText(request.nickname(), ""),
-            parentId,
-            request.icon() == null ? current.icon() : normalizeCategoryIcon(request.icon()),
-            request.iconUrl() == null ? current.iconUrl() : normalizeCategoryIcon(request.iconUrl()),
-            request.customIconUrl() == null ? current.customIconUrl() : normalizeCategoryIcon(request.customIconUrl()),
-            request.sort() == null ? current.sort() : request.sort(),
-            enabled,
-            categoryStatus(enabled),
-            newLevel,
-            hasChildCategory(current.id())
-        );
-        categories.put(id, next);
-        persistCategorySnapshot(next);
-        return enrichCategory(next);
-    }
 
-    public synchronized CategoryItem updateCategoryStatus(Long id, boolean enabled) {
-        CategoryItem item = findCategorySnapshot(id).orElse(null);
-        if (item == null) {
-            throw new IllegalArgumentException("category not found");
-        }
-        CategoryItem next = new CategoryItem(
-            item.id(),
-            item.name(),
-            item.nickname(),
-            item.parentId(),
-            item.icon(),
-            item.iconUrl(),
-            item.customIconUrl(),
-            item.sort(),
-            enabled,
-            categoryStatus(enabled),
-            categoryLevel(item.parentId()) + 1,
-            hasChildCategory(item.id())
-        );
-        categories.put(id, next);
-        persistCategorySnapshot(next);
-        return enrichCategory(next);
-    }
 
-    public synchronized void deleteCategory(Long id) {
-        CategoryItem item = findCategorySnapshot(id).orElse(null);
-        if (item == null) {
-            throw new IllegalArgumentException("category not found");
-        }
-        if (hasChildCategory(id)) {
-            throw new IllegalStateException("category has child categories and cannot be deleted");
-        }
-        if (allGoodsSnapshots().stream().anyMatch(goodsItem -> Objects.equals(goodsItem.categoryId(), id))) {
-            throw new IllegalStateException("category is referenced by goods and cannot be deleted");
-        }
-        categories.remove(id);
-        deletePersistentCategory(id);
-    }
 
-    public List<GoodsItem> listGoods(Long categoryId, String search, String platform, boolean admin) {
-        return listGoods(categoryId, search, platform, null, admin);
-    }
 
-    public List<GoodsItem> listGoods(Long categoryId, String search, String platform, Long userGroupId, boolean admin) {
-        Optional<List<GoodsItem>> persistent = persistentGoods();
-        if (persistent.isPresent()) {
-            List<GoodsItem> items = persistent.get();
-            ensureGoodsChannelsForIntegrations(items);
-            return filterGoods(items, categoryId, search, platform, userGroupId, admin, false);
-        }
-        List<GoodsItem> items = new ArrayList<>(goods.values());
-        ensureGoodsChannelsForIntegrations(items);
-        return filterGoods(items, categoryId, search, platform, userGroupId, admin, true);
-    }
 
-    private List<GoodsItem> filterGoods(
-        List<GoodsItem> source,
-        Long categoryId,
-        String search,
-        String platform,
-        Long userGroupId,
-        boolean admin,
-        boolean refresh
-    ) {
-        String keyword = normalize(search);
-        String normalizedPlatform = normalize(platform);
-        Set<Long> categoryScope = categoryId == null ? Set.of() : categoryTreeIds(categoryId);
-        UserGroupItem activeGroup = admin ? null : findUserGroupSnapshot(userGroupId == null ? 1L : userGroupId).orElse(null);
-        List<GroupRuleItem> activeRules = activeGroup == null ? List.of() : rulesForGroup(activeGroup.id());
-        return source.stream()
-            .filter(item -> admin || "ON_SALE".equals(item.status()))
-            .filter(item -> categoryId == null || categoryScope.contains(item.categoryId()))
-            .filter(item -> admin || !StringUtils.hasText(normalizedPlatform) || goodsAllowsPlatform(item, normalizedPlatform))
-            .filter(item -> admin || allowedByGroupRules(item, activeRules))
-            .filter(item -> !StringUtils.hasText(keyword) || containsKeyword(item, keyword))
-            .map(item -> refresh ? refreshStock(item) : item)
-            .map(this::withChannelIntegrations)
-            .sorted(Comparator.comparing(GoodsItem::id))
-            .toList();
-    }
 
-    public Optional<GoodsItem> findGoods(Long id) {
-        return findGoodsSnapshot(id).map(this::refreshStock);
-    }
 
-    public Optional<GoodsItem> findGoods(Long id, Long userGroupId, boolean admin) {
-        return findGoods(id)
-            .filter(item -> admin || "ON_SALE".equals(item.status()));
-    }
+
+
+
+
+
 
     public SystemSettingItem systemSetting() {
-        return systemSetting;
+        return configService.systemSetting();
     }
 
+    // ================================================================
+    // 批次8D / 任务D1：鉴权域的转发壳
+    //
+    // 下面这些方法的<b>实现已整块搬到 {@link AuthService}</b>，这里只留同名同签名的
+    // 转发。理由与批次6/7B/7C 的转发壳一致：AdminMvpController / H5MvpController /
+    // MemberMvpController 上有几十处调用点，顺手改成 {@code authService.xxx()}
+    // 只会在一次纯结构重构里制造巨大 diff，掩盖真正的搬迁动作。
+    //
+    // {@code synchronized} 修饰符逐字保留：仓储自身仍有非登录代码与这些方法竞争同一个
+    // 实例锁（如订单侧读会员快照），去掉会悄悄放宽并发语义。
+
     public SmsLoginSettingItem smsLoginSetting() {
-        return smsLoginSetting;
+        return authService.smsLoginSetting();
     }
 
     public CaptchaSettingItem captchaSetting() {
-        return captchaSetting;
+        return authService.captchaSetting();
     }
 
     public CaptchaChallengeItem captchaChallenge(String terminal) {
-        String cleanTerminal = normalizeTerminal(terminal);
-        boolean required = isCaptchaRequired(cleanTerminal);
-        String provider = normalizeCaptchaProvider(captchaSetting.provider());
-        Map<String, String> config = "TURNSTILE".equals(provider) ? captchaSetting.turnstileConfig() : captchaSetting.tencentConfig();
-        return new CaptchaChallengeItem(
-            required,
-            provider,
-            required ? defaultText("TURNSTILE".equals(provider) ? config.get("site_key") : config.get("captcha_app_id"), "") : "",
-            defaultText(config.get("scene"), "login")
-        );
+        return authService.captchaChallenge(terminal);
+    }
+
+    public String altchaChallenge() {
+        AltchaCaptchaService service = altchaCaptchaService;
+        if (service == null) {
+            service = new AltchaCaptchaService();
+        }
+        return authService.altchaChallenge();
     }
 
     public synchronized SmsLoginSettingItem updateSmsLoginSetting(SmsLoginSettingRequest request) {
-        if (request == null) {
-            return smsLoginSetting;
-        }
-        smsLoginSetting = new SmsLoginSettingItem(
-            request.enabled() == null ? smsLoginSetting.enabled() : request.enabled(),
-            request.adminLoginEnabled() == null ? smsLoginSetting.adminLoginEnabled() : request.adminLoginEnabled(),
-            request.h5LoginEnabled() == null ? smsLoginSetting.h5LoginEnabled() : request.h5LoginEnabled(),
-            request.webLoginEnabled() == null ? smsLoginSetting.webLoginEnabled() : request.webLoginEnabled(),
-            normalizeSmsProvider(defaultText(request.provider(), smsLoginSetting.provider())),
-            defaultText(request.adminMobile(), smsLoginSetting.adminMobile()).trim(),
-            clampInt(request.codeLength() == null ? smsLoginSetting.codeLength() : request.codeLength(), 4, 8),
-            clampInt(request.ttlSeconds() == null ? smsLoginSetting.ttlSeconds() : request.ttlSeconds(), 60, 1800),
-            clampInt(request.cooldownSeconds() == null ? smsLoginSetting.cooldownSeconds() : request.cooldownSeconds(), 10, 300),
-            clampInt(request.maxAttempts() == null ? smsLoginSetting.maxAttempts() : request.maxAttempts(), 1, 10),
-            normalizeSmsConfig(request.genericConfig() == null ? smsLoginSetting.genericConfig() : request.genericConfig()),
-            normalizeSmsConfig(request.tencentConfig() == null ? smsLoginSetting.tencentConfig() : request.tencentConfig()),
-            normalizeSmsConfig(request.aliyunConfig() == null ? smsLoginSetting.aliyunConfig() : request.aliyunConfig())
-        );
-        persistSmsLoginSetting();
-        return smsLoginSetting;
+        return authService.updateSmsLoginSetting(request);
     }
 
     public synchronized CaptchaSettingItem updateCaptchaSetting(CaptchaSettingRequest request) {
-        if (request == null) {
-            return captchaSetting;
-        }
-        CaptchaSettingItem next = captchaSettingFromRequest(request);
-        validateCaptchaSetting(next);
-        captchaSetting = next;
-        persistCaptchaSetting();
-        return captchaSetting;
+        return authService.updateCaptchaSetting(request);
     }
 
     public String testCaptchaSetting(CaptchaSettingRequest request) {
-        CaptchaSettingItem setting = request == null ? captchaSetting : captchaSettingFromRequest(request);
-        validateCaptchaSetting(setting);
-        if (!setting.enabled()) {
-            return "人机验证总开关未开启，当前不会触发校验。";
-        }
-        return switch (normalizeCaptchaProvider(setting.provider())) {
-            case "GENERIC" -> testGenericCaptchaSetting(setting.genericConfig());
-            case "TURNSTILE" -> testTurnstileCaptchaSetting(setting.turnstileConfig());
-            default -> testTencentCaptchaSetting(setting.tencentConfig());
-        };
-    }
-
-    private CaptchaSettingItem captchaSettingFromRequest(CaptchaSettingRequest request) {
-        return new CaptchaSettingItem(
-            request.enabled() == null ? captchaSetting.enabled() : request.enabled(),
-            request.adminLoginEnabled() == null ? captchaSetting.adminLoginEnabled() : request.adminLoginEnabled(),
-            request.h5LoginEnabled() == null ? captchaSetting.h5LoginEnabled() : request.h5LoginEnabled(),
-            request.webLoginEnabled() == null ? captchaSetting.webLoginEnabled() : request.webLoginEnabled(),
-            normalizeCaptchaProvider(defaultText(request.provider(), captchaSetting.provider())),
-            normalizeSmsConfig(request.tencentConfig() == null ? captchaSetting.tencentConfig() : request.tencentConfig()),
-            normalizeSmsConfig(request.turnstileConfig() == null ? captchaSetting.turnstileConfig() : request.turnstileConfig()),
-            normalizeSmsConfig(request.genericConfig() == null ? captchaSetting.genericConfig() : request.genericConfig())
-        );
-    }
-
-    private void validateCaptchaSetting(CaptchaSettingItem setting) {
-        if (setting == null || !setting.enabled()) {
-            return;
-        }
-        if (!setting.adminLoginEnabled() && !setting.h5LoginEnabled() && !setting.webLoginEnabled()) {
-            return;
-        }
-        String provider = normalizeCaptchaProvider(setting.provider());
-        if ("GENERIC".equals(provider)) {
-            requireConfig(setting.genericConfig(), "url", "通用 HTTP 校验请求地址");
-            return;
-        }
-        if ("TURNSTILE".equals(provider)) {
-            requireConfig(setting.turnstileConfig(), "site_key", "Cloudflare Turnstile Site Key");
-            requireConfig(setting.turnstileConfig(), "secret_key", "Cloudflare Turnstile Secret Key");
-            return;
-        }
-        Map<String, String> config = setting.tencentConfig();
-        requireConfig(config, "secret_id", "腾讯云 SecretId");
-        requireConfig(config, "secret_key", "腾讯云 SecretKey");
-        requireConfig(config, "captcha_app_id", "腾讯云 CaptchaAppId");
-        requireConfig(config, "app_secret_key", "腾讯云 AppSecretKey");
-    }
-
-    private void requireConfig(Map<String, String> config, String key, String label) {
-        if (!StringUtils.hasText(defaultText(config == null ? "" : config.get(key), ""))) {
-            throw new IllegalArgumentException(label + "不能为空");
-        }
-    }
-
-    public synchronized String sendAdminLoginSmsCode(SendSmsCodeRequest request) {
-        return sendAdminLoginSmsCode(request, "");
+        return authService.testCaptchaSetting(request);
     }
 
     public synchronized String sendAdminLoginSmsCode(SendSmsCodeRequest request, String clientIp) {
-        verifyHumanCaptchaIfRequired("admin", request == null ? "" : request.captchaTicket(), request == null ? "" : request.captchaRandstr(), clientIp);
-        if (!smsLoginSetting.enabled() || !smsLoginSetting.adminLoginEnabled()) {
-            throw new IllegalStateException("后台短信验证登录未启用");
-        }
-        String mobile = defaultText(smsLoginSetting.adminMobile(), "").trim();
-        if (!isMobile(mobile)) {
-            throw new IllegalStateException("请先在后台配置管理员接收验证码手机号");
-        }
-        return sendLoginSmsCode("admin", mobile, "ADMIN_LOGIN");
-    }
-
-    public synchronized String sendUserLoginSmsCode(SendSmsCodeRequest request) {
-        return sendUserLoginSmsCode(request, "");
+        return authService.sendAdminLoginSmsCode(request, clientIp);
     }
 
     public synchronized String sendUserLoginSmsCode(SendSmsCodeRequest request, String clientIp) {
-        String terminal = normalizeTerminal(request == null ? "" : request.terminal());
-        String mode = normalize(defaultText(request == null ? "" : request.mode(), "login"));
-        verifyHumanCaptchaIfRequired(terminal, request == null ? "" : request.captchaTicket(), request == null ? "" : request.captchaRandstr(), clientIp);
-        String mobile = normalize(request == null ? "" : request.account());
-        if ("register".equals(mode)) {
-            validateRegistration(mobile);
-            if (!isRegistrationSmsCodeRequired()) {
-                throw new IllegalStateException("当前注册方式不需要短信验证码");
-            }
-            if (!smsLoginSetting.enabled()) {
-                throw new IllegalStateException("短信验证码服务未启用");
-            }
-        } else if ("forgot".equals(mode)) {
-            if (!smsLoginSetting.enabled()) {
-                throw new IllegalStateException("短信验证码服务未启用");
-            }
-        } else if (!isUserSmsLoginRequired(terminal)) {
-            throw new IllegalStateException("当前端未启用短信验证登录");
-        }
-        if (!isMobile(mobile)) {
-            throw new IllegalArgumentException("请输入正确的手机号");
-        }
-        return sendLoginSmsCode(terminal, mobile, "USER_LOGIN");
+        return authService.sendUserLoginSmsCode(request, clientIp);
     }
 
     public synchronized String createSliderToken(String terminal) {
-        String token = "slider_" + UUID.randomUUID().toString().replace("-", "");
-        OffsetDateTime expiresAt = OffsetDateTime.now().plusMinutes(5);
-        sliderTokens.put(token, expiresAt);
-        if (securityStateStore != null) {
-            securityStateStore.storeSliderToken(token, Duration.between(OffsetDateTime.now(), expiresAt));
-        }
-        return token;
+        return authService.createSliderToken(terminal);
     }
 
-    public synchronized SystemSettingItem updateSystemSetting(UpdateSystemSettingRequest request) {
-        if (request == null) {
-            return systemSetting;
-        }
-        systemSetting = new SystemSettingItem(
-            defaultText(request.siteName(), systemSetting.siteName()),
-            defaultText(request.logoUrl(), systemSetting.logoUrl()),
-            defaultText(request.customerService(), systemSetting.customerService()),
-            defaultText(request.companyName(), systemSetting.companyName()),
-            defaultText(request.icpRecordNo(), systemSetting.icpRecordNo()),
-            defaultText(request.policeRecordNo(), systemSetting.policeRecordNo()),
-            defaultText(request.disclaimer(), systemSetting.disclaimer()),
-            defaultText(request.paymentMode(), systemSetting.paymentMode()),
-            request.autoRefundEnabled() == null ? systemSetting.autoRefundEnabled() : request.autoRefundEnabled(),
-            defaultText(request.smsProvider(), systemSetting.smsProvider()),
-            request.smsEnabled() == null ? systemSetting.smsEnabled() : request.smsEnabled(),
-            Math.max(5, request.upstreamSyncSeconds() == null ? systemSetting.upstreamSyncSeconds() : request.upstreamSyncSeconds()),
-            request.autoShelfEnabled() == null ? systemSetting.autoShelfEnabled() : request.autoShelfEnabled(),
-            request.autoPriceEnabled() == null ? systemSetting.autoPriceEnabled() : request.autoPriceEnabled(),
-            request.registrationEnabled() == null ? systemSetting.registrationEnabled() : request.registrationEnabled(),
-            normalizeRegistrationType(defaultText(request.registrationType(), systemSetting.registrationType())),
-            validDefaultUserGroupId(request.defaultUserGroupId() == null ? systemSetting.defaultUserGroupId() : request.defaultUserGroupId()),
-            request.notificationReceivers() == null ? systemSetting.notificationReceivers() : Map.copyOf(request.notificationReceivers())
-        );
-        persistSystemSetting(systemSetting);
-        return systemSetting;
+    public SystemSettingItem updateSystemSetting(UpdateSystemSettingRequest request) {
+        return configService.updateSystemSetting(request);
     }
 
-    public synchronized List<PriceTemplateItem> listPriceTemplates() {
-        ensurePriceTemplatesReady();
-        return priceTemplates.stream()
-            .map(this::sanitizePriceTemplate)
-            .toList();
-    }
 
-    public synchronized List<PriceTemplateItem> savePriceTemplates(List<PriceTemplateItem> request) {
-        priceTemplates.clear();
-        if (request != null) {
-            request.stream()
-                .map(this::sanitizePriceTemplate)
-                .filter(item -> StringUtils.hasText(item.id()) && StringUtils.hasText(item.name()))
-                .forEach(priceTemplates::add);
-        }
-        if (priceTemplates.isEmpty()) {
-            priceTemplates.add(defaultPriceTemplate());
-        }
-        persistPriceTemplates();
-        return listPriceTemplates();
-    }
 
     public synchronized AuthSession<UserItem> loginUser(LoginRequest request) {
         return loginUser(request, "");
     }
 
     public synchronized AuthSession<UserItem> loginUser(LoginRequest request, String clientIp) {
-        return loginUser(request, clientIp, true);
+        // 第三参 verifyCaptcha=true 与重构前的私有三参重载逐字一致：
+        // 只有 authenticateUser 的 login 分支会传 false（它自己已先校验过人机验证）。
+        return authService.loginUser(request, clientIp, true);
     }
 
-    private AuthSession<UserItem> loginUser(LoginRequest request, String clientIp, boolean verifyCaptcha) {
-        String account = normalize(request == null ? "" : request.account());
-        if (!StringUtils.hasText(account)) {
-            throw new IllegalArgumentException("account is required");
-        }
-        String terminal = normalizeTerminal(request == null ? "" : request.terminal());
-        if (verifyCaptcha) {
-            verifyHumanCaptchaIfRequired(terminal, request == null ? "" : request.captchaTicket(), request == null ? "" : request.captchaRandstr(), clientIp);
-        }
-        boolean smsRequired = isUserSmsLoginRequired(terminal);
-        Optional<UserItem> matchedUser = allUserSnapshots().stream()
-            .filter(item -> Objects.equals(normalize(item.mobile()), account) || Objects.equals(normalize(item.email()), account))
-            .findFirst();
-        boolean hasPassword = StringUtils.hasText(defaultText(request == null ? "" : request.password(), ""));
-        if (smsRequired) {
-            verifyLoginSmsCode(verificationKey("USER_LOGIN", terminal, account), request == null ? "" : request.code());
-        }
-        UserItem user = matchedUser.orElseThrow(() -> new IllegalArgumentException("账号不存在，请先注册"));
-        if (!smsRequired || hasPassword) {
-            verifyUserPassword(user, request);
-        }
-        UserItem next = withUserLastLoginAt(user, OffsetDateTime.now());
-        users.put(next.id(), next);
-        persistUserSnapshot(next);
-        String token = issueUserToken(next.id());
-        return new AuthSession<>(token, withGroupName(next));
-    }
-
-    public synchronized AuthSession<UserItem> authenticateUser(UserAuthRequest request) {
-        return authenticateUser(request, "");
+    /**
+     * 仅供测试注入自定义节流参数。
+     *
+     * <p>批次8D / 任务D1 后仍写<b>仓储自己的</b> {@code loginAttemptGuard} 字段：
+     * {@code RepositoryAuthGateway.loginAttemptGuard()} 每次现取，替换会自动透传到
+     * {@link AuthService}，{@code LoginBruteForceProtectionTest} 注入的阶梯参数才生效。
+     */
+    void replaceLoginAttemptGuardForTest(LoginAttemptGuard guard) {
+        this.loginAttemptGuard = guard;
     }
 
     public synchronized AuthSession<UserItem> authenticateUser(UserAuthRequest request, String clientIp) {
-        String mode = normalize(defaultText(request == null ? "" : request.mode(), "login"));
-        String terminal = normalizeTerminal(request == null ? "" : request.terminal());
-        String account = normalize(request == null ? "" : request.account());
-        if (!StringUtils.hasText(account)) {
-            throw new IllegalArgumentException("请输入账号");
-        }
-        verifyHumanCaptchaIfRequired(terminal, request == null ? "" : request.captchaTicket(), request == null ? "" : request.captchaRandstr(), clientIp);
-        return switch (mode) {
-            case "register" -> registerUser(request, terminal, account);
-            case "forgot" -> resetUserPassword(request, terminal, account);
-            default -> loginUser(new LoginRequest(account, request == null ? "" : request.password(), request == null ? "" : request.code(), terminal, "", request == null ? "" : request.captchaTicket(), request == null ? "" : request.captchaRandstr()), clientIp, false);
-        };
+        return authService.authenticateUser(request, clientIp);
     }
 
     public synchronized UserItem changeUserPassword(Long userId, PasswordChangeRequest request) {
-        UserItem user = requiredUser(userId);
-        String currentPassword = defaultText(request == null ? "" : request.currentPassword(), "");
-        String newPassword = defaultText(request == null ? "" : request.newPassword(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        if (!StringUtils.hasText(newPassword) || newPassword.length() < 6) {
-            throw new IllegalArgumentException("新密码至少需要 6 位");
-        }
-        if (!Objects.equals(newPassword, confirmPassword)) {
-            throw new IllegalArgumentException("两次输入的新密码不一致");
-        }
-        String currentHash = userPasswordHashes.get(userId);
-        if (StringUtils.hasText(currentHash) && !ADMIN_PASSWORD_ENCODER.matches(currentPassword, currentHash)) {
-            throw new IllegalArgumentException("当前密码不正确");
-        }
-        String nextHash = ADMIN_PASSWORD_ENCODER.encode(newPassword);
-        userPasswordHashes.put(userId, nextHash);
-        persistRuntimeSetting("user.password." + userId, nextHash);
-        invalidateUserTokens(userId);
-        appendOperation("USER_PASSWORD_CHANGE", "USER", String.valueOf(userId), "会员修改登录密码");
-        return withGroupName(user);
+        return authService.changeUserPassword(userId, request);
     }
 
     public synchronized RechargeRequestResult createRechargeRequest(Long userId, RechargeRequest request) {
@@ -892,9 +588,10 @@ public class InMemoryShopRepository {
             user.realName(),
             user.subjectName(),
             user.certificateNo(),
-            user.verificationStatus()
+            user.verificationStatus(),
+            user.username()
         );
-        users.put(userId, next);
+        userService.usersMap().put(userId, next);
         persistUserSnapshot(next);
         String requestNo = "RCH" + now.format(DateTimeFormatter.ofPattern("yyyyMMddHHmmss")) + String.format("%04d", paymentSeq.getAndIncrement());
         appendOperation("USER_RECHARGE_SUCCESS", "USER", String.valueOf(userId), method + ":" + amount.toPlainString() + ":" + defaultText(request == null ? "" : request.remark(), ""));
@@ -902,525 +599,158 @@ public class InMemoryShopRepository {
     }
 
     public Optional<UserItem> findUserByToken(String token) {
-        String cleanToken = cleanBearerToken(token);
-        if (StringUtils.hasText(cleanToken) && securityStateStore != null) {
-            Optional<Long> redisUserId = securityStateStore.loadUserToken(cleanToken);
-            if (redisUserId.isPresent()) {
-                return findUserSnapshot(redisUserId.get()).map(this::withGroupName);
-            }
-        }
-        if (isTokenExpired(cleanToken, userTokenExpiresAt)) {
-            userTokens.remove(cleanToken);
-            userTokenExpiresAt.remove(cleanToken);
-            if (securityStateStore != null) {
-                securityStateStore.deleteUserToken(cleanToken);
-            }
-            return Optional.empty();
-        }
-        Long userId = userTokens.get(cleanToken);
-        return userId == null ? Optional.empty() : findUserSnapshot(userId).map(this::withGroupName);
+        return authService.findUserByToken(token);
     }
 
     public void logoutUser(String token) {
-        String cleanToken = cleanBearerToken(token);
-        if (!StringUtils.hasText(cleanToken)) {
-            return;
-        }
-        userTokens.remove(cleanToken);
-        userTokenExpiresAt.remove(cleanToken);
-        if (securityStateStore != null) {
-            securityStateStore.deleteUserToken(cleanToken);
-        }
-    }
-
-    public AuthSession<AdminProfile> loginAdmin(LoginRequest request) {
-        return loginAdmin(request, "");
+        authService.logoutUser(token);
     }
 
     public AuthSession<AdminProfile> loginAdmin(LoginRequest request, String clientIp) {
-        String account = normalize(request == null ? "" : request.account());
-        String password = request == null ? "" : request.password();
-        verifyHumanCaptchaIfRequired("admin", request == null ? "" : request.captchaTicket(), request == null ? "" : request.captchaRandstr(), clientIp);
-        if (Objects.equals(adminUsername, account)) {
-            if (!ADMIN_PASSWORD_ENCODER.matches(password, adminPasswordBcrypt)) {
-                throw new IllegalArgumentException("admin account or password is invalid");
-            }
-            if (smsLoginSetting.enabled() && smsLoginSetting.adminLoginEnabled()) {
-                String mobile = defaultText(smsLoginSetting.adminMobile(), "").trim();
-                if (!isMobile(mobile)) {
-                    throw new IllegalStateException("管理员短信验证登录已开启，但未配置管理员手机号");
-                }
-                verifyLoginSmsCode(verificationKey("ADMIN_LOGIN", "admin", mobile), request == null ? "" : request.code());
-            }
-            AdminProfile profile = new AdminProfile(
-                1L,
-                adminUsername,
-                adminNickname,
-                ALL_ADMIN_PERMISSIONS
-            );
-            return issueAdminSession(profile);
-        }
-
-        AdminStaffItem staff = adminStaff.values().stream()
-            .filter(item -> Objects.equals(normalize(item.account()), account))
-            .findFirst()
-            .orElseThrow(() -> new IllegalArgumentException("admin account or password is invalid"));
-        if (!"ENABLED".equalsIgnoreCase(defaultText(staff.status(), ""))) {
-            throw new IllegalStateException("员工账号已停用，请联系超级管理员");
-        }
-        String hash = adminStaffPasswordHashes.get(staff.id());
-        if (!StringUtils.hasText(hash) || !ADMIN_PASSWORD_ENCODER.matches(password, hash)) {
-            throw new IllegalArgumentException("admin account or password is invalid");
-        }
-        if (smsLoginSetting.enabled() && smsLoginSetting.adminLoginEnabled()) {
-            String mobile = defaultText(smsLoginSetting.adminMobile(), "").trim();
-            if (!isMobile(mobile)) {
-                throw new IllegalStateException("管理员短信验证登录已开启，但未配置管理员手机号");
-            }
-            verifyLoginSmsCode(verificationKey("ADMIN_LOGIN", "admin", mobile), request == null ? "" : request.code());
-        }
-        AdminProfile profile = new AdminProfile(
-            staff.id(),
-            staff.account(),
-            staff.nickname(),
-            staff.permissions()
-        );
-        return issueAdminSession(profile);
-    }
-
-    private AuthSession<AdminProfile> issueAdminSession(AdminProfile profile) {
-        String token = "admin_" + UUID.randomUUID();
-        adminTokens.put(token, profile);
-        adminTokenExpiresAt.put(token, OffsetDateTime.now().plus(ADMIN_TOKEN_TTL));
-        if (securityStateStore != null) {
-            securityStateStore.storeAdminToken(token, profile, ADMIN_TOKEN_TTL);
-        }
-        return new AuthSession<>(token, profile);
+        return authService.loginAdmin(request, clientIp);
     }
 
     public Optional<AdminProfile> findAdminByToken(String token) {
-        String cleanToken = cleanBearerToken(token);
-        if (StringUtils.hasText(cleanToken) && securityStateStore != null) {
-            Optional<AdminProfile> redisProfile = securityStateStore.loadAdminToken(cleanToken);
-            if (redisProfile.isPresent()) {
-                Optional<AdminProfile> activeProfile = activeAdminProfile(redisProfile.get());
-                if (activeProfile.isEmpty()) {
-                    securityStateStore.deleteAdminToken(cleanToken);
-                }
-                return activeProfile;
-            }
-        }
-        if (isTokenExpired(cleanToken, adminTokenExpiresAt)) {
-            adminTokens.remove(cleanToken);
-            adminTokenExpiresAt.remove(cleanToken);
-            return Optional.empty();
-        }
-        Optional<AdminProfile> activeProfile = Optional.ofNullable(adminTokens.get(cleanToken)).flatMap(this::activeAdminProfile);
-        if (activeProfile.isEmpty()) {
-            adminTokens.remove(cleanToken);
-            adminTokenExpiresAt.remove(cleanToken);
-        } else {
-            adminTokens.put(cleanToken, activeProfile.get());
-        }
-        return activeProfile;
-    }
-
-    private Optional<AdminProfile> activeAdminProfile(AdminProfile profile) {
-        if (profile == null || profile.id() == null) {
-            return Optional.empty();
-        }
-        if (Objects.equals(profile.id(), 1L) && Objects.equals(normalize(profile.username()), adminUsername)) {
-            return Optional.of(new AdminProfile(1L, adminUsername, adminNickname, ALL_ADMIN_PERMISSIONS));
-        }
-        AdminStaffItem staff = adminStaff.get(profile.id());
-        if (staff == null || !"ENABLED".equalsIgnoreCase(defaultText(staff.status(), ""))) {
-            return Optional.empty();
-        }
-        return Optional.of(new AdminProfile(staff.id(), staff.account(), staff.nickname(), staff.permissions()));
+        return authService.findAdminByToken(token);
     }
 
     public void logoutAdmin(String token) {
-        String cleanToken = cleanBearerToken(token);
-        if (!StringUtils.hasText(cleanToken)) {
-            return;
-        }
-        adminTokens.remove(cleanToken);
-        adminTokenExpiresAt.remove(cleanToken);
-        if (securityStateStore != null) {
-            securityStateStore.deleteAdminToken(cleanToken);
-        }
-    }
-
-    private void logoutAllAdmins() {
-        adminTokens.clear();
-        adminTokenExpiresAt.clear();
-        if (securityStateStore != null) {
-            securityStateStore.deleteAdminSessions();
-        }
+        authService.logoutAdmin(token);
     }
 
     public synchronized AdminProfile updateSuperAdminCredentials(String token, AdminCredentialRequest request) {
-        String cleanToken = cleanBearerToken(token);
-        AdminProfile operator = findAdminByToken(cleanToken)
-            .orElseThrow(() -> new IllegalStateException("登录已失效，请重新登录"));
-        if (!Objects.equals(operator.id(), 1L)) {
-            throw new IllegalStateException("只有超级管理员可以修改超级管理员账号密码");
-        }
-
-        String currentPassword = defaultText(request == null ? "" : request.currentPassword(), "");
-        if (!ADMIN_PASSWORD_ENCODER.matches(currentPassword, adminPasswordBcrypt)) {
-            throw new IllegalArgumentException("当前密码不正确");
-        }
-
-        String nextAccount = normalize(request == null ? "" : request.account());
-        if (!StringUtils.hasText(nextAccount)) {
-            throw new IllegalArgumentException("请填写超级管理员登录账号");
-        }
-        validateSuperAdminAccount(nextAccount);
-
-        String nextNickname = defaultText(request == null ? "" : request.nickname(), "").trim();
-        if (!StringUtils.hasText(nextNickname)) {
-            nextNickname = "运营管理员";
-        }
-
-        String nextPasswordHash = adminPasswordBcrypt;
-        String nextPassword = defaultText(request == null ? "" : request.newPassword(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        if (StringUtils.hasText(nextPassword) || StringUtils.hasText(confirmPassword)) {
-            validateNewPassword(nextPassword, confirmPassword);
-            nextPasswordHash = ADMIN_PASSWORD_ENCODER.encode(nextPassword);
-        }
-
-        adminUsername = nextAccount;
-        adminNickname = nextNickname;
-        adminPasswordBcrypt = nextPasswordHash;
-        persistRuntimeSetting(SUPER_ADMIN_USERNAME_KEY, adminUsername);
-        persistRuntimeSetting(SUPER_ADMIN_NICKNAME_KEY, adminNickname);
-        persistRuntimeSetting(SUPER_ADMIN_PASSWORD_KEY, adminPasswordBcrypt);
-        logoutAllAdmins();
-        appendOperation("SUPER_ADMIN_CREDENTIAL_UPDATE", "ADMIN", "1", adminUsername);
-        return new AdminProfile(1L, adminUsername, adminNickname, ALL_ADMIN_PERMISSIONS);
+        return authService.updateSuperAdminCredentials(token, request);
     }
 
     public synchronized List<AdminStaffItem> listAdminStaff() {
-        return adminStaff.values().stream()
-            .sorted(Comparator.comparing(AdminStaffItem::id))
-            .toList();
+        return authService.listAdminStaff();
     }
 
     public synchronized AdminStaffItem createAdminStaff(AdminStaffRequest request) {
-        String account = normalize(request == null ? "" : request.account());
-        if (!StringUtils.hasText(account)) {
-            throw new IllegalArgumentException("请填写员工登录账号");
-        }
-        validateAdminStaffAccount(account, null);
-        String password = defaultText(request == null ? "" : request.password(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        validateNewPassword(password, confirmPassword);
-        Long id = allocateNextCandidateId(adminStaffId, maxAdminStaffId());
-        OffsetDateTime now = OffsetDateTime.now();
-        AdminStaffItem item = new AdminStaffItem(
-            id,
-            account,
-            defaultText(request == null ? "" : request.nickname(), account).trim(),
-            normalizeAdminStaffStatus(request == null ? "" : request.status()),
-            normalizeAdminPermissions(request == null ? List.of() : request.permissions()),
-            now,
-            now
-        );
-        adminStaff.put(id, item);
-        adminStaffPasswordHashes.put(id, ADMIN_PASSWORD_ENCODER.encode(password));
-        persistAdminStaff();
-        appendOperation("ADMIN_STAFF_CREATE", "ADMIN_STAFF", String.valueOf(id), account);
-        return item;
+        return authService.createAdminStaff(request);
     }
 
     public synchronized AdminStaffItem updateAdminStaff(Long id, AdminStaffRequest request) {
-        AdminStaffItem current = adminStaff.get(id);
-        if (current == null) {
-            throw new IllegalArgumentException("员工账号不存在");
-        }
-        String account = normalize(defaultText(request == null ? "" : request.account(), current.account()));
-        validateAdminStaffAccount(account, id);
-        String password = defaultText(request == null ? "" : request.password(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        if (StringUtils.hasText(password) || StringUtils.hasText(confirmPassword)) {
-            validateNewPassword(password, confirmPassword);
-            adminStaffPasswordHashes.put(id, ADMIN_PASSWORD_ENCODER.encode(password));
-        }
-        AdminStaffItem next = new AdminStaffItem(
-            current.id(),
-            account,
-            defaultText(request == null ? "" : request.nickname(), current.nickname()).trim(),
-            normalizeAdminStaffStatus(request == null ? "" : request.status()),
-            normalizeAdminPermissions(request == null ? current.permissions() : request.permissions()),
-            current.createdAt(),
-            OffsetDateTime.now()
-        );
-        adminStaff.put(id, next);
-        persistAdminStaff();
-        appendOperation("ADMIN_STAFF_UPDATE", "ADMIN_STAFF", String.valueOf(id), account);
-        return next;
+        return authService.updateAdminStaff(id, request);
     }
 
     public synchronized void deleteAdminStaff(Long id) {
-        AdminStaffItem removed = adminStaff.remove(id);
-        if (removed == null) {
-            throw new IllegalArgumentException("员工账号不存在");
-        }
-        adminStaffPasswordHashes.remove(id);
-        persistAdminStaff();
-        appendOperation("ADMIN_STAFF_DELETE", "ADMIN_STAFF", String.valueOf(id), removed.account());
+        authService.deleteAdminStaff(id);
     }
 
-    private boolean isTokenExpired(String token, Map<String, OffsetDateTime> expiresAtByToken) {
-        OffsetDateTime expiresAt = expiresAtByToken.get(token);
-        return expiresAt == null || !expiresAt.isAfter(OffsetDateTime.now());
-    }
+    // ------------------------------------------------------------------ 批次7C / 任务C1：会员域转发壳
+    //
+    // 下面这些方法的<b>实现已整块搬到 {@link UserService}</b>，这里只留同名同签名的
+    // 转发壳。保留转发壳而不是让控制器直连新服务，是因为 AdminMvpController /
+    // H5MvpController / MemberMvpController 上有几十处调用点，同时改
+    // {@code userService.xxx()} 只会在一次纯结构重构里制造巨大 diff，
+    // 掩盖真正的搬迁动作。批次8 拆完 OrderService 后再统一把控制器切到新服务。
 
     public List<UserGroupItem> listUserGroups() {
-        Optional<List<UserGroupItem>> persistent = persistentUserGroups();
-        if (persistent.isPresent()) {
-            return persistent.get().stream()
-                .map(group -> new UserGroupItem(
-                    group.id(),
-                    group.name(),
-                    group.description(),
-                    group.defaultGroup(),
-                    (int) users.values().stream().filter(user -> Objects.equals(user.groupId(), group.id())).count(),
-                    group.status(),
-                    group.orderEnabled(),
-                    group.realNameRequiredForOrder(),
-                    group.priceLimitEnabled(),
-                    priceLimitNotice(group.priceLimitNotice()),
-                    enrichRuleNames(group.rules())
-                ))
-                .sorted(Comparator.comparing(UserGroupItem::id))
-                .toList();
-        }
-        return userGroups.values().stream()
-            .map(group -> new UserGroupItem(
-                group.id(),
-                group.name(),
-                group.description(),
-                group.defaultGroup(),
-                (int) users.values().stream().filter(user -> Objects.equals(user.groupId(), group.id())).count(),
-                group.status(),
-                group.orderEnabled(),
-                group.realNameRequiredForOrder(),
-                group.priceLimitEnabled(),
-                priceLimitNotice(group.priceLimitNotice()),
-                rulesForGroup(group.id())
-            ))
-            .sorted(Comparator.comparing(UserGroupItem::id))
-            .toList();
+        return userService.listUserGroups();
     }
 
-    public List<UserItem> listUsers() {
-        Optional<List<UserItem>> persistent = persistentUsers();
-        if (persistent.isPresent()) {
-            return persistent.get().stream()
-                .map(this::withGroupName)
-                .sorted(Comparator.comparing(UserItem::id))
-                .toList();
-        }
-        return users.values().stream()
-            .map(this::withGroupName)
-            .sorted(Comparator.comparing(UserItem::id))
-            .toList();
+    /** 批次8C：会员分页。降级判断在 {@code UserService} 内部，这里只做透传。 */
+    public PageSlice<UserItem> pageUsers(int limit, long offset) {
+        return userService.pageUsers(limit, offset);
+    }
+
+    Optional<UserItem> findOutboundUser(Long userId) {
+        return userService.findUserSnapshot(userId);
     }
 
     public synchronized UserGroupItem createUserGroup(CreateUserGroupRequest request) {
-        String name = request == null ? "" : defaultText(request.name(), "").trim();
-        if (!StringUtils.hasText(name)) {
-            throw new IllegalArgumentException("group name is required");
-        }
-        if (userGroupNameExists(name, null)) {
-            throw new IllegalStateException("group name already exists");
-        }
-        Long id = maxUserGroupId() + 1;
-        UserGroupItem item = new UserGroupItem(
-            id,
-            name,
-            defaultText(request.description(), "自定义会员等级"),
-            Boolean.TRUE.equals(request.defaultGroup()),
-            0,
-            defaultText(request.status(), "ENABLED"),
-            request.orderEnabled() == null || Boolean.TRUE.equals(request.orderEnabled()),
-            Boolean.TRUE.equals(request.realNameRequiredForOrder()),
-            request.priceLimitEnabled() == null || Boolean.TRUE.equals(request.priceLimitEnabled()),
-            priceLimitNotice(request.priceLimitNotice()),
-            List.of()
-        );
-        userGroups.put(id, item);
-        persistUserGroup(item);
-        return item;
+        return userService.createUserGroup(request);
     }
 
     public synchronized UserGroupItem updateUserGroupOrderPermission(Long groupId, UpdateUserGroupOrderPermissionRequest request) {
-        UserGroupItem current = findUserGroupSnapshot(groupId).orElse(null);
-        if (current == null) {
-            throw new IllegalArgumentException("user group not found");
-        }
-        UserGroupItem next = new UserGroupItem(
-            current.id(),
-            current.name(),
-            current.description(),
-            current.defaultGroup(),
-            current.userCount(),
-            current.status(),
-            request == null || request.orderEnabled() == null ? current.orderEnabled() : request.orderEnabled(),
-            request == null || request.realNameRequiredForOrder() == null ? current.realNameRequiredForOrder() : request.realNameRequiredForOrder(),
-            request == null || request.priceLimitEnabled() == null ? current.priceLimitEnabled() : request.priceLimitEnabled(),
-            request == null || request.priceLimitNotice() == null ? current.priceLimitNotice() : priceLimitNotice(request.priceLimitNotice()),
-            rulesForGroup(current.id())
-        );
-        userGroups.put(groupId, next);
-        persistUserGroup(next);
-        return next;
+        return userService.updateUserGroupOrderPermission(groupId, request);
     }
 
     public synchronized List<GroupRuleItem> updateGroupRules(Long groupId, UpdateGroupRulesRequest request) {
-        if (findUserGroupSnapshot(groupId).isEmpty()) {
-            throw new IllegalArgumentException("user group not found");
-        }
-        String ruleType = normalizeRuleType(request == null ? "" : request.ruleType());
-        if (!"CATEGORY".equals(ruleType) && !"PLATFORM".equals(ruleType)) {
-            throw new IllegalArgumentException("ruleType must be CATEGORY or PLATFORM");
-        }
-
-        groupRules.keySet().removeIf(key -> key.startsWith(groupId + ":" + ruleType + ":"));
-        if (request != null && request.rules() != null) {
-            for (GroupRulePatch patch : request.rules()) {
-                String permission = normalizePermission(patch.permission());
-                if ("NONE".equals(permission)) {
-                    continue;
-                }
-                GroupRuleItem item = createRule(groupId, ruleType, patch, permission);
-                groupRules.put(ruleKey(item), item);
-            }
-        }
-        List<GroupRuleItem> rules = groupRules.values().stream()
-            .filter(rule -> Objects.equals(rule.groupId(), groupId))
-            .filter(rule -> Objects.equals(rule.ruleType(), ruleType))
-            .sorted(Comparator.comparing(GroupRuleItem::ruleType)
-                .thenComparing(rule -> defaultText(rule.targetName(), rule.targetCode())))
-            .toList();
-        persistGroupRules(groupId, ruleType, rules);
-        return rulesForGroup(groupId);
+        return userService.updateGroupRules(groupId, request);
     }
 
-    public List<RechargeFieldItem> listRechargeFields(Boolean enabled) {
-        Optional<List<RechargeFieldItem>> persistent = persistentRechargeFields();
-        if (persistent.isPresent()) {
-            return persistent.get().stream()
-                .filter(item -> enabled == null || Objects.equals(item.enabled(), enabled))
-                .sorted(Comparator.comparing(RechargeFieldItem::sort).thenComparing(RechargeFieldItem::id))
-                .toList();
-        }
-        return rechargeFields.values().stream()
-            .filter(item -> enabled == null || Objects.equals(item.enabled(), enabled))
-            .sorted(Comparator.comparing(RechargeFieldItem::sort).thenComparing(RechargeFieldItem::id))
-            .toList();
+    public synchronized UserItem updateUserGroup(Long userId, UpdateUserGroupRequest request) {
+        return userService.updateUserGroup(userId, request);
     }
 
-    public synchronized RechargeFieldItem createRechargeField(RechargeFieldRequest request) {
-        String code = normalizeRechargeFieldCode(request == null ? "" : request.code());
-        if (!StringUtils.hasText(code)) {
-            throw new IllegalArgumentException("字段标识不能为空");
-        }
-        if (!isValidRechargeFieldCode(code)) {
-            throw new IllegalArgumentException("字段标识需以英文字母开头，仅支持小写英文、数字、下划线");
-        }
-        if (rechargeFieldCodeExists(code, null)) {
-            throw new IllegalStateException("字段标识已存在");
-        }
-
-        Long id = allocateIncrementingId(rechargeFieldId, maxRechargeFieldId());
-        OffsetDateTime now = OffsetDateTime.now();
-        RechargeFieldItem item = new RechargeFieldItem(
-            id,
-            code,
-            requiredText(request == null ? "" : request.label(), "充值字段"),
-            defaultText(request == null ? "" : request.placeholder(), ""),
-            defaultText(request == null ? "" : request.helpText(), ""),
-            normalizeRechargeFieldInputType(request == null ? "" : request.inputType()),
-            request != null && Boolean.TRUE.equals(request.required()),
-            request == null || request.sort() == null ? (int) (id * 10) : request.sort(),
-            request == null || request.enabled() == null || request.enabled(),
-            now,
-            now
-        );
-        rechargeFields.put(id, item);
-        persistRechargeField(item);
-        return item;
+    public synchronized UserItem adminCreateUser(AdminCreateUserRequest request) {
+        return userService.adminCreateUser(request);
     }
 
-    public synchronized RechargeFieldItem updateRechargeField(Long id, RechargeFieldRequest request) {
-        RechargeFieldItem current = findRechargeFieldSnapshot(id).orElse(null);
-        if (current == null) {
-            throw new IllegalArgumentException("recharge field not found");
-        }
-
-        String code = normalizeRechargeFieldCode(firstText(request == null ? "" : request.code(), current.code(), current.code()));
-        if (!StringUtils.hasText(code)) {
-            throw new IllegalArgumentException("字段标识不能为空");
-        }
-        if (!isValidRechargeFieldCode(code)) {
-            throw new IllegalArgumentException("字段标识需以英文字母开头，仅支持小写英文、数字、下划线");
-        }
-        if (rechargeFieldCodeExists(code, id)) {
-            throw new IllegalStateException("字段标识已存在");
-        }
-
-        RechargeFieldItem next = new RechargeFieldItem(
-            current.id(),
-            code,
-            requiredText(request == null ? "" : request.label(), current.label()),
-            defaultText(request == null ? "" : request.placeholder(), current.placeholder()),
-            defaultText(request == null ? "" : request.helpText(), current.helpText()),
-            normalizeRechargeFieldInputType(defaultText(request == null ? "" : request.inputType(), current.inputType())),
-            request == null || request.required() == null ? current.required() : request.required(),
-            request == null || request.sort() == null ? current.sort() : request.sort(),
-            request == null || request.enabled() == null ? current.enabled() : request.enabled(),
-            current.createdAt(),
-            OffsetDateTime.now()
-        );
-        rechargeFields.put(id, next);
-        persistRechargeField(next);
-        return next;
+    public synchronized UserItem updateUserCredentials(Long userId, AdminUserCredentialRequest request) {
+        return userService.updateUserCredentials(userId, request);
     }
 
-    public synchronized RechargeFieldItem updateRechargeFieldEnabled(Long id, boolean enabled) {
-        RechargeFieldItem current = findRechargeFieldSnapshot(id).orElse(null);
-        if (current == null) {
-            throw new IllegalArgumentException("recharge field not found");
-        }
-        RechargeFieldItem next = new RechargeFieldItem(
-            current.id(),
-            current.code(),
-            current.label(),
-            current.placeholder(),
-            current.helpText(),
-            current.inputType(),
-            current.required(),
-            current.sort(),
-            enabled,
-            current.createdAt(),
-            OffsetDateTime.now()
-        );
-        rechargeFields.put(id, next);
-        persistRechargeField(next);
-        return next;
+    public UserItem adjustUserFunds(Long userId, UserFundAdjustRequest request) {
+        return userService.adjustUserFunds(userId, request);
     }
 
-    public synchronized void deleteRechargeField(Long id) {
-        if (findRechargeFieldSnapshot(id).isEmpty()) {
-            throw new IllegalArgumentException("recharge field not found");
-        }
-        rechargeFields.remove(id);
-        deletePersistentRechargeField(id);
+    public List<MemberApiCredentialItem> listMemberCredentials() {
+        return userService.listMemberCredentials();
     }
+
+    public synchronized MemberApiCredentialItem memberCredentialForUser(Long userId) {
+        return userService.memberCredentialForUser(userId);
+    }
+
+    public synchronized MemberApiCredentialItem saveMemberCredential(Long userId, MemberApiCredentialRequest request) {
+        MemberApiCredentialItem previous = userService.memberCredentialForUser(userId);
+        MemberApiCredentialItem saved = userService.saveMemberCredential(userId, request);
+        if (memberOrderCallbackTaskStore != null
+            && !Objects.equals(defaultText(previous.callbackUrl(), "").trim(), defaultText(saved.callbackUrl(), "").trim())) {
+            memberOrderCallbackTaskStore.cancelPendingForUserExceptUrl(
+                userId, saved.callbackUrl(), "callbackUrl was changed or cleared"
+            );
+        }
+        return saved;
+    }
+
+    public UserItem authenticateMemberApi(String appKey, String timestamp, String nonce, String signature, String path, String clientIp) {
+        return userService.authenticateMemberApi(appKey, timestamp, nonce, signature, path, clientIp);
+    }
+
+    public UserItem authenticateMemberApi(
+        String appKey,
+        String timestamp,
+        String nonce,
+        String signature,
+        String path,
+        String clientIp,
+        String contentHash
+    ) {
+        return userService.authenticateMemberApi(appKey, timestamp, nonce, signature, path, clientIp, contentHash);
+    }
+
+    OutboundApiPrincipal prepareOutboundCredential(String appKey, String path, String clientIp) {
+        return userService.prepareOutboundCredential(appKey, path, clientIp);
+    }
+
+    void completeOutboundCredential(OutboundApiPrincipal principal, String path) {
+        userService.completeOutboundCredential(principal, path);
+    }
+
+    void rejectOutboundCredential(OutboundApiPrincipal principal, String appKey, String path, String message) {
+        userService.rejectOutboundCredential(principal, appKey, path, message);
+    }
+
+    String outboundProtocolSettingsJson() {
+        return configService.outboundProtocolSettingsJson();
+    }
+
+    void saveOutboundProtocolSettingsJson(String json) {
+        configService.saveOutboundProtocolSettingsJson(json);
+    }
+
+
+
+
+
+
+
+
+
 
     public List<PaymentChannelItem> listPaymentChannels() {
         ensurePaymentChannelsReady();
@@ -1528,356 +858,710 @@ public class InMemoryShopRepository {
         persistPaymentChannels();
     }
 
-    public synchronized UserItem updateUserGroup(Long userId, UpdateUserGroupRequest request) {
-        UserItem user = findUserSnapshot(userId).orElse(null);
-        if (user == null) {
-            throw new IllegalArgumentException("user not found");
-        }
-        Long groupId = request == null || request.groupId() == null ? 1L : request.groupId();
-        if (findUserGroupSnapshot(groupId).isEmpty()) {
-            throw new IllegalArgumentException("user group not found");
-        }
-        UserItem next = new UserItem(
-            user.id(),
-            user.avatar(),
-            user.mobile(),
-            user.email(),
-            user.nickname(),
-            groupId,
-            groupName(groupId),
-            user.balance(),
-            user.deposit(),
-            user.status(),
-            user.createdAt(),
-            user.lastLoginAt(),
-            user.realNameType(),
-            user.realName(),
-            user.subjectName(),
-            user.certificateNo(),
-            user.verificationStatus()
-        );
-        users.put(userId, next);
-        persistUserSnapshot(next);
-        return next;
-    }
 
-    public synchronized UserItem updateUserCredentials(Long userId, AdminUserCredentialRequest request) {
-        UserItem user = requiredUser(userId);
-        String account = normalize(request == null ? "" : request.account());
-        if (!StringUtils.hasText(account)) {
-            throw new IllegalArgumentException("请输入用户账号");
-        }
-        String mobile = "";
-        String email = "";
-        if (account.contains("@")) {
-            if (!account.matches("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")) {
-                throw new IllegalArgumentException("请输入正确的邮箱账号");
-            }
-            email = account;
-        } else {
-            if (!account.matches("^1[3-9]\\d{9}$")) {
-                throw new IllegalArgumentException("请输入正确的手机号账号");
-            }
-            mobile = account;
-        }
-        boolean accountExists = allUserSnapshots().stream()
-            .filter(item -> !Objects.equals(item.id(), userId))
-            .anyMatch(item -> Objects.equals(normalize(item.mobile()), account) || Objects.equals(normalize(item.email()), account));
-        if (accountExists) {
-            throw new IllegalArgumentException("该账号已被其他用户使用");
-        }
 
-        String nickname = defaultText(request == null ? "" : request.nickname(), "").trim();
-        if (!StringUtils.hasText(nickname)) {
-            nickname = StringUtils.hasText(user.nickname()) ? user.nickname() : account;
-        }
-        String newPassword = defaultText(request == null ? "" : request.newPassword(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        boolean passwordChanged = StringUtils.hasText(newPassword) || StringUtils.hasText(confirmPassword);
-        if (passwordChanged) {
-            validateNewPassword(newPassword, confirmPassword);
-            String nextHash = ADMIN_PASSWORD_ENCODER.encode(newPassword);
-            userPasswordHashes.put(userId, nextHash);
-            persistRuntimeSetting("user.password." + userId, nextHash);
-            invalidateUserTokens(userId);
-        }
 
-        UserItem next = new UserItem(
-            user.id(),
-            user.avatar(),
-            mobile,
-            email,
-            nickname,
-            user.groupId(),
-            groupName(user.groupId()),
-            user.balance(),
-            user.deposit(),
-            user.status(),
-            user.createdAt(),
-            user.lastLoginAt(),
-            user.realNameType(),
-            user.realName(),
-            user.subjectName(),
-            user.certificateNo(),
-            user.verificationStatus()
-        );
-        users.put(userId, next);
-        persistUserSnapshot(next);
-        appendOperation("USER_CREDENTIAL_UPDATE", "USER", String.valueOf(userId), passwordChanged ? "管理员修改账号并重置密码" : "管理员修改账号");
-        return withGroupName(next);
-    }
 
-    public synchronized UserItem adjustUserFunds(Long userId, UserFundAdjustRequest request) {
-        UserItem user = findUserSnapshot(userId).orElse(null);
-        if (user == null) {
-            throw new IllegalArgumentException("user not found");
-        }
-        BigDecimal amount = request == null || request.amount() == null ? BigDecimal.ZERO : request.amount();
-        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new IllegalArgumentException("amount must be greater than 0");
-        }
 
-        String accountType = normalize(request.accountType());
-        String direction = normalize(request.direction());
-        if (!List.of("balance", "deposit").contains(accountType)) {
-            throw new IllegalArgumentException("accountType must be balance or deposit");
-        }
-        if (!List.of("increase", "decrease").contains(direction)) {
-            throw new IllegalArgumentException("direction must be increase or decrease");
-        }
 
-        BigDecimal currentBalance = user.balance() == null ? BigDecimal.ZERO : user.balance();
-        BigDecimal currentDeposit = user.deposit() == null ? BigDecimal.ZERO : user.deposit();
-        BigDecimal nextBalance = currentBalance;
-        BigDecimal nextDeposit = currentDeposit;
-        if ("balance".equals(accountType)) {
-            nextBalance = adjustFundValue(currentBalance, amount, direction, "余额");
-        } else {
-            nextDeposit = adjustFundValue(currentDeposit, amount, direction, "保证金");
-        }
 
-        UserItem next = new UserItem(
-            user.id(),
-            user.avatar(),
-            user.mobile(),
-            user.email(),
-            user.nickname(),
-            user.groupId(),
-            groupName(user.groupId()),
-            nextBalance,
-            nextDeposit,
-            user.status(),
-            user.createdAt(),
-            user.lastLoginAt(),
-            user.realNameType(),
-            user.realName(),
-            user.subjectName(),
-            user.certificateNo(),
-            user.verificationStatus()
-        );
-        users.put(userId, next);
-        persistUserSnapshot(next);
-        appendOperation(
-            "USER_FUND_ADJUST",
-            "USER",
-            String.valueOf(userId),
-            accountType + ":" + direction + ":" + amount + ":" + defaultText(request.remark(), "")
-        );
-        return next;
-    }
 
-    public List<GoodsChannelItem> listGoodsChannels(Long targetGoodsId) {
-        if (findGoodsSnapshot(targetGoodsId).isEmpty()) {
-            throw new IllegalArgumentException("goods not found");
-        }
-        Optional<List<GoodsChannelItem>> persistent = persistentGoodsChannels();
-        if (persistent.isPresent()) {
-            return persistent.get().stream()
-                .filter(item -> Objects.equals(item.goodsId(), targetGoodsId))
-                .sorted(Comparator.comparing(GoodsChannelItem::priority).thenComparing(GoodsChannelItem::id))
-                .toList();
-        }
-        return goodsChannels.values().stream()
-            .filter(item -> Objects.equals(item.goodsId(), targetGoodsId))
-            .sorted(Comparator.comparing(GoodsChannelItem::priority).thenComparing(GoodsChannelItem::id))
-            .toList();
-    }
 
-    public synchronized GoodsChannelItem createGoodsChannel(Long targetGoodsId, CreateGoodsChannelRequest request) {
-        GoodsItem targetGoods = findGoodsSnapshot(targetGoodsId).orElse(null);
-        if (targetGoods == null) {
-            throw new IllegalArgumentException("goods not found");
-        }
-        if (targetGoods.type() != GoodsType.DIRECT) {
-            throw new IllegalStateException("only direct goods can bind supplier channels");
-        }
-        if (request == null || request.supplierId() == null) {
-            throw new IllegalArgumentException("supplierId is required");
-        }
-        SupplierItem supplier = requiredSupplier(request.supplierId());
-        if (!StringUtils.hasText(request.supplierGoodsId())) {
-            throw new IllegalArgumentException("supplierGoodsId is required");
-        }
-        Long id = allocateIncrementingId(channelId, maxGoodsChannelId());
-        GoodsChannelItem item = new GoodsChannelItem(
-            id,
-            targetGoodsId,
-            supplier.id(),
-            supplier.name(),
-            request.supplierGoodsId().trim(),
-            request.priority() == null ? 10 : request.priority(),
-            request.timeoutSeconds() == null ? 30 : request.timeoutSeconds(),
-            defaultText(request.status(), "ENABLED"),
-            OffsetDateTime.now()
-        );
-        goodsChannels.put(id, item);
-        persistGoodsChannel(item);
-        return item;
-    }
-
-    public synchronized void deleteGoodsChannel(Long targetGoodsId, Long targetChannelId) {
-        GoodsChannelItem item = findGoodsChannelSnapshot(targetChannelId).orElse(null);
-        if (item == null || !Objects.equals(item.goodsId(), targetGoodsId)) {
-            throw new IllegalArgumentException("channel not found");
-        }
-        goodsChannels.remove(targetChannelId);
-        productMonitorStates.remove(targetChannelId);
-        deletePersistentGoodsChannel(targetChannelId);
-    }
-
-    public synchronized void deleteGoods(Long targetGoodsId) {
-        GoodsItem item = findGoodsSnapshot(targetGoodsId).orElse(null);
-        if (item == null) {
-            throw new IllegalArgumentException("goods not found");
-        }
-        goods.remove(targetGoodsId);
-        cards.entrySet().removeIf(entry -> Objects.equals(entry.getValue().goodsId(), targetGoodsId));
-        List<Long> channelIds = allGoodsChannelSnapshots().stream()
-            .filter(channel -> Objects.equals(channel.goodsId(), targetGoodsId))
-            .map(GoodsChannelItem::id)
-            .filter(Objects::nonNull)
-            .toList();
-        channelIds.forEach(channelId -> {
-            goodsChannels.remove(channelId);
-            productMonitorStates.remove(channelId);
-            productMonitorLogs.entrySet().removeIf(entry -> Objects.equals(entry.getValue().channelId(), channelId));
-        });
-        deletePersistentGoods(targetGoodsId);
-        deletePersistentGoodsChannelsByGoods(targetGoodsId);
-        deletePersistentCardsByGoods(targetGoodsId);
-        appendOperation("GOODS_DELETE", "GOODS", String.valueOf(targetGoodsId), item.goodsName());
-    }
 
     public ProductMonitorOverview productMonitorOverview() {
-        return new ProductMonitorOverview(listProductMonitorItems(), listProductMonitorLogs());
+        return productMonitorOverview(1, 10);
     }
 
-    public List<ProductMonitorItem> listProductMonitorItems() {
-        OffsetDateTime now = OffsetDateTime.now();
-        return allGoodsChannelSnapshots().stream()
-            .filter(this::isProductMonitorChannel)
-            .sorted(Comparator.comparing(GoodsChannelItem::supplierName).thenComparing(GoodsChannelItem::supplierGoodsId))
-            .map(channel -> productMonitorItem(channel, ensureProductMonitorState(channel.id(), now)))
-            .toList();
+    public ProductMonitorOverview productMonitorOverview(Integer page, Integer pageSize) {
+        return productMonitorService.overview(page, pageSize);
     }
 
     public List<ProductMonitorLogItem> listProductMonitorLogs() {
-        return productMonitorLogs.values().stream()
-            .sorted(Comparator.comparing(ProductMonitorLogItem::id).reversed())
-            .limit(200)
-            .toList();
+        return productMonitorService.listLogs();
     }
 
     public List<Long> dueProductMonitorChannelIds(OffsetDateTime now) {
-        return allGoodsChannelSnapshots().stream()
-            .filter(this::isProductMonitorChannel)
-            .filter(channel -> {
-                ProductMonitorState state = ensureProductMonitorState(channel.id(), now);
-                return !state.scanning() && (state.nextScanAt() == null || !state.nextScanAt().isAfter(now));
-            })
-            .map(GoodsChannelItem::id)
-            .sorted()
-            .toList();
+        return productMonitorService.dueChannelIds(now);
     }
 
-    public synchronized List<ProductMonitorScanResult> scanAllProductMonitorChannels(boolean manual) {
-        return allGoodsChannelSnapshots().stream()
-            .filter(this::isProductMonitorChannel)
-            .sorted(Comparator.comparing(GoodsChannelItem::id))
-            .map(channel -> scanProductMonitorChannel(channel.id(), manual))
-            .filter(Objects::nonNull)
-            .toList();
+    public List<ProductMonitorScanResult> scanAllProductMonitorChannels(boolean manual) {
+        return productMonitorService.scanAll(manual);
     }
 
-    public synchronized ProductMonitorScanResult scanProductMonitorChannel(Long channelId, boolean manual) {
-        GoodsChannelItem channel = findGoodsChannelSnapshot(channelId).orElse(null);
-        OffsetDateTime startedAt = OffsetDateTime.now();
-        if (channel == null || !isProductMonitorChannel(channel)) {
-            return null;
+    public ProductMonitorScanResult scanProductMonitorChannel(Long channelId, boolean manual) {
+        return productMonitorService.scanChannel(channelId, manual);
+    }
+
+
+    /**
+     * {@link ProductMonitorGateway} 的实现：把监控要用的仓储私有能力开放给
+     * {@link ProductMonitorService}，且<b>仅开放这几个</b>。
+     *
+     * <p>用内部类而不是让仓储自己 {@code implements ProductMonitorGateway}：
+     * 后者会迫使 {@code isProductMonitorChannel} / {@code monitoredRemoteGoods} 等
+     * 6 个私有方法升级为 public，等于给一万行的仓储再加 6 个对外 API。
+     */
+    private final class RepositoryMonitorGateway implements ProductMonitorGateway {
+        @Override
+        public List<GoodsChannelItem> allGoodsChannelSnapshots() {
+            return InMemoryShopRepository.this.allGoodsChannelSnapshots();
         }
 
-        productMonitorStates.put(channelId, ensureProductMonitorState(channelId, startedAt).start(startedAt));
-
-        GoodsItem current = findGoodsSnapshot(channel.goodsId()).orElse(null);
-        SupplierItem supplier = null;
-        List<String> changes = new ArrayList<>();
-        String result = "NO_CHANGE";
-        String message = "本轮扫描无变动";
-        boolean changed = false;
-
-        try {
-            if (current == null) {
-                throw new IllegalStateException("本地商品不存在");
-            }
-            supplier = requiredSupplier(channel.supplierId());
-            if (!"ENABLED".equals(supplier.status())) {
-                throw new IllegalStateException("供应商已停用");
-            }
-            if (!"ENABLED".equals(channel.status())) {
-                throw new IllegalStateException("渠道已停用");
-            }
-
-            boolean primaryChannel = isPrimaryProductMonitorChannel(channel);
-            MonitoredRemoteGoods remote = monitoredRemoteGoods(current, channel, supplier);
-            GoodsItem next = applyMonitoredRemoteGoods(current, remote, changes);
-            changed = !changes.isEmpty();
-            if (changed && primaryChannel) {
-                goods.put(current.id(), next);
-                persistGoodsSnapshot(next);
-                result = "CHANGED";
-                message = "主渠道发现上游变动，已同步本地商品";
-            } else if (changed) {
-                result = "CHANGED";
-                message = "非主渠道发现上游变动，仅记录日志，不覆盖本地商品";
-            }
-        } catch (RuntimeException ex) {
-            result = "FAILED";
-            message = ex.getMessage() == null ? "扫描失败" : ex.getMessage();
+        @Override
+        public Optional<GoodsChannelItem> findGoodsChannelSnapshot(Long channelId) {
+            return InMemoryShopRepository.this.findGoodsChannelSnapshot(channelId);
         }
 
-        OffsetDateTime finishedAt = OffsetDateTime.now();
-        OffsetDateTime nextScanAt = finishedAt.plusSeconds(60);
-        ProductMonitorState state = ensureProductMonitorState(channelId, finishedAt).finish(finishedAt, nextScanAt, result, message, changed);
-        productMonitorStates.put(channelId, state);
+        @Override
+        public Optional<GoodsItem> findGoodsSnapshot(Long goodsId) {
+            return InMemoryShopRepository.this.findGoodsSnapshot(goodsId);
+        }
 
-        ProductMonitorLogItem log = new ProductMonitorLogItem(
-            productMonitorLogId.getAndIncrement(),
-            channel.id(),
-            channel.goodsId(),
-            findGoodsSnapshot(channel.goodsId()).map(GoodsItem::goodsName).orElse("-"),
-            channel.supplierId(),
-            channel.supplierName(),
-            channel.supplierGoodsId(),
-            result,
-            message,
-            List.copyOf(changes),
-            finishedAt,
-            nextScanAt
-        );
-        productMonitorLogs.put(log.id(), log);
-        trimProductMonitorLogs();
-        realtimeBroadcaster.publishProductMonitorLog(log);
-        return new ProductMonitorScanResult(productMonitorItem(channel, state), log);
+        @Override
+        public List<GoodsItem> allGoodsSnapshots() {
+            return InMemoryShopRepository.this.allGoodsSnapshots();
+        }
+
+        @Override
+        public boolean isProductMonitorChannel(GoodsChannelItem channel) {
+            return InMemoryShopRepository.this.isProductMonitorChannel(channel);
+        }
+
+        @Override
+        public boolean isProductMonitorChannel(GoodsChannelItem channel, Map<Long, GoodsItem> goodsById) {
+            return InMemoryShopRepository.this.isProductMonitorChannel(channel, goodsById);
+        }
+
+        @Override
+        public SupplierItem requiredSupplier(Long supplierId) {
+            return InMemoryShopRepository.this.requiredSupplier(supplierId);
+        }
+
+        @Override
+        public MonitoredRemoteGoods monitoredRemoteGoods(GoodsItem current, GoodsChannelItem channel, SupplierItem supplier) {
+            return InMemoryShopRepository.this.monitoredRemoteGoods(current, channel, supplier);
+        }
+
+        @Override
+        public GoodsItem applyMonitoredRemoteGoods(GoodsItem current, MonitoredRemoteGoods remote, List<String> changes) {
+            return InMemoryShopRepository.this.applyMonitoredRemoteGoods(current, remote, changes);
+        }
+
+        @Override
+        public void applyMonitoredGoodsUpdate(GoodsItem next) {
+            InMemoryShopRepository.this.applyMonitoredGoodsUpdate(next);
+        }
+    }
+
+    /**
+     * 批次7B / 任务B：{@link CatalogGateway} 的实现 —— 商品域反向要的仓储能力，仅此几项。
+     *
+     * <p>与 {@link RepositoryMonitorGateway} 同理用内部类：否则
+     * {@code availableCardCount} / {@code rulesForGroup} 等私有方法都得升成 public。
+     */
+    private final class RepositoryCatalogGateway implements CatalogGateway {
+        @Override
+        public int availableCardCount(Long goodsId) {
+            return InMemoryShopRepository.this.availableCardCount(goodsId);
+        }
+
+        @Override
+        public int availableCardKindCardCount(Long cardKindId) {
+            return InMemoryShopRepository.this.availableCardKindCardCount(cardKindId);
+        }
+
+        @Override
+        public int cardKindTotalCount(Long cardKindId) {
+            return (int) cards.values().stream()
+                .filter(card -> Objects.equals(card.cardKindId(), cardKindId))
+                .count();
+        }
+
+        @Override
+        public int cardKindUsedCount(Long cardKindId) {
+            return (int) cards.values().stream()
+                .filter(card -> Objects.equals(card.cardKindId(), cardKindId))
+                .filter(card -> "USED".equals(card.status()))
+                .count();
+        }
+
+        @Override
+        public void removeCardsForGoods(Long goodsId) {
+            cards.entrySet().removeIf(entry -> Objects.equals(entry.getValue().goodsId(), goodsId));
+        }
+
+        @Override
+        public void deletePersistentCardsByGoods(Long goodsId) {
+            InMemoryShopRepository.this.deletePersistentCardsByGoods(goodsId);
+        }
+
+        @Override
+        public boolean fundsLedgerEnabled() {
+            return InMemoryShopRepository.this.fundsLedgerEnabled();
+        }
+
+        @Override
+        public void syncCardGoodsStock(Long goodsId, Long cardKindId) {
+            fundsLedgerStore.syncCardGoodsStock(goodsId, cardKindId);
+        }
+
+        // 批次7C / 任务C1：这三项已经搬进 UserService，这里直接转过去，
+        // 不在仓储里再留一层同名私有壳（商品域是唯一调用方）。
+        @Override
+        public Optional<UserGroupItem> findUserGroupSnapshot(Long groupId) {
+            return userService.findUserGroupSnapshot(groupId);
+        }
+
+        @Override
+        public List<GroupRuleItem> rulesForGroup(Long groupId) {
+            return userService.rulesForGroup(groupId);
+        }
+
+        @Override
+        public boolean allowedByGroupRules(GoodsItem item, List<GroupRuleItem> rules) {
+            return userService.allowedByGroupRules(item, rules);
+        }
+
+        @Override
+        public SupplierItem requiredSupplier(Long supplierId) {
+            return InMemoryShopRepository.this.requiredSupplier(supplierId);
+        }
+
+        @Override
+        public Optional<SupplierItem> supplierSnapshot(Long supplierId) {
+            return Optional.ofNullable(suppliers.get(supplierId));
+        }
+
+        @Override
+        public Optional<GoodsIntegrationItem> cachedRemoteIntegration(SupplierItem supplier, String supplierGoodsId) {
+            return Optional.ofNullable(remoteGoodsSyncResults.get(supplier.id()))
+                .flatMap(result -> exactRemoteGoods(result.items(), supplierGoodsId))
+                .map(remote -> remoteGoodsIntegration(supplier, remote));
+        }
+
+        @Override
+        public void forgetMonitorChannel(Long channelId) {
+            productMonitorService.forgetChannel(channelId);
+        }
+
+        @Override
+        public void forgetMonitorChannelWithLogs(Long channelId) {
+            productMonitorService.forgetChannelWithLogs(channelId);
+        }
+    }
+
+    /**
+     * 批次7C / 任务C1：{@link UserGateway} 的实现 —— 会员域反向要的仓储能力，仅此几项。
+     *
+     * <p>同样用内部类：否则 {@code fundsLedgerEnabled} / {@code categoryTreeIds} /
+     * {@code invalidateUserTokens} 等私有方法都得升成 public。
+     */
+    private final class RepositoryUserGateway implements UserGateway {
+        @Override
+        public boolean fundsLedgerEnabled() {
+            return InMemoryShopRepository.this.fundsLedgerEnabled();
+        }
+
+        /**
+         * 现取而不缓存：{@code fundsLedgerStore} 是 {@code @Autowired(required = false)}
+         * 字段注入，测试还会用 {@code replaceFundsLedgerStoreForTest} 换实现。
+         */
+        @Override
+        public FundsLedgerStore fundsLedger() {
+            return fundsLedgerStore;
+        }
+
+        /**
+         * 原先内联在这里的四步（编码口令 / 写哈希表 / 落库 / 清令牌）在批次8D / 任务D1
+         * 随口令哈希表与令牌表一起归 {@link AuthService}，这里只剩转发。
+         */
+        @Override
+        public void resetUserPassword(Long userId, String newPassword) {
+            authService.resetUserPassword(userId, newPassword);
+        }
+
+        @Override
+        public void validateNewPassword(String password, String confirmPassword) {
+            authService.validateNewPassword(password, confirmPassword);
+        }
+
+        @Override
+        public void invalidateUserTokens(Long userId) {
+            authService.invalidateUserTokens(userId);
+        }
+
+        @Override
+        public String normalizeRegistrationType(String value) {
+            return InMemoryShopRepository.this.normalizeRegistrationType(value);
+        }
+
+        @Override
+        public Set<Long> categoryTreeIds(Long rootId) {
+            return InMemoryShopRepository.this.categoryTreeIds(rootId);
+        }
+
+        @Override
+        public Optional<CategoryItem> findCategorySnapshot(Long id) {
+            return InMemoryShopRepository.this.findCategorySnapshot(id);
+        }
+
+        @Override
+        public List<String> normalizeTextList(List<String> values) {
+            return InMemoryShopRepository.this.normalizeTextList(values);
+        }
+    }
+
+    /**
+     * 批次8D / 任务D1：{@link AuthGateway} 的实现 —— 鉴权域反向要的仓储能力，仅此 30 项。
+     *
+     * <p>用内部类而非把仓储整个传进 {@link AuthService}：否则 {@code sendTencentSms} /
+     * {@code putEncryptedConfig} / {@code requiredUser} 等二十多个私有方法都得升成 public，
+     * 等于把「登录域还欠仓储什么」这件事重新藏起来。
+     */
+    private final class RepositoryAuthGateway implements AuthGateway {
+
+        /**
+         * 现取而不缓存：{@code loginAttemptGuard} 是 {@code @Autowired(required = false)}
+         * 字段注入，{@link #replaceLoginAttemptGuardForTest} 还会在运行期换实现
+         * （{@code LoginBruteForceProtectionTest} 靠它注入阶梯参数）。
+         * 可能为 null，兜底实例由 {@code AuthService.loginGuard()} 负责。
+         */
+        @Override
+        public LoginAttemptGuard loginAttemptGuard() {
+            return loginAttemptGuard;
+        }
+
+        /** 同样现取不缓存：{@code adminCaptchaRequired} 是 {@code @Value} 字段注入。 */
+        @Override
+        public boolean adminCaptchaRequired() {
+            return adminCaptchaRequired;
+        }
+
+        // ---- 短信 / 人机验证的出网传输层：签名工具与 HttpClient 封装留在仓储 ----
+
+        @Override
+        public void sendGenericSms(Map<String, String> config, String mobile, String code, String content) {
+            InMemoryShopRepository.this.sendGenericSms(config, mobile, code, content);
+        }
+
+        @Override
+        public void sendTencentSms(Map<String, String> config, String mobile, String code) {
+            InMemoryShopRepository.this.sendTencentSms(config, mobile, code);
+        }
+
+        @Override
+        public void sendAliyunSms(Map<String, String> config, String mobile, String code) {
+            InMemoryShopRepository.this.sendAliyunSms(config, mobile, code);
+        }
+
+        @Override
+        public void verifyTencentCaptcha(Map<String, String> config, String ticket, String randstr, String clientIp) {
+            InMemoryShopRepository.this.verifyTencentCaptcha(config, ticket, randstr, clientIp);
+        }
+
+        @Override
+        public void verifyTurnstileCaptcha(Map<String, String> config, String token, String clientIp) {
+            InMemoryShopRepository.this.verifyTurnstileCaptcha(config, token, clientIp);
+        }
+
+        @Override
+        public void verifyGenericCaptcha(Map<String, String> config, String ticket, String randstr, String clientIp) {
+            InMemoryShopRepository.this.verifyGenericCaptcha(config, ticket, randstr, clientIp);
+        }
+
+        @Override
+        public String testTencentCaptchaSetting(Map<String, String> config) {
+            return InMemoryShopRepository.this.testTencentCaptchaSetting(config);
+        }
+
+        @Override
+        public String testTurnstileCaptchaSetting(Map<String, String> config) {
+            return InMemoryShopRepository.this.testTurnstileCaptchaSetting(config);
+        }
+
+        @Override
+        public String testGenericCaptchaSetting(Map<String, String> config) {
+            return InMemoryShopRepository.this.testGenericCaptchaSetting(config);
+        }
+
+        // ---- 配置密文编解码与文本归一：敏感键判定被支付渠道等非登录代码共用 ----
+
+        @Override
+        public void putEncryptedConfig(Map<String, Object> payload, String key, Map<String, String> config) {
+            InMemoryShopRepository.this.putEncryptedConfig(payload, key, config);
+        }
+
+        @Override
+        public Map<String, String> settingConfig(Map<String, Object> payload, String key) {
+            return InMemoryShopRepository.this.settingConfig(payload, key);
+        }
+
+        @Override
+        public Map<String, String> normalizeSmsConfig(Map<String, String> config) {
+            return InMemoryShopRepository.this.normalizeSmsConfig(config);
+        }
+
+        @Override
+        public String normalizeTerminal(String value) {
+            return InMemoryShopRepository.this.normalizeTerminal(value);
+        }
+
+        @Override
+        public String normalizeRegistrationType(String value) {
+            return InMemoryShopRepository.this.normalizeRegistrationType(value);
+        }
+
+        @Override
+        public List<String> normalizeTextList(List<String> values) {
+            return InMemoryShopRepository.this.normalizeTextList(values);
+        }
+
+        @Override
+        public OffsetDateTime parseOffsetDateTime(String value) {
+            return InMemoryShopRepository.this.parseOffsetDateTime(value);
+        }
+
+        @Override
+        public List<String> stringList(Object value) {
+            return InMemoryShopRepository.this.stringList(value);
+        }
+
+        // ---- 审计与读降级：动作名与日志文案是运维锚点，不在鉴权域重写一份 ----
+
+        @Override
+        public void recordReadFallback(String targetType, String targetId, Exception ex) {
+            InMemoryShopRepository.this.recordReadFallback(targetType, targetId, ex);
+        }
+
+        @Override
+        public String persistenceErrorMessage(Exception ex) {
+            return InMemoryShopRepository.this.persistenceErrorMessage(ex);
+        }
+
+        // ---- 会员域读写：批次7C 已归 UserService，登录流程经仓储转发 ----
+
+        @Override
+        public List<UserItem> allUserSnapshots() {
+            return InMemoryShopRepository.this.allUserSnapshots();
+        }
+
+        @Override
+        public Optional<UserItem> findUserSnapshot(Long id) {
+            return InMemoryShopRepository.this.findUserSnapshot(id);
+        }
+
+        @Override
+        public UserItem requiredUser(Long id) {
+            return InMemoryShopRepository.this.requiredUser(id);
+        }
+
+        @Override
+        public UserItem withGroupName(UserItem user) {
+            return InMemoryShopRepository.this.withGroupName(user);
+        }
+
+        @Override
+        public UserItem withUserLastLoginAt(UserItem user, OffsetDateTime lastLoginAt) {
+            return InMemoryShopRepository.this.withUserLastLoginAt(user, lastLoginAt);
+        }
+
+        @Override
+        public UserItem createUserFromAccount(String account, String username) {
+            return InMemoryShopRepository.this.createUserFromAccount(account, username);
+        }
+
+        /** 写回会员内存表：全仓 11 处都是这个写法，共用 {@code UserService.usersMap()} 引用。 */
+        @Override
+        public void putUser(UserItem user) {
+            userService.usersMap().put(user.id(), user);
+        }
+
+        @Override
+        public void persistUserSnapshot(UserItem user) {
+            InMemoryShopRepository.this.persistUserSnapshot(user);
+        }
+
+        @Override
+        public void validateRegistration(String account) {
+            InMemoryShopRepository.this.validateRegistration(account);
+        }
+    }
+
+    // ================================================================
+    // 批次7B / 任务B：商品域的转发壳
+    //
+    // 下面这些方法的<b>实现已整块搬到 {@link CatalogService}</b>，这里只留同名同签名的
+    // 转发。刻意这么做的理由和批次6 的 appendOperation 一样：仓储内部（下单、支付、
+    // 交付、退款、上游对接、商品监控）对它们的调用点有上百处，全部改成
+    // {@code catalogService.xxx()} 只会在一次纯结构重构里制造巨大 diff，
+    // 却不带来任何职责上的收益 —— 职责已经搬走了，调用点零改动。
+    //
+    // 其中 public 的那几个（listCategories / createGoods / listGoodsChannels ...）
+    // 同时也是控制器与现存测试直接调用的 API，签名必须原样保留。
+    // ================================================================
+
+    public List<CategoryItem> listCategories() {
+        return catalogService.listCategories();
+    }
+
+    public List<CardKindItem> listCardKinds() {
+        return catalogService.listCardKinds();
+    }
+
+    public synchronized CardKindItem createCardKind(CreateCardKindRequest request) {
+        return catalogService.createCardKind(request);
+    }
+
+    public CategoryItem createCategory(CreateCategoryRequest request) {
+        return catalogService.createCategory(request);
+    }
+
+    public CategoryItem updateCategory(Long id, UpdateCategoryRequest request) {
+        return catalogService.updateCategory(id, request);
+    }
+
+    public CategoryItem updateCategoryStatus(Long id, boolean enabled) {
+        return catalogService.updateCategoryStatus(id, enabled);
+    }
+
+    public void deleteCategory(Long id) {
+        catalogService.deleteCategory(id);
+    }
+
+    public List<GoodsItem> listGoods(Long categoryId, String search, String platform, boolean admin) {
+        return catalogService.listGoods(categoryId, search, platform, admin);
+    }
+
+    public List<GoodsListItem> listPublicGoods(Long categoryId, String search, String platform, Long userGroupId) {
+        return catalogService.listPublicGoods(categoryId, search, platform, userGroupId);
+    }
+
+    public PageResult<GoodsListItem> pagePublicGoods(Long categoryId, String search, String platform, Long userGroupId, int page, int pageSize) {
+        return catalogService.pagePublicGoods(categoryId, search, platform, userGroupId, page, pageSize);
+    }
+
+    public List<GoodsListItem> listAdminGoods(Long categoryId, String search, String platform) {
+        return catalogService.listAdminGoods(categoryId, search, platform);
+    }
+
+    public List<GoodsItem> listGoods(Long categoryId, String search, String platform, Long userGroupId, boolean admin) {
+        return catalogService.listGoods(categoryId, search, platform, userGroupId, admin);
+    }
+
+    public Optional<GoodsItem> findGoods(Long id) {
+        return catalogService.findGoods(id);
+    }
+
+    public Optional<GoodsItem> findGoods(Long id, Long userGroupId, boolean admin) {
+        return catalogService.findGoods(id, userGroupId, admin);
+    }
+
+    public Optional<GoodsItem> findGoods(Long id, Long userGroupId, boolean admin, String platform) {
+        return catalogService.findGoods(id, userGroupId, admin, platform);
+    }
+
+    public List<PriceTemplateItem> listPriceTemplates() {
+        return catalogService.listPriceTemplates();
+    }
+
+    public List<PriceTemplateItem> savePriceTemplates(List<PriceTemplateItem> request) {
+        return catalogService.savePriceTemplates(request);
+    }
+
+    public List<RechargeFieldItem> listRechargeFields(Boolean enabled) {
+        return catalogService.listRechargeFields(enabled);
+    }
+
+    public synchronized RechargeFieldItem createRechargeField(RechargeFieldRequest request) {
+        return catalogService.createRechargeField(request);
+    }
+
+    public synchronized RechargeFieldItem updateRechargeField(Long id, RechargeFieldRequest request) {
+        return catalogService.updateRechargeField(id, request);
+    }
+
+    public synchronized RechargeFieldItem updateRechargeFieldEnabled(Long id, boolean enabled) {
+        return catalogService.updateRechargeFieldEnabled(id, enabled);
+    }
+
+    public synchronized void deleteRechargeField(Long id) {
+        catalogService.deleteRechargeField(id);
+    }
+
+    public List<GoodsChannelItem> listGoodsChannels(Long targetGoodsId) {
+        return catalogService.listGoodsChannels(targetGoodsId);
+    }
+
+    public GoodsChannelItem createGoodsChannel(Long targetGoodsId, CreateGoodsChannelRequest request) {
+        return catalogService.createGoodsChannel(targetGoodsId, request);
+    }
+
+    public void deleteGoodsChannel(Long targetGoodsId, Long targetChannelId) {
+        catalogService.deleteGoodsChannel(targetGoodsId, targetChannelId);
+    }
+
+    public void deleteGoods(Long targetGoodsId) {
+        catalogService.deleteGoods(targetGoodsId);
+    }
+
+    public GoodsItem createGoods(CreateGoodsRequest request) {
+        return catalogService.createGoods(request);
+    }
+
+    public GoodsItem updateGoods(Long id, CreateGoodsRequest request) {
+        return catalogService.updateGoods(id, request);
+    }
+
+    public synchronized int repairBenefitDurationsFromTitles() {
+        return catalogService.repairBenefitDurationsFromTitles();
+    }
+
+    private void applyMonitoredGoodsUpdate(GoodsItem next) {
+        catalogService.applyMonitoredGoodsUpdate(next);
+    }
+
+    private Optional<GoodsItem> findGoodsSnapshot(Long id) {
+        return catalogService.findGoodsSnapshot(id);
+    }
+
+    private List<GoodsItem> allGoodsSnapshots() {
+        return catalogService.allGoodsSnapshots();
+    }
+
+    private Optional<CategoryItem> findCategorySnapshot(Long id) {
+        return catalogService.findCategorySnapshot(id);
+    }
+
+    private Set<Long> categoryTreeIds(Long rootId) {
+        return catalogService.categoryTreeIds(rootId);
+    }
+
+    private List<GoodsChannelItem> allGoodsChannelSnapshots() {
+        return catalogService.allGoodsChannelSnapshots();
+    }
+
+    private Optional<GoodsChannelItem> findGoodsChannelSnapshot(Long id) {
+        return catalogService.findGoodsChannelSnapshot(id);
+    }
+
+    private void persistGoodsChannel(GoodsChannelItem item) {
+        catalogService.persistGoodsChannel(item);
+    }
+
+    private void persistSupplier(SupplierItem item) {
+        catalogService.persistSupplier(item);
+    }
+
+    private void deletePersistentSupplier(Long id) {
+        catalogService.deletePersistentSupplier(id);
+    }
+
+    private Optional<List<SupplierItem>> persistentSuppliers() {
+        return catalogService.persistentSuppliers();
+    }
+
+    private void refreshGoodsStock(Long targetGoodsId) {
+        catalogService.refreshGoodsStock(targetGoodsId);
+    }
+
+    private void refreshGoodsStockForCardKind(Long targetCardKindId) {
+        catalogService.refreshGoodsStockForCardKind(targetCardKindId);
+    }
+
+    private GoodsItem refreshStock(GoodsItem item) {
+        return catalogService.refreshStock(item);
+    }
+
+    private GoodsItem withEffectivePrice(GoodsItem item, Long userGroupId) {
+        return catalogService.withEffectivePrice(item, userGroupId);
+    }
+
+    private void validateGoodsSalePlatform(GoodsItem item, String platform) {
+        catalogService.validateGoodsSalePlatform(item, platform);
+    }
+
+    private List<GoodsIntegrationItem> normalizeIntegrations(List<GoodsIntegrationItem> integrations) {
+        return catalogService.normalizeIntegrations(integrations);
+    }
+
+    private boolean integrationChanged(GoodsIntegrationItem oldItem, GoodsIntegrationItem nextItem) {
+        return catalogService.integrationChanged(oldItem, nextItem);
+    }
+
+    private List<String> normalizePlatforms(List<String> platforms) {
+        return catalogService.normalizePlatforms(platforms);
+    }
+
+    private String normalizeSalePlatform(String platform) {
+        return catalogService.normalizeSalePlatform(platform);
+    }
+
+    private List<String> normalizeTextList(List<String> values) {
+        return catalogService.normalizeTextList(values);
+    }
+
+    private List<String> normalizedBenefitDurations(List<String> durations, String title) {
+        return catalogService.normalizedBenefitDurations(durations, title);
+    }
+
+    private String inferredPriceLimitText(String... titles) {
+        return catalogService.inferredPriceLimitText(titles);
+    }
+
+    private boolean titleContainsPriceLimited(String title) {
+        return catalogService.titleContainsPriceLimited(title);
+    }
+
+    private String normalizeRechargeFieldCode(String value) {
+        return catalogService.normalizeRechargeFieldCode(value);
+    }
+
+    private String normalizeRechargeFieldInputType(String value) {
+        return catalogService.normalizeRechargeFieldInputType(value);
+    }
+
+    private List<String> validateEnabledRechargeFieldCodes(List<String> codes) {
+        return catalogService.validateEnabledRechargeFieldCodes(codes);
+    }
+
+    private Optional<RechargeFieldItem> rechargeFieldByCode(String code) {
+        return catalogService.rechargeFieldByCode(code);
+    }
+
+    private BigDecimal defaultDecimal(BigDecimal value) {
+        return catalogService.defaultDecimal(value);
+    }
+
+    private int defaultInt(Integer value) {
+        return catalogService.defaultInt(value);
+    }
+
+    private int normalizedPriority(Integer value) {
+        return catalogService.normalizedPriority(value);
+    }
+
+    private int normalizedChannelTimeout(Integer value) {
+        return catalogService.normalizedChannelTimeout(value);
+    }
+
+    private void loadPriceTemplates() {
+        catalogService.loadPriceTemplates();
+    }
+
+    private void seedCategories() {
+        catalogService.seedCategories();
+    }
+
+    private void seedRechargeFields() {
+        catalogService.seedRechargeFields();
+    }
+
+    private void seedGoods() {
+        catalogService.seedGoods();
+    }
+
+    private void seedGoodsChannels() {
+        catalogService.seedGoodsChannels();
     }
 
     public List<SupplierItem> listSuppliers() {
@@ -1890,180 +1574,175 @@ public class InMemoryShopRepository {
             .toList();
     }
 
-    public synchronized SupplierItem createSupplier(CreateSupplierRequest request) {
-        if (request == null || !StringUtils.hasText(request.name())) {
-            throw new IllegalArgumentException("supplier name is required");
+    public SupplierItem createSupplier(CreateSupplierRequest request) {
+        synchronized (supplierLock) {
+            if (request == null || !StringUtils.hasText(request.name())) {
+                throw new IllegalArgumentException("supplier name is required");
+            }
+            String name = request.name().trim();
+            if (supplierNameExists(name, null)) {
+                throw new IllegalStateException("supplier name already exists");
+            }
+            Long id = allocateIncrementingId(supplierId, maxSupplierId());
+            String appKey = defaultText(request.appKey(), defaultText(request.appId(), ""));
+            String appSecret = defaultText(request.appSecret(), "");
+            String apiKey = defaultText(request.apiKey(), appSecret);
+            String apiKeyMasked = StringUtils.hasText(request.apiKeyMasked()) ? request.apiKeyMasked().trim() : mask(apiKey);
+            String platformType = defaultText(request.platformType(), "CUSTOM");
+            String appId = firstText(request.appId(), request.userId(), appKey);
+            String userId = firstText(request.userId(), appId, appKey);
+            SupplierItem item = new SupplierItem(
+                id,
+                name,
+                platformType,
+                defaultText(request.baseUrl(), ""),
+                appKey,
+                mask(appSecret),
+                userId,
+                appId,
+                apiKey,
+                apiKeyMasked,
+                normalizedCallbackUrl(request.callbackUrl()),
+                normalizedTimeoutSeconds(request.timeoutSeconds()),
+                request.balance() == null ? BigDecimal.ZERO : request.balance(),
+                defaultText(request.status(), "ENABLED"),
+                defaultText(request.remark(), ""),
+                OffsetDateTime.now()
+            );
+            suppliers.put(id, item);
+            if (StringUtils.hasText(apiKey)) {
+                supplierApiKeys.put(id, apiKey);
+            }
+            persistSupplier(item);
+            return item;
         }
-        String name = request.name().trim();
-        if (supplierNameExists(name, null)) {
-            throw new IllegalStateException("supplier name already exists");
-        }
-        Long id = allocateIncrementingId(supplierId, maxSupplierId());
-        String appKey = defaultText(request.appKey(), defaultText(request.appId(), ""));
-        String appSecret = defaultText(request.appSecret(), "");
-        String apiKey = defaultText(request.apiKey(), appSecret);
-        String apiKeyMasked = StringUtils.hasText(request.apiKeyMasked()) ? request.apiKeyMasked().trim() : mask(apiKey);
-        String platformType = defaultText(request.platformType(), "CUSTOM");
-        String appId = firstText(request.appId(), request.userId(), appKey);
-        String userId = firstText(request.userId(), appId, appKey);
-        SupplierItem item = new SupplierItem(
-            id,
-            name,
-            platformType,
-            defaultText(request.baseUrl(), ""),
-            appKey,
-            mask(appSecret),
-            userId,
-            appId,
-            apiKey,
-            apiKeyMasked,
-            normalizedCallbackUrl(request.callbackUrl()),
-            normalizedTimeoutSeconds(request.timeoutSeconds()),
-            request.balance() == null ? BigDecimal.ZERO : request.balance(),
-            defaultText(request.status(), "ENABLED"),
-            defaultText(request.remark(), ""),
-            OffsetDateTime.now()
-        );
-        suppliers.put(id, item);
-        if (StringUtils.hasText(apiKey)) {
-            supplierApiKeys.put(id, apiKey);
-        }
-        persistSupplier(item);
-        return item;
     }
 
-    public synchronized SupplierItem updateSupplier(Long id, CreateSupplierRequest request) {
-        SupplierItem current = requiredSupplier(id);
-        if (request == null) {
-            return current;
+    public SupplierItem updateSupplier(Long id, CreateSupplierRequest request) {
+        synchronized (supplierLock) {
+            SupplierItem current = requiredSupplier(id);
+            if (request == null) {
+                return current;
+            }
+            String name = defaultText(request.name(), current.name()).trim();
+            if (!StringUtils.hasText(name)) {
+                throw new IllegalArgumentException("supplier name is required");
+            }
+            if (supplierNameExists(name, id)) {
+                throw new IllegalStateException("supplier name already exists");
+            }
+            String platformType = defaultText(request.platformType(), current.platformType());
+            String appKey = defaultText(request.appKey(), current.appKey());
+            String appId = defaultText(request.appId(), current.appId());
+            // 批次3 分发链①：原为 6 个 isXxxPlatform 或串（isApiSupplierPlatform 含 2 家，共 7 家），
+            // 改为查注册表 + 适配器声明的 usesIdentityFallback()。
+            String userId = supplierAdapters.find(platformType).map(SupplierAdapter::usesIdentityFallback).orElse(false)
+                ? firstText(request.userId(), appId, defaultText(current.userId(), appKey))
+                : defaultText(request.userId(), current.userId());
+            String appSecretMasked = current.appSecretMasked();
+            if (StringUtils.hasText(request.appSecret())) {
+                appSecretMasked = mask(request.appSecret());
+            }
+            String apiKey = current.apiKey();
+            String apiKeyMasked = current.apiKeyMasked();
+            if (StringUtils.hasText(request.apiKey())) {
+                apiKey = request.apiKey().trim();
+                supplierApiKeys.put(id, apiKey);
+                apiKeyMasked = mask(apiKey);
+            } else if (StringUtils.hasText(request.appSecret())) {
+                apiKey = request.appSecret().trim();
+                supplierApiKeys.put(id, apiKey);
+                apiKeyMasked = mask(apiKey);
+            } else if (StringUtils.hasText(request.apiKeyMasked())) {
+                apiKeyMasked = request.apiKeyMasked().trim();
+            }
+            SupplierItem next = new SupplierItem(
+                current.id(),
+                name,
+                platformType,
+                defaultText(request.baseUrl(), current.baseUrl()),
+                appKey,
+                appSecretMasked,
+                userId,
+                appId,
+                apiKey,
+                apiKeyMasked,
+                request.callbackUrl() == null ? current.callbackUrl() : normalizedCallbackUrl(request.callbackUrl()),
+                request.timeoutSeconds() == null ? current.timeoutSeconds() : normalizedTimeoutSeconds(request.timeoutSeconds()),
+                request.balance() == null ? current.balance() : request.balance(),
+                defaultText(request.status(), current.status()),
+                defaultText(request.remark(), current.remark()),
+                current.lastSyncAt()
+            );
+            suppliers.put(id, next);
+            persistSupplier(next);
+            return next;
         }
-        String name = defaultText(request.name(), current.name()).trim();
-        if (!StringUtils.hasText(name)) {
-            throw new IllegalArgumentException("supplier name is required");
-        }
-        if (supplierNameExists(name, id)) {
-            throw new IllegalStateException("supplier name already exists");
-        }
-        String platformType = defaultText(request.platformType(), current.platformType());
-        String appKey = defaultText(request.appKey(), current.appKey());
-        String appId = defaultText(request.appId(), current.appId());
-        String userId = isApiSupplierPlatform(platformType) || isFuluPlatform(platformType) || isFengzhushouPlatform(platformType) || isChengquanPlatform(platformType) || isFanchenPlatform(platformType) || isJingzhaoPlatform(platformType)
-            ? firstText(request.userId(), appId, defaultText(current.userId(), appKey))
-            : defaultText(request.userId(), current.userId());
-        String appSecretMasked = current.appSecretMasked();
-        if (StringUtils.hasText(request.appSecret())) {
-            appSecretMasked = mask(request.appSecret());
-        }
-        String apiKey = current.apiKey();
-        String apiKeyMasked = current.apiKeyMasked();
-        if (StringUtils.hasText(request.apiKey())) {
-            apiKey = request.apiKey().trim();
-            supplierApiKeys.put(id, apiKey);
-            apiKeyMasked = mask(apiKey);
-        } else if (StringUtils.hasText(request.appSecret())) {
-            apiKey = request.appSecret().trim();
-            supplierApiKeys.put(id, apiKey);
-            apiKeyMasked = mask(apiKey);
-        } else if (StringUtils.hasText(request.apiKeyMasked())) {
-            apiKeyMasked = request.apiKeyMasked().trim();
-        }
-        SupplierItem next = new SupplierItem(
-            current.id(),
-            name,
-            platformType,
-            defaultText(request.baseUrl(), current.baseUrl()),
-            appKey,
-            appSecretMasked,
-            userId,
-            appId,
-            apiKey,
-            apiKeyMasked,
-            request.callbackUrl() == null ? current.callbackUrl() : normalizedCallbackUrl(request.callbackUrl()),
-            request.timeoutSeconds() == null ? current.timeoutSeconds() : normalizedTimeoutSeconds(request.timeoutSeconds()),
-            request.balance() == null ? current.balance() : request.balance(),
-            defaultText(request.status(), current.status()),
-            defaultText(request.remark(), current.remark()),
-            current.lastSyncAt()
-        );
-        suppliers.put(id, next);
-        persistSupplier(next);
-        return next;
     }
 
-    public synchronized void deleteSupplier(Long id) {
-        requiredSupplier(id);
-        suppliers.remove(id);
-        supplierApiKeys.remove(id);
-        remoteGoodsSyncResults.remove(id);
-        goodsChannels.entrySet().removeIf(entry -> Objects.equals(entry.getValue().supplierId(), id));
-        deletePersistentSupplier(id);
+    public void deleteSupplier(Long id) {
+        synchronized (supplierLock) {
+            requiredSupplier(id);
+            suppliers.remove(id);
+            supplierApiKeys.remove(id);
+            remoteGoodsSyncResults.remove(id);
+            catalogService.goodsChannelsMap().entrySet().removeIf(entry -> Objects.equals(entry.getValue().supplierId(), id));
+            deletePersistentSupplier(id);
+        }
     }
 
-    public synchronized SupplierItem updateSupplierStatus(Long id, boolean enabled) {
+    public SupplierItem updateSupplierStatus(Long id, boolean enabled) {
+        synchronized (supplierLock) {
+            SupplierItem item = requiredSupplier(id);
+            SupplierItem next = item.withStatus(enabled ? "ENABLED" : "DISABLED");
+            suppliers.put(id, next);
+            persistSupplier(next);
+            return next;
+        }
+    }
+
+    public SupplierItem refreshSupplierBalance(Long id) {
         SupplierItem item = requiredSupplier(id);
-        SupplierItem next = item.withStatus(enabled ? "ENABLED" : "DISABLED");
-        suppliers.put(id, next);
-        persistSupplier(next);
-        return next;
-    }
-
-    public synchronized SupplierItem refreshSupplierBalance(Long id) {
-        SupplierItem item = requiredSupplier(id);
-        SupplierItem next;
-        if (isKasushouSupplier(item)) {
-            next = refreshKasushouBalance(item);
-        } else if (isKakayunSupplier(item)) {
-            next = refreshKakayunBalance(item);
-        } else if (isFuluSupplier(item)) {
-            next = refreshFuluBalance(item);
-        } else if (isFengzhushouSupplier(item)) {
-            next = refreshFengzhushouBalance(item);
-        } else if (isChengquanSupplier(item)) {
-            next = refreshChengquanBalance(item);
-        } else if (isFanchenSupplier(item)) {
-            next = refreshFanchenBalance(item);
-        } else if (isJingzhaoSupplier(item)) {
-            next = refreshJingzhaoBalance(item);
-        } else {
-            throw new IllegalArgumentException("当前供应商不支持远程刷新余额，请手动维护余额");
+        // 批次3 分发链②：原 7 段 if/else-if + else 抛不支持。
+        SupplierAdapter adapter = supplierAdapters.find(item)
+            .filter(SupplierAdapter::supportsBalanceRefresh)
+            .orElseThrow(() -> new IllegalArgumentException("当前供应商不支持远程刷新余额，请手动维护余额"));
+        SupplierItem next = adapter.refreshBalance(supplierContext(item));
+        synchronized (supplierLock) {
+            suppliers.put(id, next);
+            persistSupplier(next);
         }
-        suppliers.put(id, next);
-        persistSupplier(next);
         return next;
     }
 
-    public synchronized SupplierItem testSupplierConnection(Long id) {
-        SupplierItem item = requiredSupplier(id);
-        if (!"ENABLED".equals(item.status())) {
-            throw new IllegalStateException("supplier is disabled");
-        }
-        SupplierItem next = isKasushouSupplier(item)
-            ? testKasushouConnection(item)
-            : (isKakayunSupplier(item)
-                ? testKakayunConnection(item)
-                : (isFuluSupplier(item)
-                    ? testFuluConnection(item)
-                    : (isFengzhushouSupplier(item)
-                        ? testFengzhushouConnection(item)
-                        : (isChengquanSupplier(item)
-                            ? testChengquanConnection(item)
-                            : (isFanchenSupplier(item)
-                                ? testFanchenConnection(item)
-                                : (isJingzhaoSupplier(item) ? testJingzhaoConnection(item) : item.withBalance(item.balance())))))));
-        suppliers.put(id, next);
-        persistSupplier(next);
-        return next;
-    }
-
-    public synchronized RemoteGoodsSyncResult syncRemoteGoods(Long id, SyncGoodsRequest request) {
+    public SupplierItem testSupplierConnection(Long id) {
         SupplierItem item = requiredSupplier(id);
         if (!"ENABLED".equals(item.status())) {
             throw new IllegalStateException("supplier is disabled");
         }
-        if (isFuluSupplier(item) || isFengzhushouSupplier(item)) {
-            throw new IllegalArgumentException(platformLabelForManualSupplier(item) + "不提供上游商品列表，请在商品对接里手动填写上游商品编码");
+        // 批次3 分发链③：原为 7 层嵌套三元，未识别的平台回落 item.withBalance(item.balance())。
+        SupplierItem next = supplierAdapters.find(item)
+            .map(adapter -> adapter.testConnection(supplierContext(item)))
+            .orElseGet(() -> item.withBalance(item.balance()));
+        synchronized (supplierLock) {
+            suppliers.put(id, next);
+            persistSupplier(next);
         }
-        if (!supportsRemoteGoodsSync(item)) {
+        return next;
+    }
+
+    public RemoteGoodsSyncResult syncRemoteGoods(Long id, SyncGoodsRequest request) {
+        SupplierItem item = requiredSupplier(id);
+        if (!"ENABLED".equals(item.status())) {
+            throw new IllegalStateException("supplier is disabled");
+        }
+        // 批次3：原为「福禄 or 蜂助手 → platformLabelForManualSupplier 文案」+ supportsRemoteGoodsSync 硬编码，
+        // 改为适配器声明能力位 + 适配器自带文案。
+        Optional<SupplierAdapter> knownAdapter = supplierAdapters.find(item);
+        if (knownAdapter.isPresent() && !knownAdapter.get().supportsRemoteGoodsSync()) {
+            throw new IllegalArgumentException(knownAdapter.get().manualGoodsMappingHint());
+        }
+        if (knownAdapter.isEmpty()) {
             throw new IllegalArgumentException("supplier platformType must support remote goods sync");
         }
 
@@ -2073,10 +1752,12 @@ public class InMemoryShopRepository {
         String keyword = request == null ? "" : defaultText(request.keyword(), "").trim();
 
         RemoteGoodsSyncResult result = fetchIntegratedRemoteGoods(item, cateId, keyword, page, limit);
-        remoteGoodsSyncResults.put(id, result);
         SupplierItem synced = item.withLastSyncAt(result.syncedAt());
-        suppliers.put(id, synced);
-        persistSupplier(synced);
+        synchronized (supplierLock) {
+            remoteGoodsSyncResults.put(id, result);
+            suppliers.put(id, synced);
+            persistSupplier(synced);
+        }
         return result;
     }
 
@@ -2085,7 +1766,7 @@ public class InMemoryShopRepository {
         return Optional.ofNullable(remoteGoodsSyncResults.get(id));
     }
 
-    public synchronized GoodsIntegrationItem remoteGoodsSnapshot(Long supplierId, String supplierGoodsId) {
+    public GoodsIntegrationItem remoteGoodsSnapshot(Long supplierId, String supplierGoodsId) {
         SupplierItem supplier = requiredSupplier(supplierId);
         if (!"ENABLED".equals(supplier.status())) {
             throw new IllegalStateException("supplier is disabled");
@@ -2098,27 +1779,24 @@ public class InMemoryShopRepository {
         return remoteGoodsIntegration(supplier, remote);
     }
 
-    public synchronized RemoteGoodsSyncResult sourceConnectRemoteGoods(Long id, SyncGoodsRequest request) {
+    public RemoteGoodsSyncResult sourceConnectRemoteGoods(Long id, SyncGoodsRequest request) {
         SupplierItem item = requiredSupplier(id);
         if (!"ENABLED".equals(item.status())) {
             throw new IllegalStateException("supplier is disabled");
         }
 
-        if (isFuluSupplier(item)) {
-            throw new IllegalArgumentException("福禄新平台不支持获取上游商品，请手动填写 product_id 创建商品对接");
-        }
-        if (!supportsRemoteGoodsSync(item)) {
-            throw new IllegalArgumentException("当前供应商不支持远程拉取商品，请手动创建或绑定上游商品编码");
+        // 批次3：原为「福禄专属文案」+ supportsRemoteGoodsSync 硬编码，
+        // 改为 sourceConnectUnsupportedHint()（福禄覆写了专属文案，其余走通用文案）。
+        SupplierAdapter adapter = supplierAdapters.find(item)
+            .orElseThrow(() -> new IllegalArgumentException("当前供应商不支持远程拉取商品，请手动创建或绑定上游商品编码"));
+        if (!adapter.supportsRemoteGoodsSync()) {
+            throw new IllegalArgumentException(adapter.sourceConnectUnsupportedHint());
         }
         RemoteGoodsSyncResult result = syncRemoteGoods(id, request);
-        remoteGoodsSyncResults.put(id, result);
-        SupplierItem synced = item.withLastSyncAt(result.syncedAt());
-        suppliers.put(id, synced);
-        persistSupplier(synced);
         return result;
     }
 
-    public synchronized SourceCloneResult cloneSourceGoods(Long supplierId, SourceCloneRequest request) {
+    public SourceCloneResult cloneSourceGoods(Long supplierId, SourceCloneRequest request) {
         SupplierItem supplier = requiredSupplier(supplierId);
         if (!"ENABLED".equals(supplier.status())) {
             throw new IllegalStateException("supplier is disabled");
@@ -2141,13 +1819,8 @@ public class InMemoryShopRepository {
             }
 
             try {
-                RemoteGoodsItem remote = fetchRemoteGoodsSnapshot(supplier, normalizedId, false);
+                RemoteGoodsItem remote = sourceCloneRemoteGoods(supplier, cloneItem, normalizedId);
                 GoodsIntegrationItem remoteIntegration = remoteGoodsIntegration(supplier, remote);
-                Optional<GoodsChannelItem> existing = allGoodsChannelSnapshots().stream()
-                    .filter(channel -> Objects.equals(channel.supplierId(), supplierId))
-                    .filter(channel -> Objects.equals(channel.supplierGoodsId(), normalizedId))
-                    .filter(channel -> findGoodsSnapshot(channel.goodsId()).isPresent())
-                    .findFirst();
                 List<String> accountTypes = validateEnabledRechargeFieldCodes(cloneItem.accountTypes());
                 String goodsName = firstText(remote.goodsName(), cloneItem.name(), normalizedId);
                 BigDecimal price = defaultDecimal(remote.goodsPrice());
@@ -2194,38 +1867,43 @@ public class InMemoryShopRepository {
                     normalizePlatforms(cloneItem.forbiddenPlatforms()),
                     null
                 );
-                if (existing.isPresent()) {
-                    skippedCount++;
-                    GoodsChannelItem channel = existing.get();
-                    GoodsItem updated = updateGoods(channel.goodsId(), goodsRequest);
-                    GoodsChannelItem updatedChannel = new GoodsChannelItem(
-                        channel.id(),
-                        channel.goodsId(),
-                        channel.supplierId(),
-                        supplier.name(),
-                        channel.supplierGoodsId(),
+                synchronized (goodsLock) {
+                    Optional<GoodsChannelItem> existing = allGoodsChannelSnapshots().stream()
+                        .filter(channel -> Objects.equals(channel.supplierId(), supplierId))
+                        .filter(channel -> Objects.equals(channel.supplierGoodsId(), normalizedId))
+                        .filter(channel -> findGoodsSnapshot(channel.goodsId()).isPresent())
+                        .findFirst();
+                    if (existing.isPresent()) {
+                        skippedCount++;
+                        GoodsChannelItem channel = existing.get();
+                        GoodsItem updated = updateGoods(channel.goodsId(), goodsRequest);
+                        GoodsChannelItem updatedChannel = new GoodsChannelItem(
+                            channel.id(),
+                            channel.goodsId(),
+                            channel.supplierId(),
+                            supplier.name(),
+                            channel.supplierGoodsId(),
+                            priority,
+                            timeoutSeconds,
+                            "ENABLED",
+                            channel.createdAt()
+                        );
+                        catalogService.goodsChannelsMap().put(updatedChannel.id(), updatedChannel);
+                        persistGoodsChannel(updatedChannel);
+                        results.add(new SourceCloneItem(normalizedId, updated.goodsName(), "SKIPPED", updated.id(), updatedChannel.id(), "已存在对接关系，已更新本地商品设置"));
+                        continue;
+                    }
+                    GoodsItem created = createGoods(goodsRequest);
+                    GoodsChannelItem channel = createGoodsChannel(created.id(), new CreateGoodsChannelRequest(
+                        supplierId,
+                        normalizedId,
                         priority,
                         timeoutSeconds,
-                        "ENABLED",
-                        channel.createdAt()
-                    );
-                    goodsChannels.put(updatedChannel.id(), updatedChannel);
-                    persistGoodsChannel(updatedChannel);
-                    scanProductMonitorChannel(updatedChannel.id(), true);
-                    results.add(new SourceCloneItem(normalizedId, updated.goodsName(), "SKIPPED", updated.id(), updatedChannel.id(), "已存在对接关系，已更新本地商品设置"));
-                    continue;
+                        "ENABLED"
+                    ));
+                    createdCount++;
+                    results.add(new SourceCloneItem(normalizedId, goodsName, "CREATED", created.id(), channel.id(), "已创建本地商品、绑定货源，后续由商品监控刷新"));
                 }
-                GoodsItem created = createGoods(goodsRequest);
-                GoodsChannelItem channel = createGoodsChannel(created.id(), new CreateGoodsChannelRequest(
-                    supplierId,
-                    normalizedId,
-                    priority,
-                    timeoutSeconds,
-                    "ENABLED"
-                ));
-                scanProductMonitorChannel(channel.id(), true);
-                createdCount++;
-                results.add(new SourceCloneItem(normalizedId, goodsName, "CREATED", created.id(), channel.id(), "已创建本地商品、绑定货源，并开启轮询监控"));
             } catch (RuntimeException ex) {
                 failedCount++;
                 results.add(new SourceCloneItem(normalizedId, normalizedId, "FAILED", null, null, ex.getMessage()));
@@ -2233,6 +1911,41 @@ public class InMemoryShopRepository {
         }
 
         return new SourceCloneResult(createdCount, skippedCount, failedCount, List.copyOf(results));
+    }
+
+    private RemoteGoodsItem sourceCloneRemoteGoods(SupplierItem supplier, SourceCloneConfigItem cloneItem, String normalizedId) {
+        Optional<RemoteGoodsItem> cached = latestRemoteGoods(supplier.id())
+            .flatMap(snapshot -> exactRemoteGoods(snapshot.items(), normalizedId));
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        if (cloneItem != null && StringUtils.hasText(cloneItem.name())) {
+            Map<String, Object> raw = new LinkedHashMap<>();
+            raw.put("platform", defaultText(supplier.platformType(), ""));
+            raw.put("supplier_goods_id", normalizedId);
+            raw.put("source", "source_connect_draft");
+            raw.put("note", "批量对接使用本次提交的待对接配置，避免重复请求上游商品详情");
+            BigDecimal price = defaultDecimal(cloneItem.price());
+            return new RemoteGoodsItem(
+                normalizedId,
+                cloneItem.name().trim(),
+                "DIRECT",
+                "",
+                "批量对接",
+                price,
+                cloneItem.originalPrice() == null ? price : cloneItem.originalPrice(),
+                cloneItem.stock() == null ? 0 : Math.max(0, cloneItem.stock()),
+                defaultText(cloneItem.status(), "ON_SALE"),
+                true,
+                false,
+                false,
+                null,
+                "",
+                null,
+                raw
+            );
+        }
+        return fetchRemoteGoodsSnapshot(supplier, normalizedId, true);
     }
 
     private List<SourceCloneConfigItem> sourceCloneItems(SourceCloneRequest request) {
@@ -2273,72 +1986,10 @@ public class InMemoryShopRepository {
             .toList();
     }
 
-    public synchronized int repairBenefitDurationsFromTitles() {
-        List<GoodsItem> items = allGoodsSnapshots();
-        int changedCount = 0;
-        for (GoodsItem item : items) {
-            List<String> nextDurations = inferredBenefitDurations(item.goodsName());
-            if (nextDurations.isEmpty() || Objects.equals(nextDurations, item.benefitDurations())) {
-                continue;
-            }
-            GoodsItem next = new GoodsItem(
-                item.id(),
-                item.categoryId(),
-                item.categoryName(),
-                item.goodsName(),
-                item.name(),
-                item.subTitle(),
-                item.description(),
-                nextDurations,
-                item.benefitType(),
-                item.benefitBrand(),
-                item.priceLimited(),
-                item.priceLimitText(),
-                item.coverUrl(),
-                item.detailImages(),
-                item.detailBlocks(),
-                item.integrations(),
-                item.pollingEnabled(),
-                item.monitoringEnabled(),
-                item.type(),
-                item.platform(),
-                item.price(),
-                item.originalPrice(),
-                item.maxBuy(),
-                item.requireRechargeAccount(),
-                item.accountTypes(),
-                item.priceTemplateId(),
-                item.priceMode(),
-                item.priceCoefficient(),
-                item.priceFixedAdd(),
-                item.stock(),
-                item.sales(),
-                item.status(),
-                item.tags(),
-                item.createdAt(),
-                OffsetDateTime.now(),
-                item.availablePlatforms(),
-                item.forbiddenPlatforms(),
-                item.cardKindId()
-            );
-            goods.put(next.id(), next);
-            persistGoodsSnapshot(next);
-            changedCount++;
-        }
-        return changedCount;
-    }
 
-    private BigDecimal defaultDecimal(BigDecimal value) {
-        return value == null ? BigDecimal.ZERO : value;
-    }
 
-    private int normalizedPriority(Integer value) {
-        return value == null ? 10 : Math.max(1, value);
-    }
 
-    private int normalizedChannelTimeout(Integer value) {
-        return value == null ? 30 : Math.max(5, value);
-    }
+
 
     private String remoteGoodsStatus(RemoteGoodsItem remote) {
         return remoteGoodsSaleStatus(remote);
@@ -2379,34 +2030,69 @@ public class InMemoryShopRepository {
             || List.of("下架", "停售", "不可售", "不可购买", "售罄", "关闭").contains(status);
     }
 
-    public List<OrderItem> listOrders() {
-        return listOrders(null, null, null);
+    /**
+     * 批次8C：分页订单查询，取代原来的「全表读出 + 控制层 subList」。
+     *
+     * <h2>为什么不再顺手 expire 一遍</h2>
+     * 原实现在每个列表读里都调 {@code expireStaleUnpaidOrders()}：
+     * 一个<b>读接口里的写副作用</b>，而且它只遍历内存 Map，
+     * 数据库里的超时未付款订单它根本看不到，所以在持久化模式下等于空转。
+     * 批次8A 的 {@code OrderCompensationWorker.closeTimedOutOrders()} 已经每 60s
+     * 对着数据库批量关单，这里再扫一遍既无必要，也让分页无法下推
+     * （要先加载全表才能扫）。故删除。
+     *
+     * @param userId 限定用户，null 表示管理端不限用户
+     */
+    public PageSlice<OrderItem> pageOrders(String search, String status, String goodsType, Long userId, int limit, long offset) {
+        if (persistentOrderStore != null) {
+            try {
+                PageSlice<OrderItem> slice = persistentOrderStore.pageOrders(search, status, goodsType, userId, limit, offset);
+                return new PageSlice<>(
+                    slice.items().stream().map(this::withLatestSupplierNames).toList(),
+                    slice.total()
+                );
+            } catch (RuntimeException ex) {
+                recordReadFallback("ORDER", "LIST", ex);
+            }
+        }
+        return PageSlice.of(filterMemoryOrders(search, status, goodsType, userId), limit, offset);
     }
 
-    public List<OrderItem> listOrdersForUser(Long userId) {
-        expireStaleUnpaidOrders();
-        Optional<List<OrderItem>> persistent = persistentOrders();
-        return (persistent.orElseGet(() -> new ArrayList<>(orders.values()))).stream()
-            .filter(order -> Objects.equals(order.userId(), userId))
-            .sorted(Comparator.comparing(OrderItem::createdAt).reversed())
-            .map(this::withLatestSupplierNames)
-            .toList();
-    }
-
-    public List<OrderItem> listOrders(String search, String status, String goodsType) {
-        expireStaleUnpaidOrders();
+    /**
+     * 内存兜底筛选。仅在持久层缺失（单元测试）或读失败降级时使用，
+     * 匹配语义须与 {@code OrderRecordMapper.selectSnapshotPage} 的 SQL 保持一致。
+     */
+    private List<OrderItem> filterMemoryOrders(String search, String status, String goodsType, Long userId) {
         String keyword = normalize(search);
         String normalizedStatus = normalize(status);
         String normalizedGoodsType = normalize(goodsType);
-
-        Optional<List<OrderItem>> persistent = persistentOrders();
-        return (persistent.orElseGet(() -> new ArrayList<>(orders.values()))).stream()
+        return orders.values().stream()
+            .filter(order -> userId == null || Objects.equals(order.userId(), userId))
             .filter(order -> !StringUtils.hasText(keyword) || containsOrderKeyword(order, keyword))
             .filter(order -> !StringUtils.hasText(normalizedStatus) || normalize(String.valueOf(order.status())).equals(normalizedStatus))
             .filter(order -> !StringUtils.hasText(normalizedGoodsType) || normalize(String.valueOf(order.goodsType())).equals(normalizedGoodsType))
             .sorted(Comparator.comparing(OrderItem::createdAt).reversed())
             .map(this::withLatestSupplierNames)
             .toList();
+    }
+
+    /** 批次8C：会员方按 requestId 查单，走 (user_id, request_id) 唯一索引而非全量扫。 */
+    public Optional<OrderItem> findOrderByRequestId(Long userId, String requestId) {
+        if (persistentOrderStore != null) {
+            try {
+                Optional<OrderItem> found = persistentOrderStore.findOrderByRequestId(userId, requestId);
+                if (found.isPresent()) {
+                    return found.map(order -> withLatestSupplierNames(refreshUpstreamOrderStatusIfNeeded(order, false)));
+                }
+            } catch (RuntimeException ex) {
+                recordReadFallback("ORDER", "BY_REQUEST", ex);
+            }
+        }
+        return orders.values().stream()
+            .filter(order -> Objects.equals(order.userId(), userId))
+            .filter(order -> requestId != null && requestId.equals(order.requestId()))
+            .max(Comparator.comparing(OrderItem::createdAt))
+            .map(order -> withLatestSupplierNames(refreshUpstreamOrderStatusIfNeeded(order, false)));
     }
 
     public Optional<OrderItem> findOrder(String orderNo) {
@@ -2419,19 +2105,22 @@ public class InMemoryShopRepository {
         return Optional.ofNullable(active == null ? null : withLatestSupplierNames(refreshUpstreamOrderStatusIfNeeded(active, false)));
     }
 
-    public synchronized OrderItem refreshOrderCallbackInfo(String orderNo) {
-        OrderItem order = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
-        if (order == null) {
-            throw new IllegalArgumentException("order not found");
-        }
-        OrderItem active = expireOrderIfNeeded(order, OffsetDateTime.now());
-        if (active == null) {
-            throw new IllegalArgumentException("order not found");
+    public OrderItem refreshOrderCallbackInfo(String orderNo) {
+        OrderItem active;
+        synchronized (orderLock) {
+            OrderItem order = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
+            if (order == null) {
+                throw new IllegalArgumentException("order not found");
+            }
+            active = expireOrderIfNeeded(order, OffsetDateTime.now());
+            if (active == null) {
+                throw new IllegalArgumentException("order not found");
+            }
         }
         return withLatestSupplierNames(refreshUpstreamOrderStatusIfNeeded(active, true));
     }
 
-    public synchronized OrderRefreshResult refreshUnfinishedOrderStatuses() {
+    public OrderRefreshResult refreshUnfinishedOrderStatuses() {
         List<OrderItem> candidates = allOrderSnapshots().stream()
             .filter(this::canRefreshUpstreamOrder)
             .sorted(Comparator.comparing(OrderItem::createdAt).reversed())
@@ -2459,7 +2148,8 @@ public class InMemoryShopRepository {
         return new OrderRefreshResult(candidates.size(), refreshed, changed, failed, defaultText(firstError, ""));
     }
 
-    public synchronized String handleFuluOrderCallback(Long supplierId, Map<String, Object> body) {
+    /** 批次8B：去掉 synchronized，阻塞 IO 由 {@link #applyUpstreamOrderCallback} 移到锁外。 */
+    public String handleFuluOrderCallback(Long supplierId, Map<String, Object> body) {
         if (body == null || body.isEmpty()) {
             throw new IllegalArgumentException("fulu callback body is empty");
         }
@@ -2469,67 +2159,18 @@ public class InMemoryShopRepository {
         if (!StringUtils.hasText(bizContent)) {
             throw new IllegalArgumentException("fulu callback biz_content is required");
         }
-        FuluOrderStatus upstream;
-        try {
-            upstream = fuluOrderStatusFromResult(bizContent);
-        } catch (RuntimeException ex) {
-            try {
-                JsonNode node = OBJECT_MAPPER.readTree(bizContent);
-                upstream = new FuluOrderStatus(
-                    textValue(node, "order_id", "orderId"),
-                    textValue(node, "customer_order_no", "customerOrderNo"),
-                    textValue(node, "product_id", "productId"),
-                    textValue(node, "product_name", "productName"),
-                    intValue(firstExisting(node, "order_status", "orderStatus", "status"), 0),
-                    textValue(node, "charge_remark", "chargeRemark", "message", "msg"),
-                    optionalDecimalValue(node, "total_price", "totalPrice", "customer_price", "customerPrice"),
-                    List.of(),
-                    abbreviate(node.toString(), 1200)
-                );
-            } catch (JsonProcessingException jsonEx) {
-                throw ex;
-            }
-        }
+        // 福禄的我方订单号藏在 biz_content 里，必须先解析快照才能定位订单，故这里提前算好。
+        UpstreamOrderSnapshot upstream = FuluSupplierAdapter.callbackSnapshot(bizContent, null);
         String orderNo = upstream.externalOrderNo();
         if (!StringUtils.hasText(orderNo)) {
             throw new IllegalArgumentException("fulu callback customer_order_no is required");
         }
-        OrderItem order = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
-        if (order == null) {
-            throw new IllegalArgumentException("order not found");
-        }
-        ChannelAttemptItem successAttempt = order.channelAttempts() == null ? null : order.channelAttempts().stream()
-            .filter(attempt -> Objects.equals(attempt.supplierId(), supplier.id()))
-            .filter(attempt -> "SUCCESS".equals(attempt.status()) || "PROCURING".equals(attempt.status()))
-            .reduce((first, second) -> second)
-            .orElse(null);
-        if (successAttempt == null) {
-            throw new IllegalArgumentException("fulu callback order channel mismatch");
-        }
-        GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-        ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-        List<ChannelAttemptItem> nextAttempts = new ArrayList<>(order.channelAttempts());
-        int index = nextAttempts.lastIndexOf(successAttempt);
-        if (index >= 0) {
-            nextAttempts.set(index, enrichedAttempt);
-        }
-        OrderStatus nextStatus = fuluLocalOrderStatus(upstream.status(), order.status());
-        OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-        OrderItem next = order.withProcurementResult(
-            nextStatus,
-            mergedDeliveryItems(order.deliveryItems(), upstream),
-            List.copyOf(nextAttempts),
-            fuluDeliveryMessage(upstream),
-            order.paidAt(),
-            deliveredAt
-        );
-        orders.put(next.orderNo(), next);
-        persistOrderSnapshot(next);
-        publishOrder(next);
+        applyUpstreamOrderCallback("fulu", supplier, orderNo, () -> upstream);
         return "success";
     }
 
-    public synchronized Map<String, String> handleFengzhushouOrderCallback(Long supplierId, Map<String, Object> body) {
+    /** 批次8B：去掉 synchronized，阻塞 IO 由 {@link #applyUpstreamOrderCallback} 移到锁外。 */
+    public Map<String, String> handleFengzhushouOrderCallback(Long supplierId, Map<String, Object> body) {
         if (body == null || body.isEmpty()) {
             throw new IllegalArgumentException("fengzhushou callback body is empty");
         }
@@ -2539,50 +2180,18 @@ public class InMemoryShopRepository {
         if (!StringUtils.hasText(orderNo)) {
             throw new IllegalArgumentException("fengzhushou callback channelOrderNo is required");
         }
-        OrderItem order = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
-        if (order == null) {
-            throw new IllegalArgumentException("order not found");
-        }
-        ChannelAttemptItem successAttempt = order.channelAttempts() == null ? null : order.channelAttempts().stream()
-            .filter(attempt -> Objects.equals(attempt.supplierId(), supplier.id()))
-            .filter(attempt -> "SUCCESS".equals(attempt.status()) || "PROCURING".equals(attempt.status()))
-            .reduce((first, second) -> second)
-            .orElse(null);
-        if (successAttempt == null) {
-            throw new IllegalArgumentException("fengzhushou callback order channel mismatch");
-        }
-        FengzhushouOrderStatus upstream = new FengzhushouOrderStatus(
+        applyUpstreamOrderCallback("fengzhushou", supplier, orderNo, () -> FengzhushouSupplierAdapter.callbackSnapshot(
             callbackText(body.get("orderNo")),
             orderNo,
             intValue(body.get("retcode"), 0),
             callbackText(body.get("msg")),
-            null,
             abbreviate(callbackText(body), 1200)
-        );
-        GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-        ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-        List<ChannelAttemptItem> nextAttempts = new ArrayList<>(order.channelAttempts());
-        int index = nextAttempts.lastIndexOf(successAttempt);
-        if (index >= 0) {
-            nextAttempts.set(index, enrichedAttempt);
-        }
-        OrderStatus nextStatus = fengzhushouLocalOrderStatus(upstream.status(), order.status());
-        OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-        OrderItem next = order.withProcurementResult(
-            nextStatus,
-            mergedDeliveryItems(order.deliveryItems(), upstream),
-            List.copyOf(nextAttempts),
-            fengzhushouDeliveryMessage(upstream),
-            order.paidAt(),
-            deliveredAt
-        );
-        orders.put(next.orderNo(), next);
-        persistOrderSnapshot(next);
-        publishOrder(next);
+        ));
         return Map.of("code", "0");
     }
 
-    public synchronized String handleChengquanOrderCallback(Long supplierId, Map<String, Object> body) {
+    /** 批次8B：去掉 synchronized，阻塞 IO 由 {@link #applyUpstreamOrderCallback} 移到锁外。 */
+    public String handleChengquanOrderCallback(Long supplierId, Map<String, Object> body) {
         if (body == null || body.isEmpty()) {
             throw new IllegalArgumentException("chengquan callback body is empty");
         }
@@ -2596,50 +2205,20 @@ public class InMemoryShopRepository {
             throw new IllegalArgumentException("chengquan callback order_no is required");
         }
         String normalizedOrderNo = orderNo;
-        OrderItem order = persistentOrder(normalizedOrderNo).orElseGet(() -> orders.get(normalizedOrderNo));
-        if (order == null) {
-            throw new IllegalArgumentException("order not found");
-        }
-        ChannelAttemptItem successAttempt = order.channelAttempts() == null ? null : order.channelAttempts().stream()
-            .filter(attempt -> Objects.equals(attempt.supplierId(), supplier.id()))
-            .filter(attempt -> "SUCCESS".equals(attempt.status()) || "PROCURING".equals(attempt.status()))
-            .reduce((first, second) -> second)
-            .orElse(null);
-        if (successAttempt == null) {
-            throw new IllegalArgumentException("chengquan callback order channel mismatch");
-        }
-        ChengquanOrderStatus upstream = new ChengquanOrderStatus(
-            firstText(callbackText(body.get("cq_order_no")), callbackText(body.get("platform_order_no")), ""),
-            orderNo,
-            firstText(callbackText(body.get("status")), callbackText(body.get("order_status")), ""),
-            firstText(callbackText(body.get("message")), callbackText(body.get("msg")), ""),
-            decimalValue(callbackText(body.get("amount"))),
-            abbreviate(callbackText(body), 1200)
-        );
-        GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-        ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-        List<ChannelAttemptItem> nextAttempts = new ArrayList<>(order.channelAttempts());
-        int index = nextAttempts.lastIndexOf(successAttempt);
-        if (index >= 0) {
-            nextAttempts.set(index, enrichedAttempt);
-        }
-        OrderStatus nextStatus = chengquanLocalOrderStatus(upstream.status(), order.status());
-        OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-        OrderItem next = order.withProcurementResult(
-            nextStatus,
-            mergedDeliveryItems(order.deliveryItems(), upstream),
-            List.copyOf(nextAttempts),
-            chengquanDeliveryMessage(upstream),
-            order.paidAt(),
-            deliveredAt
-        );
-        orders.put(next.orderNo(), next);
-        persistOrderSnapshot(next);
-        publishOrder(next);
+        applyUpstreamOrderCallback("chengquan", supplier, normalizedOrderNo,
+            () -> ChengquanSupplierAdapter.callbackSnapshot(
+                firstText(callbackText(body.get("cq_order_no")), callbackText(body.get("platform_order_no")), ""),
+                normalizedOrderNo,
+                firstText(callbackText(body.get("status")), callbackText(body.get("order_status")), ""),
+                firstText(callbackText(body.get("message")), callbackText(body.get("msg")), ""),
+                decimalValue(callbackText(body.get("amount"))),
+                abbreviate(callbackText(body), 1200)
+            ));
         return "OK";
     }
 
-    public synchronized String handleFanchenOrderCallback(Long supplierId, Map<String, Object> body) {
+    /** 批次8B：去掉 synchronized，阻塞 IO 由 {@link #applyUpstreamOrderCallback} 移到锁外。 */
+    public String handleFanchenOrderCallback(Long supplierId, Map<String, Object> body) {
         if (body == null || body.isEmpty()) {
             throw new IllegalArgumentException("fanchen callback body is empty");
         }
@@ -2649,51 +2228,19 @@ public class InMemoryShopRepository {
         if (!StringUtils.hasText(orderNo)) {
             throw new IllegalArgumentException("fanchen callback sporderid is required");
         }
-        OrderItem order = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
-        if (order == null) {
-            throw new IllegalArgumentException("order not found");
-        }
-        ChannelAttemptItem successAttempt = order.channelAttempts() == null ? null : order.channelAttempts().stream()
-            .filter(attempt -> Objects.equals(attempt.supplierId(), supplier.id()))
-            .filter(attempt -> "SUCCESS".equals(attempt.status()) || "PROCURING".equals(attempt.status()))
-            .reduce((first, second) -> second)
-            .orElse(null);
-        if (successAttempt == null) {
-            throw new IllegalArgumentException("fanchen callback order channel mismatch");
-        }
-        FanchenOrderStatus upstream = new FanchenOrderStatus(
+        applyUpstreamOrderCallback("fanchen", supplier, orderNo, () -> FanchenSupplierAdapter.callbackSnapshot(
             callbackText(body.get("orderid")),
             orderNo,
             callbackText(body.get("resultno")),
             callbackText(body.get("remark1")),
             decimalValue(callbackText(body.get("parvalue"))),
-            List.of(),
             abbreviate(callbackText(body), 1200)
-        );
-        GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-        ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-        List<ChannelAttemptItem> nextAttempts = new ArrayList<>(order.channelAttempts());
-        int index = nextAttempts.lastIndexOf(successAttempt);
-        if (index >= 0) {
-            nextAttempts.set(index, enrichedAttempt);
-        }
-        OrderStatus nextStatus = fanchenLocalOrderStatus(upstream.status(), order.status());
-        OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-        OrderItem next = order.withProcurementResult(
-            nextStatus,
-            mergedDeliveryItems(order.deliveryItems(), upstream),
-            List.copyOf(nextAttempts),
-            fanchenDeliveryMessage(upstream),
-            order.paidAt(),
-            deliveredAt
-        );
-        orders.put(next.orderNo(), next);
-        persistOrderSnapshot(next);
-        publishOrder(next);
+        ));
         return "OK";
     }
 
-    public synchronized String handleJingzhaoOrderCallback(Long supplierId, Map<String, Object> body) {
+    /** 批次8B：去掉 synchronized，阻塞 IO 由 {@link #applyUpstreamOrderCallback} 移到锁外。 */
+    public String handleJingzhaoOrderCallback(Long supplierId, Map<String, Object> body) {
         if (body == null || body.isEmpty()) {
             throw new IllegalArgumentException("jingzhao callback body is empty");
         }
@@ -2709,40 +2256,155 @@ public class InMemoryShopRepository {
         if (!StringUtils.hasText(orderNo)) {
             throw new IllegalArgumentException("jingzhao callback outer_order_id is required");
         }
+        String normalizedOrderNo = orderNo;
+        applyUpstreamOrderCallback("jingzhao", supplier, normalizedOrderNo,
+            () -> JingzhaoSupplierAdapter.callbackSnapshot(statusNode, normalizedOrderNo));
+        return "ok";
+    }
+
+    /**
+     * 批次8B：7 家上游回调的共同尾段，<b>把阻塞 IO 全部挪到锁外</b>。
+     *
+     * <h2>原来的问题</h2>
+     * 5 个 {@code handleXxxOrderCallback} 都是 {@code public synchronized}（锁 {@code this}），
+     * 而方法体里有两处会阻塞在网络上：
+     * <ol>
+     *   <li>{@link #upstreamGoodsSnapshot} 在本地快照缺失时会真的发 HTTP 去问上游商品；</li>
+     *   <li>{@link #publishOrder} → WebSocket {@code session.sendMessage}，
+     *       客户端 TCP 缓冲写满时同样会阻塞。</li>
+     * </ol>
+     * 本类有 ~49 个 {@code public synchronized} 方法共用 {@code this} 这一把锁，
+     * 因此任意一家上游变慢（或某个后台页签的 WebSocket 卡住），都会把下单、登录、
+     * 支付回调一起堵死 —— 上游抖动直接变成全站不可用。
+     *
+     * <h2>三段式</h2>
+     * <ol>
+     *   <li><b>锁外</b>：读订单、定位渠道尝试、做参数校验（读的是 ConcurrentHashMap /
+     *       持久化快照，本身线程安全）；</li>
+     *   <li><b>锁外</b>：发 HTTP 取上游商品快照；</li>
+     *   <li><b>锁内</b>：{@code synchronized (this)} 重读订单、重定位尝试、合并落库。</li>
+     *   <li><b>锁外</b>：推送实时事件。</li>
+     * </ol>
+     *
+     * <h2>为什么第 3 段仍锁 this、而不是换成 orderLock</h2>
+     * 换锁会新增一条 {@code this → orderLock} 的加锁边，而本类另有多处
+     * 「先 orderLock 再调 synchronized 方法」的路径，两者并存就是死锁。
+     * 本批次的目标是把 IO 移出锁，不是改锁的拓扑结构，因此临界区保持原样锁 {@code this}，
+     * 只是缩短到「纯内存合并 + 落库」。
+     *
+     * <h2>HTTP 期间订单可能已被改动</h2>
+     * 所以第 3 段必须<b>重读</b>订单，而不是复用第 1 段那份快照：
+     * 否则回调会用一份过期快照覆盖掉这期间补偿任务/人工处理写入的结果（丢更新）。
+     * 重读后订单消失或渠道尝试不再匹配，就按回调失败处理。
+     *
+     * @param supplierLabel 上游标识，仅用于异常文案，保持与原实现逐字一致
+     * @param snapshotSupplier 回调报文解析成 {@link UpstreamOrderSnapshot} 的动作。
+     *        传 Supplier 而不是现成对象，是为了让解析发生在「订单校验之后」，
+     *        与各家原实现的报错先后顺序完全一致。
+     */
+    private OrderItem applyUpstreamOrderCallback(
+        String supplierLabel,
+        SupplierItem supplier,
+        String orderNo,
+        java.util.function.Supplier<UpstreamOrderSnapshot> snapshotSupplier
+    ) {
+        // ---- 第 1 段：锁外读取与校验
         OrderItem order = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
         if (order == null) {
             throw new IllegalArgumentException("order not found");
         }
-        ChannelAttemptItem successAttempt = order.channelAttempts() == null ? null : order.channelAttempts().stream()
+        ChannelAttemptItem successAttempt = callbackAttemptOf(order, supplier);
+        if (successAttempt == null) {
+            throw new IllegalArgumentException(supplierLabel + " callback order channel mismatch");
+        }
+        UpstreamOrderSnapshot upstream = snapshotSupplier.get();
+
+        // ---- 第 2 段：锁外 HTTP（上游商品快照，取不到就是 null，不影响状态推进）
+        GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
+
+        // ---- 第 3 段：锁内合并落库，纯内存 + DB，无网络
+        OrderItem next;
+        synchronized (this) {
+            OrderItem current = persistentOrder(orderNo).orElseGet(() -> orders.get(orderNo));
+            if (current == null) {
+                throw new IllegalArgumentException("order not found");
+            }
+            ChannelAttemptItem currentAttempt = callbackAttemptOf(current, supplier);
+            if (currentAttempt == null) {
+                throw new IllegalArgumentException(supplierLabel + " callback order channel mismatch");
+            }
+            List<ChannelAttemptItem> nextAttempts = new ArrayList<>(current.channelAttempts());
+            int index = nextAttempts.lastIndexOf(currentAttempt);
+            if (index >= 0) {
+                nextAttempts.set(index, enrichAttempt(currentAttempt, upstream, remote));
+            }
+            OrderStatus nextStatus = upstream.resolvedLocalStatus(current.status());
+            // 重复回调不得刷新发货时间：deliveredAt 必须停在「第一次真的发货」那一刻，
+            // 否则上游每重推一次，报表里的发货时长就被抹掉一次。
+            OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED
+                ? (current.deliveredAt() == null ? OffsetDateTime.now() : current.deliveredAt())
+                : current.deliveredAt();
+            next = current
+                .withUpstreamOrderNo(firstText(upstream.upstreamOrderNo(), current.upstreamOrderNo(), ""))
+                .withProcurementResult(
+                    nextStatus,
+                    upstream.mergedDeliveryItems(current.deliveryItems()),
+                    List.copyOf(nextAttempts),
+                    upstream.deliveryMessage(),
+                    current.paidAt(),
+                    deliveredAt
+                );
+            orders.put(next.orderNo(), next);
+            persistOrderSnapshot(next);
+        }
+
+        // ---- 第 4 段：锁外推送，WebSocket 写阻塞不再牵连其他请求
+        publishOrder(next);
+        return next;
+    }
+
+    /**
+     * 回调所属的渠道尝试：同一供应商最后一次「确实提交过上游」的那条。
+     *
+     * <h2>为什么不能只认 status ∈ {SUCCESS, PROCURING}</h2>
+     * 原实现是这么过滤的，但 {@link #enrichAttempt} 会把该尝试的 {@code status}
+     * <b>覆写成订单的本地状态</b>（成功回调后变成 {@code DELIVERED}）。
+     * 于是同一笔订单第二次收到回调时就再也匹配不到渠道，抛
+     * {@code xxx callback order channel mismatch}。
+     *
+     * <p>而上游回调普遍是「至少一次」投递：重推、网络重试、我方 5xx 后的补推
+     * 都会产生第二次回调。原实现下这些重推<b>必然</b>失败，上游侧会持续重试并
+     * 最终把我方标记为回调不可达。
+     *
+     * <h2>放宽到什么程度</h2>
+     * 判定依据从「当前状态」换成「是否曾经提交过上游」这个<b>不会被回调改写</b>的事实：
+     * <ul>
+     *   <li>{@code SUCCESS} / {@code PROCURING}：首次回调，尚未被 enrich 覆写；</li>
+     *   <li>{@code callbackStatus} 非空：只有 {@link #enrichAttempt} 会写这个字段，
+     *       非空即证明这条尝试已经收到过上游应答 —— 正是重复回调的情形。</li>
+     * </ul>
+     * 两者都不满足（例如 {@code FAILED} 且从未收到应答，即压根没提交成功）时仍返回 null，
+     * 保持「真正的供应商/渠道不匹配」依旧报错，不把串单当成正常回调吞掉。
+     *
+     * <p>幂等性不靠这里的过滤保证，而靠调用方重算后写入相同结果：
+     * 重复回调最终收敛到同一状态，不会重复退款或重复归还库存（那些动作各有自己的幂等键）。
+     */
+    private ChannelAttemptItem callbackAttemptOf(OrderItem order, SupplierItem supplier) {
+        if (order == null || order.channelAttempts() == null) {
+            return null;
+        }
+        return order.channelAttempts().stream()
             .filter(attempt -> Objects.equals(attempt.supplierId(), supplier.id()))
-            .filter(attempt -> "SUCCESS".equals(attempt.status()) || "PROCURING".equals(attempt.status()))
+            .filter(this::submittedToUpstream)
             .reduce((first, second) -> second)
             .orElse(null);
-        if (successAttempt == null) {
-            throw new IllegalArgumentException("jingzhao callback order channel mismatch");
-        }
-        JingzhaoOrderStatus upstream = jingzhaoOrderStatusFromNode(statusNode, orderNo);
-        GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-        ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-        List<ChannelAttemptItem> nextAttempts = new ArrayList<>(order.channelAttempts());
-        int index = nextAttempts.lastIndexOf(successAttempt);
-        if (index >= 0) {
-            nextAttempts.set(index, enrichedAttempt);
-        }
-        OrderStatus nextStatus = jingzhaoLocalOrderStatus(upstream.status(), order.status());
-        OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-        OrderItem next = order.withProcurementResult(
-            nextStatus,
-            mergedDeliveryItems(order.deliveryItems(), upstream),
-            List.copyOf(nextAttempts),
-            jingzhaoDeliveryMessage(upstream),
-            order.paidAt(),
-            deliveredAt
-        );
-        orders.put(next.orderNo(), next);
-        persistOrderSnapshot(next);
-        publishOrder(next);
-        return "ok";
+    }
+
+    /** 该渠道尝试是否确实提交到过上游（据此判断回调是否属于本单）。 */
+    private boolean submittedToUpstream(ChannelAttemptItem attempt) {
+        return "SUCCESS".equals(attempt.status())
+            || "PROCURING".equals(attempt.status())
+            || StringUtils.hasText(attempt.callbackStatus());
     }
 
     private boolean canRefreshUpstreamOrder(OrderItem order) {
@@ -2764,14 +2426,51 @@ public class InMemoryShopRepository {
         return Optional.ofNullable(payment == null || !Objects.equals(payment.userId(), userId) ? null : payment);
     }
 
-    public List<PaymentItem> listPayments() {
-        Optional<List<PaymentItem>> persistent = persistentPayments();
-        if (persistent.isPresent()) {
-            return persistent.get();
+    /**
+     * 批次8C：支付流水分页。
+     *
+     * <p>持久层读失败时记一条 {@code PERSISTENCE_READ_FALLBACK} 后降级到内存切页，
+     * 与 {@link #pageOrders} 同一套约定：列表页宁可显示内存里的近期数据，也不要整页报错。
+     * 内存兜底的排序键与 SQL 的 {@code created_at DESC} 对齐，保证两条路径页序一致。
+     */
+    public PageSlice<PaymentItem> pagePayments(int limit, long offset) {
+        if (persistentOrderStore != null) {
+            try {
+                return persistentOrderStore.pagePayments(limit, offset);
+            } catch (RuntimeException ex) {
+                recordReadFallback("PAYMENT", "LIST", ex);
+            }
         }
-        return payments.values().stream()
-            .sorted(Comparator.comparing(PaymentItem::createdAt).reversed())
-            .toList();
+        return PageSlice.of(
+            payments.values().stream()
+                .sorted(Comparator.comparing(PaymentItem::createdAt).reversed())
+                .toList(),
+            limit,
+            offset
+        );
+    }
+
+    /**
+     * 批次8C：支付回调日志分页。
+     *
+     * <p>持久层读失败时按既有约定记一条 {@code PERSISTENCE_READ_FALLBACK} 再降级到内存，
+     * 而不是让异常冒到控制层 —— DB 抖动时管理端至少还能看到内存里的近期回调。
+     */
+    public PageSlice<PaymentCallbackLogItem> pagePaymentCallbackLogs(int limit, long offset) {
+        if (persistentOrderStore != null) {
+            try {
+                return persistentOrderStore.pagePaymentCallbackLogs(limit, offset);
+            } catch (RuntimeException ex) {
+                recordReadFallback("PAYMENT_CALLBACK", "LIST", ex);
+            }
+        }
+        return PageSlice.of(
+            paymentCallbackLogs.values().stream()
+                .sorted(Comparator.comparing(PaymentCallbackLogItem::createdAt).reversed())
+                .toList(),
+            limit,
+            offset
+        );
     }
 
     public List<PaymentCallbackLogItem> listPaymentCallbackLogs() {
@@ -2794,275 +2493,193 @@ public class InMemoryShopRepository {
             .toList();
     }
 
-    public List<SmsLogItem> listSmsLogs() {
-        Optional<List<SmsLogItem>> persistent = persistentSmsLogs();
-        if (persistent.isPresent()) {
-            return persistent.get();
+    /** 批次8C：退款流水分页，降级语义同 {@link #pagePayments}。 */
+    public PageSlice<RefundItem> pageRefunds(int limit, long offset) {
+        if (persistentOrderStore != null) {
+            try {
+                return persistentOrderStore.pageRefunds(limit, offset);
+            } catch (RuntimeException ex) {
+                recordReadFallback("REFUND", "LIST", ex);
+            }
         }
-        return smsLogs.values().stream()
-            .sorted(Comparator.comparing(SmsLogItem::createdAt).reversed())
-            .toList();
+        return PageSlice.of(
+            refunds.values().stream()
+                .sorted(Comparator.comparing(RefundItem::createdAt).reversed())
+                .toList(),
+            limit,
+            offset
+        );
     }
 
-    public List<OperationLogItem> listOperationLogs() {
-        Optional<List<OperationLogItem>> persistent = persistentOperationLogs();
-        if (persistent.isPresent()) {
-            return persistent.get();
-        }
-        return operationLogs.values().stream()
-            .sorted(Comparator.comparing(OperationLogItem::createdAt).reversed())
-            .toList();
+    /** 批次8C：短信日志分页。降级判断在 {@code AuditService} 内部，这里只做透传。 */
+    public PageSlice<SmsLogItem> pageSmsLogs(int limit, long offset) {
+        return auditService.pageSmsLogs(limit, offset);
+    }
+
+    /** 批次8C：操作日志分页。降级判断在 {@code AuditService} 内部，这里只做透传。 */
+    public PageSlice<OperationLogItem> pageOperationLogs(int limit, long offset) {
+        return auditService.pageOperationLogs(limit, offset);
     }
 
     public List<OpenApiLogItem> listOpenApiLogs() {
-        Optional<List<OpenApiLogItem>> persistent = persistentOpenApiLogs();
-        if (persistent.isPresent()) {
-            return persistent.get();
-        }
-        return openApiLogs.values().stream()
-            .sorted(Comparator.comparing(OpenApiLogItem::createdAt).reversed())
-            .toList();
+        return auditService.listOpenApiLogs();
     }
 
-    public List<MemberApiCredentialItem> listMemberCredentials() {
-        return memberCredentials.values().stream()
-            .sorted(Comparator.comparing(MemberApiCredentialItem::id))
-            .toList();
+    /** 批次8C：开放接口日志分页。降级判断在 {@code AuditService} 内部，这里只做透传。 */
+    public PageSlice<OpenApiLogItem> pageOpenApiLogs(int limit, long offset) {
+        return auditService.pageOpenApiLogs(limit, offset);
     }
 
-    public synchronized MemberApiCredentialItem memberCredentialForUser(Long userId) {
-        if (findUserSnapshot(userId).isEmpty()) {
-            throw new IllegalArgumentException("user not found");
-        }
-        Optional<MemberApiCredentialItem> persistent = persistentMemberCredential(userId);
-        if (persistent.isPresent()) {
-            MemberApiCredentialItem item = persistent.get();
-            memberCredentials.put(item.appKey(), item);
-            return item;
-        }
-        return memberCredentials.values().stream()
-            .filter(item -> Objects.equals(item.userId(), userId))
-            .findFirst()
-            .orElseGet(() -> createDefaultMemberCredential(userId));
-    }
 
-    public synchronized MemberApiCredentialItem saveMemberCredential(Long userId, MemberApiCredentialRequest request) {
-        if (findUserSnapshot(userId).isEmpty()) {
-            throw new IllegalArgumentException("user not found");
-        }
-        MemberApiCredentialItem current = memberCredentialForUser(userId);
-        String appKey = defaultText(request == null ? "" : request.appKey(), current.appKey()).trim();
-        if (!StringUtils.hasText(appKey)) {
-            appKey = memberAppKey(userId);
-        }
-        MemberApiCredentialItem duplicate = memberCredentials.get(appKey);
-        if (duplicate != null && !Objects.equals(duplicate.userId(), userId)) {
-            throw new IllegalStateException("app key already exists");
-        }
-        String secret = request != null && Boolean.TRUE.equals(request.resetSecret())
-            ? memberAppSecret()
-            : defaultText(request == null ? "" : request.appSecret(), current.appSecret());
-        String status = request == null || request.enabled() == null
-            ? current.status()
-            : Boolean.TRUE.equals(request.enabled()) ? "ENABLED" : "DISABLED";
-        List<String> ipWhitelist = request == null || request.ipWhitelist() == null
-            ? current.ipWhitelist()
-            : normalizeTextList(request.ipWhitelist());
-        int dailyLimit = request == null || request.dailyLimit() == null
-            ? current.dailyLimit()
-            : Math.max(1, request.dailyLimit());
-        MemberApiCredentialItem next = new MemberApiCredentialItem(
-            current.id(),
-            userId,
-            appKey,
-            secret,
-            status,
-            ipWhitelist,
-            dailyLimit,
-            current.createdAt(),
-            current.lastUsedAt()
-        );
-        if (!Objects.equals(current.appKey(), appKey)) {
-            memberCredentials.remove(current.appKey());
-        }
-        memberCredentials.put(appKey, next);
-        persistMemberCredential(next);
-        return next;
-    }
 
-    public UserItem authenticateMemberApi(String appKey, String timestamp, String nonce, String signature, String path, String clientIp) {
-        MemberApiCredentialItem credential = memberCredentials.get(appKey);
-        if (credential == null || !"ENABLED".equals(credential.status())) {
-            appendOpenApiLog(null, appKey, path, "FAILED", "invalid app key");
-            throw new IllegalArgumentException("invalid app key");
-        }
-        if (!isMemberApiIpAllowed(credential, clientIp)) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "ip not allowed");
-            throw new IllegalArgumentException("ip not allowed");
-        }
-        if (!StringUtils.hasText(timestamp) || !StringUtils.hasText(nonce) || !StringUtils.hasText(signature)) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "missing signature headers");
-            throw new IllegalArgumentException("missing signature headers");
-        }
-        long ts;
-        try {
-            ts = Long.parseLong(timestamp);
-        } catch (NumberFormatException ex) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "invalid timestamp");
-            throw new IllegalArgumentException("invalid timestamp");
-        }
-        long now = Instant.now().getEpochSecond();
-        if (Math.abs(now - ts) > 300) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "timestamp expired");
-            throw new IllegalArgumentException("timestamp expired");
-        }
-        String nonceKey = appKey + ":" + nonce;
-        if (isMemberNonceReplay(nonceKey, OffsetDateTime.now())) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "nonce replay");
-            throw new IllegalArgumentException("nonce replay");
-        }
-        String payload = timestamp + "\n" + nonce + "\n" + path;
-        if (!constantTimeEquals(hmacSha256(credential.appSecret(), payload), signature)) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "invalid signature");
-            throw new IllegalArgumentException("invalid signature");
-        }
-        UserItem user = findUserSnapshot(credential.userId()).orElse(null);
-        if (user == null) {
-            appendOpenApiLog(credential.userId(), appKey, path, "FAILED", "user not found");
-            throw new IllegalArgumentException("user not found");
-        }
-        memberCredentials.put(appKey, new MemberApiCredentialItem(
-            credential.id(),
-            credential.userId(),
-            credential.appKey(),
-            credential.appSecret(),
-            credential.status(),
-            credential.ipWhitelist(),
-            credential.dailyLimit(),
-            credential.createdAt(),
-            OffsetDateTime.now()
-        ));
-        appendOpenApiLog(user.id(), appKey, path, "SUCCESS", "ok");
-        return withGroupName(user);
-    }
 
-    private boolean isMemberNonceReplay(String nonceKey, OffsetDateTime now) {
-        if (securityStateStore != null) {
-            Optional<Boolean> redisReplay = securityStateStore.markMemberApiNonceReplay(nonceKey, MEMBER_API_NONCE_TTL);
-            if (redisReplay.isPresent()) {
-                return redisReplay.get();
-            }
-        }
-        cleanupExpiredMemberNonces(now);
-        OffsetDateTime existing = memberNonceExpiresAt.putIfAbsent(nonceKey, now.plus(MEMBER_API_NONCE_TTL));
-        return existing != null && existing.isAfter(now);
-    }
 
-    private void cleanupExpiredMemberNonces(OffsetDateTime now) {
-        memberNonceExpiresAt.entrySet().removeIf(entry -> !entry.getValue().isAfter(now));
-    }
 
-    public synchronized OrderItem createMemberOrder(CreateOrderRequest request, Long userId) {
+
+
+
+    public OrderItem createMemberOrder(CreateOrderRequest request, Long userId) {
         return createMemberOrder(request, userId, "");
     }
 
-    public synchronized OrderItem createMemberOrder(CreateOrderRequest request, Long userId, String orderIp) {
+    public OrderItem createMemberOrder(CreateOrderRequest request, Long userId, String orderIp) {
         OrderItem order = createOrder(request, userId, orderIp, "api");
-        UserItem user = requiredUser(userId);
-        if (user.balance().compareTo(order.payAmount()) < 0) {
-            orders.remove(order.orderNo());
-            throw new IllegalStateException("balance is insufficient");
+        if (!OrderStateMachine.canStartMockPayment(order.status())) {
+            return order;
         }
-        UserItem debited = new UserItem(
-            user.id(),
-            user.avatar(),
-            user.mobile(),
-            user.email(),
-            user.nickname(),
-            user.groupId(),
-            groupName(user.groupId()),
-            user.balance().subtract(order.payAmount()),
-            user.deposit(),
-            user.status(),
-            user.createdAt(),
-            user.lastLoginAt(),
-            user.realNameType(),
-            user.realName(),
-            user.subjectName(),
-            user.certificateNo(),
-            user.verificationStatus()
-        );
-        users.put(userId, debited);
-        persistUserSnapshot(debited);
         return payOrder(order.orderNo(), userId, new PayOrderRequest("balance", "member-api"));
     }
 
-    public synchronized OrderItem handlePaymentCallback(String provider, PaymentCallbackRequest request) {
-        String paymentNo = request == null ? "" : defaultText(request.paymentNo(), "");
-        PaymentItem payment = findPaymentSnapshot(paymentNo).orElse(null);
-        if (payment == null) {
-            recordPaymentCallback(provider, request, "FAILED", "payment not found");
-            throw new IllegalArgumentException("payment not found");
-        }
-        try {
-            ensurePaymentCallbackMatches(payment, request);
-        } catch (IllegalArgumentException ex) {
-            recordPaymentCallback(provider, request, "FAILED", ex.getMessage());
-            throw ex;
-        }
-        OrderItem order = requiredOrder(payment.orderNo());
-        if ("SUCCESS".equals(payment.status())) {
-            recordPaymentCallback(provider, request, "IDEMPOTENT", "duplicate callback ignored");
-            appendOperation("PAYMENT_CALLBACK_IDEMPOTENT", "PAYMENT", payment.paymentNo(), provider + " duplicate callback ignored");
-            return order;
-        }
-        if (!"SUCCESS".equalsIgnoreCase(defaultText(request.status(), ""))) {
-            PaymentItem failed = new PaymentItem(
+    public OrderItem handlePaymentCallback(String provider, PaymentCallbackRequest request) {
+        OrderItem paidOrder = null;
+        OffsetDateTime paidAt = null;
+        synchronized (orderLock) {
+            String paymentNo = request == null ? "" : defaultText(request.paymentNo(), "");
+            PaymentItem payment = findPaymentSnapshot(paymentNo).orElse(null);
+            if (payment == null) {
+                recordPaymentCallback(provider, request, "FAILED", "payment not found");
+                throw new IllegalArgumentException("payment not found");
+            }
+            try {
+                ensurePaymentCallbackMatches(payment, request);
+            } catch (IllegalArgumentException ex) {
+                recordPaymentCallback(provider, request, "FAILED", ex.getMessage());
+                throw ex;
+            }
+            OrderItem order = requiredOrder(payment.orderNo());
+            try {
+                ensurePaymentCallbackAmountMatches(payment, order, request);
+            } catch (IllegalArgumentException ex) {
+                recordPaymentCallback(provider, request, "FAILED", ex.getMessage());
+                throw ex;
+            }
+            if ("SUCCESS".equals(payment.status())) {
+                recordPaymentCallback(provider, request, "IDEMPOTENT", "duplicate callback ignored");
+                appendOperation("PAYMENT_CALLBACK_IDEMPOTENT", "PAYMENT", payment.paymentNo(), provider + " duplicate callback ignored");
+                return order;
+            }
+            if (!"SUCCESS".equalsIgnoreCase(defaultText(request.status(), ""))) {
+                PaymentItem failed = new PaymentItem(
+                    payment.paymentNo(),
+                    payment.orderNo(),
+                    payment.userId(),
+                    payment.method(),
+                    payment.amount(),
+                    "FAILED",
+                    defaultText(request.channelTradeNo(), payment.channelTradeNo()),
+                    payment.createdAt(),
+                    null
+                );
+                payments.put(failed.paymentNo(), failed);
+                persistPaymentSnapshot(failed);
+                recordPaymentCallback(provider, request, "FAILED", "callback marked failed");
+                appendOperation("PAYMENT_CALLBACK_FAILED", "PAYMENT", failed.paymentNo(), provider + " callback marked failed");
+                return order;
+            }
+            try {
+                OrderStateMachine.assertCanAcceptPaymentCallback(order);
+            } catch (IllegalStateException ex) {
+                recordPaymentCallback(provider, request, "FAILED", ex.getMessage());
+                throw ex;
+            }
+            paidAt = OffsetDateTime.now();
+            PaymentItem paid = new PaymentItem(
                 payment.paymentNo(),
                 payment.orderNo(),
                 payment.userId(),
                 payment.method(),
                 payment.amount(),
-                "FAILED",
+                "SUCCESS",
                 defaultText(request.channelTradeNo(), payment.channelTradeNo()),
                 payment.createdAt(),
-                null
+                paidAt
             );
-            payments.put(failed.paymentNo(), failed);
-            persistPaymentSnapshot(failed);
-            recordPaymentCallback(provider, request, "FAILED", "callback marked failed");
-            appendOperation("PAYMENT_CALLBACK_FAILED", "PAYMENT", failed.paymentNo(), provider + " callback marked failed");
-            return order;
+            payments.put(paid.paymentNo(), paid);
+            persistPaymentSnapshot(paid);
+            settleCallbackFunds(order, paid);
+            recordPaymentCallback(provider, request, "SUCCESS", "callback accepted");
+            appendOperation("PAYMENT_CALLBACK_SUCCESS", "PAYMENT", paid.paymentNo(), provider + " callback accepted");
+            paidOrder = order.withPayment(paid.paymentNo(), paid.method());
         }
-        try {
-            OrderStateMachine.assertCanAcceptPaymentCallback(order);
-        } catch (IllegalStateException ex) {
-            recordPaymentCallback(provider, request, "FAILED", ex.getMessage());
-            throw ex;
+        return dispatchPaidOrder(paidOrder, paidAt);
+    }
+
+    /**
+     * 外部渠道回调成功后的资金记账。
+     *
+     * <p>钱是从渠道进来的，又立刻被这笔订单消耗掉，所以记<b>一对</b>流水：
+     * CREDIT(PAYMENT_SETTLE, paymentNo) + DEBIT(ORDER_PAY, orderNo)，净额为 0。
+     * 用户余额不受影响，但"这笔支付记过账"这件事在库里可证明；
+     * 两条流水各带独立幂等键，回调重放不会重复记账。
+     */
+    private void settleCallbackFunds(OrderItem order, PaymentItem payment) {
+        if (!fundsLedgerEnabled()) {
+            return;
         }
-        OffsetDateTime paidAt = OffsetDateTime.now();
-        PaymentItem paid = new PaymentItem(
+        fundsLedgerStore.settleExternalPayment(
+            order.userId(),
+            payment.amount() == null ? order.payAmount() : payment.amount(),
             payment.paymentNo(),
-            payment.orderNo(),
-            payment.userId(),
-            payment.method(),
-            payment.amount(),
-            "SUCCESS",
-            defaultText(request.channelTradeNo(), payment.channelTradeNo()),
-            payment.createdAt(),
-            paidAt
+            order.orderNo()
         );
-        payments.put(paid.paymentNo(), paid);
-        persistPaymentSnapshot(paid);
-        recordPaymentCallback(provider, request, "SUCCESS", "callback accepted");
-        appendOperation("PAYMENT_CALLBACK_SUCCESS", "PAYMENT", paid.paymentNo(), provider + " callback accepted");
-        return dispatchPaidOrder(order.withPayment(paid.paymentNo(), paid.method()), paidAt);
+        userService.usersMap().remove(order.userId());
     }
 
     private void ensurePaymentCallbackMatches(PaymentItem payment, PaymentCallbackRequest request) {
         String callbackOrderNo = request == null ? "" : defaultText(request.orderNo(), "");
         if (StringUtils.hasText(callbackOrderNo) && !Objects.equals(callbackOrderNo, payment.orderNo())) {
             throw new IllegalArgumentException("payment callback order mismatch");
+        }
+    }
+
+    /**
+     * 回调金额必须等于订单应付金额（批次5 / B1 最关键的一条）。
+     *
+     * <p>光把 amount 塞进签名串只能防"改了金额但没重算签名"，防不住上游/中间人用
+     * <b>自己算得出的合法签名</b>声明一个更小的金额。所以必须拿回调金额和本地账目对账：
+     * 以 {@code payment.amount()} 为准（它在建单时由 {@code order.payAmount()} 派生），
+     * 缺失时回落到 {@code order.payAmount()}，用 {@code compareTo} 比较避免 12 与 12.00 误判。
+     *
+     * <p>过渡期（strict=false 且上游尚未升级）里 amount 为 null，此处放行；
+     * 一旦上游带了 amount，验签器会强制要求 v2 全套字段，金额也就必然走到这里被对账。
+     */
+    private void ensurePaymentCallbackAmountMatches(PaymentItem payment, OrderItem order, PaymentCallbackRequest request) {
+        BigDecimal callbackAmount = request == null ? null : request.amount();
+        if (callbackAmount == null) {
+            return;
+        }
+        BigDecimal expected = payment.amount() == null ? order.payAmount() : payment.amount();
+        if (expected == null) {
+            throw new IllegalArgumentException("payment callback amount unverifiable");
+        }
+        if (callbackAmount.compareTo(expected) != 0) {
+            appendOperation(
+                "PAYMENT_CALLBACK_AMOUNT_MISMATCH",
+                "PAYMENT",
+                defaultText(payment.paymentNo(), ""),
+                "callback=" + callbackAmount.toPlainString() + " expected=" + expected.toPlainString()
+            );
+            throw new IllegalArgumentException("payment callback amount mismatch");
         }
     }
 
@@ -3081,21 +2698,26 @@ public class InMemoryShopRepository {
         return next;
     }
 
-    public synchronized OrderItem retryProcurement(String orderNo) {
-        OrderItem order = requiredOrder(orderNo);
-        OrderStateMachine.assertCanRetryProcurement(order);
+    public OrderItem retryProcurement(String orderNo) {
+        OrderItem order;
+        synchronized (orderLock) {
+            order = requiredOrder(orderNo);
+            OrderStateMachine.assertCanRetryProcurement(order);
+        }
         OrderItem next = procureWithFallback(order, "管理员手动重试");
-        orders.put(orderNo, next);
-        persistOrderSnapshot(next);
+        saveOrder(next);
         appendOperation("ORDER_RETRY", "ORDER", orderNo, "manual retry");
         publishOrder(next);
         return next;
     }
 
-    public synchronized OrderItem retryProcurementWithChannel(String orderNo, Long channelId) {
-        OrderItem order = requiredOrder(orderNo);
-        OrderStateMachine.assertCanRetryProcurement(order);
-        GoodsChannelItem channel = goodsChannels.get(channelId);
+    public OrderItem retryProcurementWithChannel(String orderNo, Long channelId) {
+        OrderItem order;
+        synchronized (orderLock) {
+            order = requiredOrder(orderNo);
+            OrderStateMachine.assertCanRetryProcurement(order);
+        }
+        GoodsChannelItem channel = catalogService.goodsChannelsMap().get(channelId);
         if (channel == null || !Objects.equals(channel.goodsId(), order.goodsId())) {
             throw new IllegalArgumentException("channel not found");
         }
@@ -3114,19 +2736,27 @@ public class InMemoryShopRepository {
             try {
                 ProcurementSubmitResult result = submitProcurementOrder(order, channel, supplier);
                 attempts.add(attempt(channel, "SUCCESS", result.attemptMessage()));
-                OrderItem procuring = order.withProcurementResult(
-                    OrderStatus.PROCURING,
-                    result.deliveryItems(),
-                    List.copyOf(attempts),
-                    "指定渠道重试成功：已提交到 " + channel.supplierName() + "，等待上游处理",
-                    order.paidAt() == null ? OffsetDateTime.now() : order.paidAt(),
-                    null
-                );
-                orders.put(orderNo, procuring);
-                persistOrderSnapshot(procuring);
+                OrderItem procuring = order
+                    .withUpstreamOrderNo(firstText(result.upstreamOrderNo(), order.upstreamOrderNo(), ""))
+                    .withProcurementResult(
+                        OrderStatus.PROCURING,
+                        result.deliveryItems(),
+                        List.copyOf(attempts),
+                        "指定渠道重试成功：已提交到 " + channel.supplierName() + "，等待上游处理",
+                        order.paidAt() == null ? OffsetDateTime.now() : order.paidAt(),
+                        null
+                    );
+                saveOrder(procuring);
                 appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel submitted to upstream");
                 publishOrder(procuring);
                 return procuring;
+            } catch (SupplierTransportException ex) {
+                // 缺陷 A4：结果未知不能判失败，转中间态等待上游确认。
+                OrderItem unknown = unknownProcurementResult(order, channel, attempts, "指定渠道重试", ex);
+                saveOrder(unknown);
+                appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel result unknown, kept procuring");
+                publishOrder(unknown);
+                return unknown;
             } catch (RuntimeException ex) {
                 attempts.add(attempt(channel, "FAILED", "指定渠道提交失败：" + ex.getMessage()));
             }
@@ -3140,30 +2770,280 @@ public class InMemoryShopRepository {
             order.paidAt(),
             null
         );
-        orders.put(orderNo, failed);
-        persistOrderSnapshot(failed);
+        saveOrder(failed);
         appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel retry failed");
         publishOrder(failed);
         return failed;
     }
 
-    public synchronized OrderItem refundOrder(String orderNo) {
-        OrderItem order = requiredOrder(orderNo);
-        if (order.status() == OrderStatus.REFUNDED) {
-            return order;
+    /**
+     * 管理员余额退款。
+     *
+     * <p>批次4 放开了一处会挡住人工补救的判断：原来只要订单状态已是 REFUNDED 就<b>直接 return</b>，
+     * 而历史上大量订单被标成 REFUNDED 却<b>从未真正退钱</b>（见 {@link #createRefund} 的注释）。
+     * 那个 early return 等于告诉运营"这单已经退过了"，让受害用户永远拿不回钱。
+     *
+     * <p>现在改成看<b>资金事实</b>而不是订单状态：只有 {@code user_balance_transactions} 里
+     * 确实存在 (ORDER_REFUND, orderNo) 这条 CREDIT 流水，才认为退款已完成并短路；
+     * 否则即使订单已是 REFUNDED 也继续执行补退。重复调用的安全性由唯一键保证，不靠状态判断。
+     */
+    public OrderItem refundOrder(String orderNo) {
+        synchronized (orderLock) {
+            OrderItem order = requiredOrder(orderNo);
+            if (order.status() == OrderStatus.REFUNDED && refundAlreadySettled(orderNo)) {
+                return order;
+            }
+            OrderStateMachine.assertCanRefund(order);
+            PaymentItem payment = findPaymentSnapshot(order.paymentNo())
+                .orElseThrow(() -> new IllegalStateException("订单支付记录不存在，无法退款"));
+            if (!"SUCCESS".equals(payment.status())) {
+                throw new IllegalStateException("订单支付尚未成功，无法退款");
+            }
+            if (!"balance".equals(normalizePayMethod(payment.method()))) {
+                throw new IllegalStateException("外部支付退款网关尚未接入，不能标记退款成功");
+            }
+
+            if (!fundsLedgerEnabled()) {
+                // 纯内存路径：保持原行为，已退款则不再重复加钱
+                if (order.status() == OrderStatus.REFUNDED) {
+                    return order;
+                }
+                UserItem user = requiredUser(order.userId());
+                UserItem credited = withUserBalance(user, defaultDecimal(user.balance()).add(order.payAmount()));
+                userService.usersMap().put(user.id(), credited);
+                persistUserSnapshot(credited);
+            }
+            createRefund(order, "管理员手动余额退款");
+            restoreStockForRefundedOrder(order);
+            OrderItem next = order.withStatus(
+                OrderStatus.REFUNDED,
+                "余额退款成功",
+                order.deliveredAt()
+            );
+            orders.put(orderNo, next);
+            persistOrderSnapshot(next);
+            appendOperation("ORDER_REFUND", "ORDER", orderNo, "balance refund succeeded");
+            publishOrder(next);
+            return next;
         }
-        OrderStateMachine.assertCanRefund(order);
-        createRefund(order, "管理员手动退款");
-        OrderItem next = order.withStatus(
-            OrderStatus.REFUNDED,
-            "管理员已执行模拟退款",
-            order.deliveredAt()
-        );
-        orders.put(orderNo, next);
-        persistOrderSnapshot(next);
-        appendOperation("ORDER_REFUND", "ORDER", orderNo, "manual refund");
-        publishOrder(next);
-        return next;
+    }
+
+    /** 退款是否已经真的落过账（看资金流水，不看订单状态）。 */
+    private boolean refundAlreadySettled(String orderNo) {
+        return fundsLedgerEnabled() && fundsLedgerStore.refundAlreadySettled(orderNo);
+    }
+
+    /**
+     * 批次8A：{@link OrderCompensationGateway} 的接缝出口。
+     *
+     * <p>与 {@link #productMonitorGateway()} 同一手法（内部类而非 {@code implements}）：
+     * 补偿任务需要的 8 项能力全是仓储私有方法，让仓储自己实现接口会迫使它们升级为 public。
+     */
+    public OrderCompensationGateway orderCompensationGateway() {
+        return new RepositoryCompensationGateway();
+    }
+
+    /**
+     * {@link OrderCompensationGateway} 的实现。
+     *
+     * <p>刻意<b>不</b>暴露「直接改订单状态」：所有流转都得先经 CAS 抢到变更权，
+     * {@link #saveAndPublishOrder} 只补 remark / 交付项等描述字段。
+     */
+    private final class RepositoryCompensationGateway implements OrderCompensationGateway {
+        @Override
+        public List<OrderItem> orderSnapshots() {
+            return InMemoryShopRepository.this.allOrderSnapshots();
+        }
+
+        @Override
+        public List<OrderItem> unsettledOrderCandidates(
+            OffsetDateTime deadline,
+            int limit,
+            boolean withoutCallback
+        ) {
+            if (deadline == null || limit <= 0) {
+                return List.of();
+            }
+            if (persistentOrderStore != null) {
+                try {
+                    return persistentOrderStore.unsettledOrderCandidates(deadline, limit, withoutCallback);
+                } catch (RuntimeException ex) {
+                    recordReadFallback("ORDER", "UNSETTLED_CANDIDATES", ex);
+                    return List.of();
+                }
+            }
+            return orders.values().stream()
+                .filter(order -> order != null
+                    && order.goodsType() == GoodsType.DIRECT
+                    && (order.status() == OrderStatus.PROCURING || order.status() == OrderStatus.DELIVERING))
+                .filter(order -> {
+                    OffsetDateTime since = order.paidAt() == null ? order.createdAt() : order.paidAt();
+                    return since != null && since.isBefore(deadline);
+                })
+                .filter(order -> !withoutCallback || !callbackSentOnSubmit(order))
+                .sorted(Comparator.comparing(
+                    order -> order.paidAt() == null ? order.createdAt() : order.paidAt()))
+                .limit(limit)
+                .toList();
+        }
+
+        @Override
+        public boolean fundsLedgerEnabled() {
+            return InMemoryShopRepository.this.fundsLedgerEnabled();
+        }
+
+        @Override
+        public String currentOrderStatus(String orderNo) {
+            return fundsLedgerEnabled() ? fundsLedgerStore.currentStatus(orderNo) : null;
+        }
+
+        @Override
+        public boolean compareAndSetOrderStatus(String orderNo, OrderStatus expected, OrderStatus next) {
+            return fundsLedgerEnabled()
+                && fundsLedgerStore.compareAndSetStatus(orderNo, expected.name(), next.name());
+        }
+
+        @Override
+        public boolean compareAndSetOrderStatusFromEither(
+            String orderNo, OrderStatus expectedA, OrderStatus expectedB, OrderStatus next
+        ) {
+            return fundsLedgerEnabled() && fundsLedgerStore.compareAndSetStatusFromEither(
+                orderNo, expectedA.name(), expectedB.name(), next.name());
+        }
+
+        @Override
+        public void restoreReservedStock(OrderItem order) {
+            InMemoryShopRepository.this.restoreStockForRefundedOrder(order);
+        }
+
+        /**
+         * 退款：先建退款单，再由 {@link FundsLedgerStore#refundToBalance} 在同一事务里
+         * 加回余额 + 记 CREDIT 流水，幂等键 {@code uk_balance_tx_biz (ORDER_REFUND, orderNo)}。
+         * 补偿任务重复跑到同一笔单时，第二次是空操作而不是二次退款。
+         */
+        @Override
+        public void refundToBalance(OrderItem order, String reason) {
+            if (!fundsLedgerEnabled()) {
+                return;
+            }
+            RefundItem refund = InMemoryShopRepository.this.createRefund(order, reason);
+            fundsLedgerStore.refundToBalance(refund, reason);
+            userService.usersMap().remove(order.userId());
+        }
+
+        @Override
+        public void saveAndPublishOrder(OrderItem order) {
+            InMemoryShopRepository.this.saveOrder(order);
+            InMemoryShopRepository.this.publishOrder(order);
+        }
+
+        /**
+         * 问上游真实状态。
+         *
+         * <p>{@code empty()} = 这笔单当前<b>无法查询</b>（无成功渠道 / 供应商已删 /
+         * 适配器不支持查单 / 占位地址），调用方跳过。异常按批次3 的分类语义原样上抛：
+         * {@link SupplierTransportException} 结果未知（调用方必须什么都不做），
+         * {@link SupplierBusinessException} 上游明确拒单（可据此判失败）。
+         */
+        @Override
+        public Optional<UpstreamOrderSnapshot> fetchUpstreamOrderStatus(OrderItem order) {
+            ChannelAttemptItem attempt = successfulAttemptOf(order);
+            if (attempt == null || attempt.supplierId() == null) {
+                return Optional.empty();
+            }
+            SupplierItem supplier = findSupplierSnapshot(attempt.supplierId()).orElse(null);
+            if (supplier == null || isPlaceholderBaseUrl(supplier.baseUrl())) {
+                return Optional.empty();
+            }
+            SupplierAdapter adapter = supplierAdapters.find(supplier).orElse(null);
+            if (adapter == null) {
+                return Optional.empty();
+            }
+            return Optional.of(
+                adapter.fetchOrderStatus(supplierContext(supplier), order, order.status()));
+        }
+
+        @Override
+        public boolean callbackSentOnSubmit(OrderItem order) {
+            ChannelAttemptItem attempt = successfulAttemptOf(order);
+            if (attempt == null || attempt.supplierId() == null || !StringUtils.hasText(attempt.callbackUrl())) {
+                return false;
+            }
+            SupplierItem supplier = findSupplierSnapshot(attempt.supplierId()).orElse(null);
+            if (supplier == null) {
+                return false;
+            }
+            return SupplierCallbackUrlResolver.callbackSentOnSubmit(attempt.callbackUrl(), supplier);
+        }
+
+        @Override
+        public OrderItem applyUpstreamSnapshot(
+            OrderItem order, UpstreamOrderSnapshot upstream, OrderStatus nextStatus
+        ) {
+            List<ChannelAttemptItem> nextAttempts = new ArrayList<>(
+                order.channelAttempts() == null ? List.of() : order.channelAttempts());
+            ChannelAttemptItem attempt = successfulAttemptOf(order);
+            if (attempt != null) {
+                SupplierItem supplier = attempt.supplierId() == null
+                    ? null
+                    : findSupplierSnapshot(attempt.supplierId()).orElse(null);
+                GoodsIntegrationItem remote = supplier == null
+                    ? null
+                    : upstreamGoodsSnapshot(supplier, attempt.supplierGoodsId()).orElse(null);
+                int index = nextAttempts.lastIndexOf(attempt);
+                if (index >= 0) {
+                    nextAttempts.set(index, enrichAttempt(attempt, upstream, remote));
+                }
+            }
+            OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED
+                ? OffsetDateTime.now()
+                : order.deliveredAt();
+            return order
+                .withUpstreamOrderNo(firstText(upstream.upstreamOrderNo(), order.upstreamOrderNo(), ""))
+                .withProcurementResult(
+                    nextStatus,
+                    upstream.mergedDeliveryItems(order.deliveryItems()),
+                    List.copyOf(nextAttempts),
+                    upstream.deliveryMessage(),
+                    order.paidAt(),
+                    deliveredAt
+                );
+        }
+
+        @Override
+        public void recordAudit(String action, String resourceType, String resourceId, String remark) {
+            appendOperation(action, resourceType, resourceId, remark);
+        }
+    }
+
+    /** 订单上最后一次「已提交上游」的渠道尝试，没有则返回 null。 */
+    private ChannelAttemptItem successfulAttemptOf(OrderItem order) {
+        List<ChannelAttemptItem> attempts = order == null ? null : order.channelAttempts();
+        if (attempts == null || attempts.isEmpty()) {
+            return null;
+        }
+        return attempts.stream()
+            .filter(attempt -> "SUCCESS".equals(attempt.status()) || "PROCURING".equals(attempt.status()))
+            .reduce((first, second) -> second)
+            .orElse(null);
+    }
+
+    /**
+     * 退款后归还库存。
+     *
+     * <p>卡密类商品的库存等于可售卡密数，退款时卡已被 {@code releaseCardsForOrder} 之类
+     * 的逻辑或人工处理回收，这里只把 goods.stock_count 重新对齐到真实卡数。
+     */
+    private void restoreStockForRefundedOrder(OrderItem order) {
+        if (!fundsLedgerEnabled()) {
+            return;
+        }
+        if (order.goodsType() == GoodsType.CARD) {
+            refreshGoodsStock(order.goodsId());
+            return;
+        }
+        fundsLedgerStore.restoreStock(order.goodsId(), order.quantity());
+        catalogService.goodsMap().remove(order.goodsId());
     }
 
     public synchronized OrderItem markOrderSuccess(String orderNo) {
@@ -3205,7 +3085,7 @@ public class InMemoryShopRepository {
         payments.entrySet().removeIf(entry -> Objects.equals(entry.getValue().orderNo(), orderNo));
         paymentCallbackLogs.entrySet().removeIf(entry -> Objects.equals(entry.getValue().orderNo(), orderNo));
         refunds.entrySet().removeIf(entry -> Objects.equals(entry.getValue().orderNo(), orderNo));
-        smsLogs.entrySet().removeIf(entry -> Objects.equals(entry.getValue().orderNo(), orderNo));
+        auditService.removeSmsLogsByOrder(orderNo);
         cards.replaceAll((id, card) -> Objects.equals(card.orderNo(), orderNo)
             ? new CardSecret(
                 card.id(),
@@ -3225,137 +3105,125 @@ public class InMemoryShopRepository {
         appendOperation("ORDER_DELETE", "ORDER", orderNo, "manual delete order");
     }
 
-    public synchronized GoodsItem createGoods(CreateGoodsRequest request) {
-        Long id = allocateIncrementingId(goodsId, maxGoodsId());
-        Long categoryId = request.categoryId() == null ? 1L : request.categoryId();
-        CategoryItem category = findCategorySnapshot(categoryId).orElse(null);
-        OffsetDateTime now = OffsetDateTime.now();
-        GoodsType type = request.type() == null ? GoodsType.CARD : request.type();
-        Long boundCardKindId = normalizeGoodsCardKindId(type, request.cardKindId(), null);
-        List<String> accountTypes = validateEnabledRechargeFieldCodes(request.accountTypes());
-        String nextGoodsName = firstText(request.goodsName(), request.name(), "新商品 " + id);
-        String nextName = firstText(request.name(), request.goodsName(), "新商品 " + id);
-        String nextPriceLimitText = normalizedPriceLimitText(request.priceLimitText(), true, nextGoodsName, nextName);
-        GoodsItem item = new GoodsItem(
-            id,
-            categoryId,
-            category == null ? "未分类" : category.name(),
-            nextGoodsName,
-            nextName,
-            defaultText(request.subTitle(), "MVP 内存商品"),
-            defaultText(request.description(), "这是一个用于前端联调的内存商品。"),
-            normalizeTextList(request.benefitDurations()),
-            defaultText(request.benefitType(), ""),
-            defaultText(request.benefitBrand(), ""),
-            StringUtils.hasText(nextPriceLimitText),
-            nextPriceLimitText,
-            defaultText(request.coverUrl(), "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80"),
-            normalizeImages(request.detailImages()),
-            normalizeDetailBlocks(request.detailBlocks()),
-            normalizeIntegrations(request.integrations()),
-            Boolean.TRUE.equals(request.pollingEnabled()),
-            request.monitoringEnabled() == null || request.monitoringEnabled(),
-            type,
-            defaultText(request.platform(), "GENERAL"),
-            request.price() == null ? BigDecimal.valueOf(9.90) : request.price(),
-            request.originalPrice() == null ? BigDecimal.valueOf(19.90) : request.originalPrice(),
-            request.maxBuy() == null ? 1 : Math.max(1, request.maxBuy()),
-            Boolean.TRUE.equals(request.requireRechargeAccount()),
-            accountTypes,
-            defaultText(request.priceTemplateId(), "retail-default"),
-            defaultText(request.priceMode(), "FIXED"),
-            request.priceCoefficient() == null ? BigDecimal.ONE : request.priceCoefficient(),
-            request.priceFixedAdd() == null ? BigDecimal.ZERO : request.priceFixedAdd(),
-            request.stock() == null ? 5000 : request.stock(),
-            0,
-            defaultText(request.status(), "ON_SALE"),
-            normalizeGoodsTags(request.tags()),
-            now,
-            now,
-            normalizePlatforms(request.availablePlatforms()),
-            normalizePlatforms(request.forbiddenPlatforms()),
-            boundCardKindId
-        );
-        goods.put(id, item);
-        GoodsItem refreshed = refreshStock(item);
-        persistGoodsSnapshot(refreshed);
-        return refreshed;
-    }
 
-    public synchronized GoodsItem updateGoods(Long id, CreateGoodsRequest request) {
-        GoodsItem current = findGoodsSnapshot(id).orElse(null);
-        if (current == null) {
-            throw new IllegalArgumentException("goods not found");
-        }
-        Long categoryId = request.categoryId() == null ? current.categoryId() : request.categoryId();
-        CategoryItem category = findCategorySnapshot(categoryId).orElse(null);
-        GoodsType type = request.type() == null ? current.type() : request.type();
-        Long boundCardKindId = normalizeGoodsCardKindId(type, request.cardKindId(), current.cardKindId());
-        List<String> accountTypes = request.accountTypes() == null ? current.accountTypes() : validateEnabledRechargeFieldCodes(request.accountTypes());
-        String nextGoodsName = firstText(request.goodsName(), request.name(), current.goodsName());
-        String nextName = firstText(request.name(), request.goodsName(), current.name());
-        String nextPriceLimitText = request.priceLimitText() == null
-            ? defaultText(current.priceLimitText(), "")
-            : normalizedPriceLimitText(request.priceLimitText(), false, nextGoodsName, nextName);
-        GoodsItem next = new GoodsItem(
-            current.id(),
-            categoryId,
-            category == null ? current.categoryName() : category.name(),
-            nextGoodsName,
-            nextName,
-            defaultText(request.subTitle(), current.subTitle()),
-            defaultText(request.description(), current.description()),
-            request.benefitDurations() == null ? current.benefitDurations() : normalizeTextList(request.benefitDurations()),
-            request.benefitType() == null ? current.benefitType() : defaultText(request.benefitType(), ""),
-            request.benefitBrand() == null ? current.benefitBrand() : defaultText(request.benefitBrand(), ""),
-            StringUtils.hasText(nextPriceLimitText),
-            nextPriceLimitText,
-            defaultText(request.coverUrl(), current.coverUrl()),
-            request.detailImages() == null ? current.detailImages() : normalizeImages(request.detailImages()),
-            request.detailBlocks() == null ? current.detailBlocks() : normalizeDetailBlocks(request.detailBlocks()),
-            request.integrations() == null ? current.integrations() : normalizeIntegrations(request.integrations()),
-            request.pollingEnabled() == null ? current.pollingEnabled() : request.pollingEnabled(),
-            request.monitoringEnabled() == null ? current.monitoringEnabled() : request.monitoringEnabled(),
-            type,
-            defaultText(request.platform(), current.platform()),
-            request.price() == null ? current.price() : request.price(),
-            request.originalPrice() == null ? current.originalPrice() : request.originalPrice(),
-            request.maxBuy() == null ? current.maxBuy() : Math.max(1, request.maxBuy()),
-            request.requireRechargeAccount() == null ? current.requireRechargeAccount() : request.requireRechargeAccount(),
-            accountTypes,
-            defaultText(request.priceTemplateId(), current.priceTemplateId()),
-            defaultText(request.priceMode(), current.priceMode()),
-            request.priceCoefficient() == null ? current.priceCoefficient() : request.priceCoefficient(),
-            request.priceFixedAdd() == null ? current.priceFixedAdd() : request.priceFixedAdd(),
-            request.stock() == null ? current.stock() : request.stock(),
-            current.sales(),
-            defaultText(request.status(), current.status()),
-            request.tags() == null ? normalizeGoodsTags(current.tags()) : normalizeGoodsTags(request.tags()),
-            current.createdAt(),
-            OffsetDateTime.now(),
-            request.availablePlatforms() == null ? current.availablePlatforms() : normalizePlatforms(request.availablePlatforms()),
-            request.forbiddenPlatforms() == null ? current.forbiddenPlatforms() : normalizePlatforms(request.forbiddenPlatforms()),
-            boundCardKindId
-        );
-        goods.put(id, next);
-        GoodsItem refreshed = refreshStock(next);
-        persistGoodsSnapshot(refreshed);
-        return refreshed;
-    }
 
-    public synchronized OrderItem createOrder(CreateOrderRequest request) {
+    public OrderItem createOrder(CreateOrderRequest request) {
         return createOrder(request, 90001L);
     }
 
-    public synchronized OrderItem createOrder(CreateOrderRequest request, Long userId) {
+    public OrderItem createOrder(CreateOrderRequest request, Long userId) {
         return createOrder(request, userId, "");
     }
 
-    public synchronized OrderItem createOrder(CreateOrderRequest request, Long userId, String orderIp) {
+    public OrderItem createOrder(CreateOrderRequest request, Long userId, String orderIp) {
         return createOrder(request, userId, orderIp, null);
     }
 
-    public synchronized OrderItem createOrder(CreateOrderRequest request, Long userId, String orderIp, String defaultTerminal) {
+    public OrderItem createOrder(CreateOrderRequest request, Long userId, String orderIp, String defaultTerminal) {
+        long startedAt = System.nanoTime();
+        try {
+            if (persistentOrderCreationEnabled()) {
+                return createPersistentOrder(request, userId, orderIp, defaultTerminal);
+            }
+            synchronized (orderLock) {
+                OrderCreationContext context = orderCreationContext(request, userId, defaultTerminal);
+                OrderItem idempotentOrder = idempotentOrder(context, request);
+                if (idempotentOrder != null) {
+                    return idempotentOrder;
+                }
+                GoodsItem stockedItem = validateAndRefreshOrderGoods(context, request);
+                // 纯内存测试路径仍靠 JVM 锁保护；生产路径由 OrderCreationStore 的数据库事务保护。
+                boolean stockReserved = reserveGoodsStock(stockedItem, context.quantity());
+                try {
+                    OrderItem order = buildUnpaidOrder(context, stockedItem, request, orderIp);
+                    orders.put(order.orderNo(), order);
+                    persistOrderSnapshot(order);
+                    publishOrder(order);
+                    stockReserved = false;
+                    return order;
+                } finally {
+                    if (stockReserved) {
+                        releaseGoodsStock(stockedItem, context.quantity());
+                    }
+                }
+            }
+        } finally {
+            long elapsedMillis = Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
+            if (elapsedMillis >= SLOW_ORDER_CREATION_MILLIS) {
+                LOG.warn(
+                    "slow order creation: requestId={}, goodsId={}, userId={}, elapsedMs={}",
+                    request == null ? "" : defaultText(request.requestId(), ""),
+                    request == null ? null : request.goodsId(),
+                    userId,
+                    elapsedMillis
+                );
+            }
+        }
+    }
+
+    private OrderItem createPersistentOrder(
+        CreateOrderRequest request,
+        Long userId,
+        String orderIp,
+        String defaultTerminal
+    ) {
+        OrderCreationContext context = orderCreationContext(request, userId, defaultTerminal);
+        OrderItem idempotentOrder = idempotentOrder(context, request);
+        if (idempotentOrder != null) {
+            return idempotentOrder;
+        }
+
+        GoodsItem stockedItem = validateAndRefreshOrderGoods(context, request);
+        if (stockedItem.type() == GoodsType.CARD
+            && (stockedItem.stock() == null || stockedItem.stock() < context.quantity())) {
+            throw new IllegalStateException("goods stock is insufficient");
+        }
+        OrderItem candidate = buildUnpaidOrder(context, stockedItem, request, orderIp);
+        OrderCreationStore.CreateResult result = orderCreationStore.create(
+            candidate,
+            stockedItem.type() != GoodsType.CARD
+        );
+        OrderItem order = result.order();
+        if (!sameOrderRequest(order, request, context.sourcePlatform(), context.quantity())) {
+            throw new IllegalStateException("requestId already used with different order parameters");
+        }
+
+        orders.put(order.orderNo(), order);
+        if (result.created()) {
+            if (stockedItem.type() != GoodsType.CARD) {
+                catalogService.goodsMap().remove(stockedItem.id());
+            }
+            publishCreatedOrder(order);
+        }
+        return order;
+    }
+
+    private void publishCreatedOrder(OrderItem order) {
+        if (orderEventExecutor == null) {
+            publishOrder(order);
+            return;
+        }
+        try {
+            orderEventExecutor.execute(() -> {
+                try {
+                    publishOrder(order);
+                } catch (RuntimeException ex) {
+                    LOG.warn("order realtime publish failed after create: orderNo={}", order.orderNo(), ex);
+                }
+            });
+        } catch (RuntimeException ex) {
+            LOG.warn("order realtime publish scheduling failed after create: orderNo={}", order.orderNo(), ex);
+        }
+    }
+
+    private OrderCreationContext orderCreationContext(
+        CreateOrderRequest request,
+        Long userId,
+        String defaultTerminal
+    ) {
+        if (request == null) {
+            throw new IllegalArgumentException("order request is required");
+        }
         UserItem user = findUserSnapshot(userId).orElse(null);
         if (user == null) {
             throw new IllegalArgumentException("user not found");
@@ -3367,98 +3235,323 @@ public class InMemoryShopRepository {
         if (quantity <= 0) {
             throw new IllegalArgumentException("quantity must be greater than 0");
         }
-
         GoodsItem item = findGoodsSnapshot(request.goodsId()).orElse(null);
         if (item == null || !"ON_SALE".equals(item.status())) {
             throw new IllegalArgumentException("goods not found");
         }
-        String sourcePlatform = orderSource(request, defaultTerminal);
-        validateGoodsSalePlatform(item, sourcePlatform);
-        validateOrderPermission(user);
-        validatePriceLimitPermission(user, item);
-        validateRechargeAccount(item, request.rechargeAccount());
+        return new OrderCreationContext(user, item, quantity, orderSource(request, defaultTerminal));
+    }
 
-        OffsetDateTime now = OffsetDateTime.now();
-        String orderNo = nextOrderNo(user.id());
-        OrderItem order = buildOrder(
-            orderNo,
-            user,
-            item,
-            quantity,
+    private OrderItem idempotentOrder(OrderCreationContext context, CreateOrderRequest request) {
+        Optional<OrderItem> existing = findIdempotentOrder(context.user().id(), request.requestId());
+        if (existing.isEmpty()) {
+            return null;
+        }
+        if (!sameOrderRequest(existing.get(), request, context.sourcePlatform(), context.quantity())) {
+            throw new IllegalStateException("requestId already used with different order parameters");
+        }
+        return existing.get();
+    }
+
+    private GoodsItem validateAndRefreshOrderGoods(OrderCreationContext context, CreateOrderRequest request) {
+        validateGoodsSalePlatform(context.item(), context.sourcePlatform());
+        validateGoodsGroupAccess(context.user(), context.item());
+        validateOrderPermission(context.user());
+        validatePriceLimitPermission(context.user(), context.item());
+        validateRechargeFields(context.item(), request);
+        if (context.item().maxBuy() != null && context.quantity() > context.item().maxBuy()) {
+            throw new IllegalArgumentException("quantity exceeds goods maxBuy");
+        }
+        return refreshStock(context.item());
+    }
+
+    private OrderItem buildUnpaidOrder(
+        OrderCreationContext context,
+        GoodsItem stockedItem,
+        CreateOrderRequest request,
+        String orderIp
+    ) {
+        GoodsItem pricedItem = withEffectivePrice(stockedItem, context.user().groupId());
+        return buildOrder(
+            nextOrderNo(context.user().id()),
+            context.user(),
+            pricedItem,
+            context.quantity(),
             request,
-            sourcePlatform,
+            context.sourcePlatform(),
             normalizeClientIp(orderIp),
             List.of(),
             OrderStatus.UNPAID,
             "订单已创建，等待支付",
-            now,
+            OffsetDateTime.now(),
             null,
             null
         );
-        orders.put(orderNo, order);
-        persistOrderSnapshot(order);
-        publishOrder(order);
-        return order;
     }
 
-    public synchronized OrderItem payOrder(String orderNo) {
-        return payOrder(orderNo, null, null);
+    private record OrderCreationContext(
+        UserItem user,
+        GoodsItem item,
+        int quantity,
+        String sourcePlatform
+    ) {
     }
 
-    public synchronized OrderItem payOrder(String orderNo, Long userId, PayOrderRequest request) {
-        OrderItem order = requiredOrder(orderNo);
-        if (userId != null && !Objects.equals(order.userId(), userId)) {
-            throw new IllegalArgumentException("order not found");
+    /**
+     * 预占库存，返回 true 表示本次真的扣减了 goods.stock_count（需要在失败时归还）。
+     *
+     * @throws IllegalStateException 库存不足
+     */
+    private boolean reserveGoodsStock(GoodsItem item, int quantity) {
+        if (item.type() == GoodsType.CARD) {
+            // 卡密类：真实库存 = 可售卡密行数，发货时用行锁抢占，此处只校验
+            if (item.stock() == null || item.stock() < quantity) {
+                throw new IllegalStateException("goods stock is insufficient");
+            }
+            return false;
         }
-        if (!OrderStateMachine.canStartMockPayment(order.status())) {
+        if (fundsLedgerEnabled()) {
+            if (!fundsLedgerStore.deductStock(item.id(), quantity)) {
+                throw new IllegalStateException("goods stock is insufficient");
+            }
+            catalogService.goodsMap().remove(item.id());
+            return true;
+        }
+        if (item.stock() == null || item.stock() < quantity) {
+            throw new IllegalStateException("goods stock is insufficient");
+        }
+        catalogService.goodsMap().computeIfPresent(item.id(), (id, current) ->
+            current.withStock(defaultInt(current.stock()) - quantity));
+        return true;
+    }
+
+    private void releaseGoodsStock(GoodsItem item, int quantity) {
+        if (item.type() == GoodsType.CARD) {
+            return;
+        }
+        if (fundsLedgerEnabled()) {
+            fundsLedgerStore.restoreStock(item.id(), quantity);
+            catalogService.goodsMap().remove(item.id());
+            return;
+        }
+        catalogService.goodsMap().computeIfPresent(item.id(), (id, current) ->
+            current.withStock(defaultInt(current.stock()) + quantity));
+    }
+
+    /**
+     * 支付订单。
+     *
+     * <p>批次4 改造要点（缺陷 A4 + 双扣）：
+     * <ol>
+     *   <li><b>状态先用 DB CAS 抢占</b>：{@code UPDATE orders SET status='PAYING' WHERE status IN
+     *       ('CREATED','UNPAID')}。抢不到说明订单已被取消或已被另一个线程支付，直接失败。
+     *       这一步把"支付"与"取消"的互斥从 JVM 锁下移到数据库行锁，跨进程也成立。</li>
+     *   <li><b>扣款走条件 UPDATE</b>：不再读内存余额算差值。原双扣的根因正是"读到脏内存余额
+     *       481.5 → 减 18.5 → 用 ON DUPLICATE KEY UPDATE balance=VALUES(balance) 绝对覆盖 DB 的 500"，
+     *       表现为一笔 18.5 的订单让余额掉了 37。改成 {@code balance = balance - ?} 后，
+     *       扣多少就是扣多少，内存脏值再也无法参与算术。</li>
+     *   <li>扣款失败必须把状态<b>回滚</b>到原状态，否则订单卡在 PAYING 变成资金黑洞。</li>
+     * </ol>
+     */
+    public OrderItem payOrder(String orderNo, Long userId, PayOrderRequest request) {
+        OrderItem paidOrder;
+        OffsetDateTime paidAt;
+        synchronized (orderLock) {
+            OrderItem order = requiredOrder(orderNo);
+            if (userId != null && !Objects.equals(order.userId(), userId)) {
+                throw new IllegalArgumentException("order not found");
+            }
+            if (!OrderStateMachine.canStartMockPayment(order.status())) {
+                throw new IllegalStateException("订单当前状态不可重复支付");
+            }
+
+            paidAt = OffsetDateTime.now();
+            String method = normalizePayMethod(request == null ? "" : request.payMethod());
+            String terminal = normalizeTerminal(request == null ? "" : request.terminal());
+            PaymentChannelItem channel = requireUsablePaymentChannel(method, terminal);
+            method = channel.code();
+
+            OrderStatus claimedFrom = claimOrderForPayment(order);
+            boolean paymentSettled = false;
+            try {
+                if ("balance".equals(method)) {
+                    debitBalanceForPayment(order);
+                    paymentSettled = true;
+                } else if (prodProfile) {
+                    throw new IllegalStateException("生产环境不允许模拟支付成功，请接入真实支付网关或使用余额支付");
+                } else if (!"MOCK".equalsIgnoreCase(defaultText(configService.systemSetting().paymentMode(), "MOCK"))) {
+                    throw new IllegalStateException("真实微信/支付宝支付尚未完成网关下单接入，请先使用余额支付或切回模拟支付模式");
+                } else {
+                    paymentSettled = true;
+                }
+            } finally {
+                if (!paymentSettled && claimedFrom != null) {
+                    releaseOrderPaymentClaim(orderNo, claimedFrom);
+                }
+            }
+            PaymentItem payment = createSuccessfulPayment(order, method, paidAt);
+            appendOperation("PAYMENT_CREATE", "PAYMENT", payment.paymentNo(), method + " payment succeeded");
+            paidOrder = order.withPayment(payment.paymentNo(), payment.method());
+        }
+        return dispatchPaidOrder(paidOrder, paidAt);
+    }
+
+    /**
+     * 按支付方式 + 终端解析可用支付通道（供网关支付编排使用）。
+     *
+     * <p>{@link #requireUsablePaymentChannel} 是私有的，这里开一个窄口给
+     * {@link AlipayPaymentFacade}，避免把整个仓储的私有细节暴露出去。
+     */
+    public PaymentChannelItem resolvePaymentChannel(String method, String terminal) {
+        return requireUsablePaymentChannel(method, terminal);
+    }
+
+    /**
+     * 建一条 <b>PENDING</b> 支付单，用于外部网关支付的"待付款"阶段。
+     *
+     * <p>与 {@link #createSuccessfulPayment} 的关键区别：<b>不改订单状态、不记资金流水</b>。
+     * 此刻用户还没付钱，我方只是生成了一个 {@code out_trade_no} 交给支付宝。
+     * 真正的入账发生在异步通知到达后的 {@link #handlePaymentCallback} 里。
+     *
+     * <p>订单状态刻意<b>保持 UNPAID</b> 而不推进到 PAYING：用户跳到支付宝后放弃付款是常态，
+     * 留在 UNPAID 才能让他回来重新发起支付；
+     * {@code assertCanAcceptPaymentCallback} 同时接受 UNPAID 与 PAYING，通知照样能落地。
+     */
+    public PaymentItem createPendingPayment(String orderNo, Long userId, String method, String terminal) {
+        synchronized (orderLock) {
+            OrderItem order = requiredOrder(orderNo);
+            if (userId != null && !Objects.equals(order.userId(), userId)) {
+                throw new IllegalArgumentException("order not found");
+            }
+            if (!OrderStateMachine.canStartMockPayment(order.status())) {
+                throw new IllegalStateException("订单当前状态不可重复支付");
+            }
+            PaymentChannelItem channel = requireUsablePaymentChannel(method, terminal);
+            String paymentNo = nextPaymentNo();
+            PaymentItem payment = new PaymentItem(
+                paymentNo,
+                order.orderNo(),
+                order.userId(),
+                channel.code(),
+                order.payAmount(),
+                "PENDING",
+                // 初始就填 paymentNo：它正是传给支付宝的 out_trade_no，
+                // 且 out_trade_no 带唯一键，留空串会让并发待支付流水互相覆盖。
+                // 通知到达后这里会被支付宝真实 trade_no 覆盖，同样唯一。
+                paymentNo,
+                OffsetDateTime.now(),
+                null
+            );
+            payments.put(paymentNo, payment);
+            persistPaymentSnapshot(payment);
+            appendOperation("PAYMENT_PREPARE", "PAYMENT", paymentNo, channel.code() + " gateway payment prepared");
+            return payment;
+        }
+    }
+
+    /**
+     * 按 {@code app_id} 反查支付宝通道，供异步通知在<b>验签之前</b>定位公钥。
+     *
+     * <p>通知报文里没有我方的通道编码，只有 {@code app_id}；而验签需要该通道配置的支付宝公钥。
+     * 因此先用 app_id 找通道、再用它的公钥验签。这一步只是"找钥匙"，
+     * 报文可信性完全由随后的 RSA2 验签决定，不因这里的匹配而获得任何信任。
+     */
+    public Optional<PaymentChannelItem> findAlipayChannelByAppId(String appId) {
+        ensurePaymentChannelsReady();
+        String normalized = defaultText(appId, "").trim();
+        if (!StringUtils.hasText(normalized)) {
+            return Optional.empty();
+        }
+        return paymentChannels.values().stream()
+            .filter(item -> "ALIPAY".equalsIgnoreCase(defaultText(item.type(), "")))
+            .filter(item -> normalized.equals(defaultText(item.config() == null ? "" : item.config().get("app_id"), "").trim()))
+            .findFirst();
+    }
+
+    /**
+     * 用 DB CAS 抢占支付权，返回被抢占前的状态（用于失败回滚）；纯内存模式返回 null。
+     */
+    private OrderStatus claimOrderForPayment(OrderItem order) {
+        if (!fundsLedgerEnabled()) {
+            return null;
+        }
+        String current = fundsLedgerStore.currentStatus(order.orderNo());
+        if (current == null) {
+            // 订单快照还没落库（例如刚在内存里创建），退回内存状态机判断
+            return null;
+        }
+        boolean claimed = fundsLedgerStore.compareAndSetStatusFromEither(
+            order.orderNo(),
+            OrderStatus.CREATED.name(),
+            OrderStatus.UNPAID.name(),
+            OrderStatus.PAYING.name()
+        );
+        if (!claimed) {
+            String latest = fundsLedgerStore.currentStatus(order.orderNo());
+            syncOrderStatusFromDb(order, latest);
             throw new IllegalStateException("订单当前状态不可重复支付");
         }
+        return OrderStatus.valueOf(current);
+    }
 
-        OffsetDateTime paidAt = OffsetDateTime.now();
-        String method = normalizePayMethod(request == null ? "" : request.payMethod());
-        String terminal = normalizeTerminal(request == null ? "" : request.terminal());
-        PaymentChannelItem channel = requireUsablePaymentChannel(method, terminal);
-        method = channel.code();
-        if ("balance".equals(method)) {
-            UserItem user = requiredUser(order.userId());
-            BigDecimal currentBalance = user.balance() == null ? BigDecimal.ZERO : user.balance();
-            if (currentBalance.compareTo(order.payAmount()) < 0) {
-                throw new IllegalStateException("余额不足，请先充值");
-            }
-            UserItem debited = new UserItem(
-                user.id(),
-                user.avatar(),
-                user.mobile(),
-                user.email(),
-                user.nickname(),
-                user.groupId(),
-                groupName(user.groupId()),
-                currentBalance.subtract(order.payAmount()),
-                user.deposit(),
-                user.status(),
-                user.createdAt(),
-                user.lastLoginAt(),
-                user.realNameType(),
-                user.realName(),
-                user.subjectName(),
-                user.certificateNo(),
-                user.verificationStatus()
-            );
-            users.put(user.id(), debited);
-            persistUserSnapshot(debited);
-        } else if (prodProfile) {
-            throw new IllegalStateException("生产环境不允许模拟支付成功，请接入真实支付网关或使用余额支付");
-        } else if (!"MOCK".equalsIgnoreCase(defaultText(systemSetting.paymentMode(), "MOCK"))) {
-            throw new IllegalStateException("真实微信/支付宝支付尚未完成网关下单接入，请先使用余额支付或切回模拟支付模式");
+    private void releaseOrderPaymentClaim(String orderNo, OrderStatus original) {
+        if (fundsLedgerEnabled()) {
+            fundsLedgerStore.compareAndSetStatus(orderNo, OrderStatus.PAYING.name(), original.name());
         }
-        PaymentItem payment = createSuccessfulPayment(order, method, paidAt);
-        appendOperation("PAYMENT_CREATE", "PAYMENT", payment.paymentNo(), method + " payment succeeded");
-        return dispatchPaidOrder(order.withPayment(payment.paymentNo(), payment.method()), paidAt);
+    }
+
+    /** 把 DB 里的最新状态回灌内存，避免内存继续拿旧状态骗人。 */
+    private void syncOrderStatusFromDb(OrderItem order, String dbStatus) {
+        if (dbStatus == null) {
+            return;
+        }
+        try {
+            OrderStatus parsed = OrderStatus.valueOf(dbStatus);
+            if (parsed != order.status()) {
+                orders.put(order.orderNo(), order.withStatus(parsed, order.deliveryMessage(), order.deliveredAt()));
+            }
+        } catch (IllegalArgumentException ignored) {
+            // DB 里出现未知状态值时不做猜测，保持内存原样
+        }
+    }
+
+    /**
+     * 余额支付扣款。
+     *
+     * <p>持久化模式下完全交给 {@link FundsLedgerStore}：条件 UPDATE + DEBIT 流水同事务。
+     * 扣完把内存里的用户快照<b>逐出</b>而不是写回——写回就等于重新制造脏缓存。
+     */
+    private void debitBalanceForPayment(OrderItem order) {
+        if (fundsLedgerEnabled()) {
+            fundsLedgerStore.debitForOrderPay(
+                order.userId(),
+                order.payAmount(),
+                order.orderNo(),
+                "订单支付：" + order.orderNo()
+            );
+            userService.usersMap().remove(order.userId());
+            return;
+        }
+        debitBalanceInMemory(order);
+    }
+
+    /** 纯内存回退路径（无持久化的单元测试用）。 */
+    private void debitBalanceInMemory(OrderItem order) {
+        UserItem user = requiredUser(order.userId());
+        BigDecimal currentBalance = user.balance() == null ? BigDecimal.ZERO : user.balance();
+        if (currentBalance.compareTo(order.payAmount()) < 0) {
+            throw new IllegalStateException("余额不足，请先充值");
+        }
+        UserItem debited = withUserBalance(user, currentBalance.subtract(order.payAmount()));
+        userService.usersMap().put(user.id(), debited);
+        persistUserSnapshot(debited);
     }
 
     private OrderItem dispatchPaidOrder(OrderItem order, OffsetDateTime paidAt) {
         if (order.goodsType() == GoodsType.CARD) {
-            return deliverCardsAfterPayment(order, paidAt);
+            synchronized (orderLock) {
+                return deliverCardsAfterPayment(order, paidAt);
+            }
         }
         if (order.goodsType() == GoodsType.DIRECT) {
             OrderItem paidOrder = order.withProcurementResult(
@@ -3469,9 +3562,9 @@ public class InMemoryShopRepository {
                 paidAt,
                 null
             );
+            saveAndPublishOrder(paidOrder);
             OrderItem next = procureWithFallback(paidOrder, "系统自动采购");
-            orders.put(order.orderNo(), next);
-            persistOrderSnapshot(next);
+            saveOrder(next);
             publishOrder(next);
             return next;
         }
@@ -3484,31 +3577,72 @@ public class InMemoryShopRepository {
             paidAt,
             null
         );
-        orders.put(order.orderNo(), next);
-        persistOrderSnapshot(next);
+        saveOrder(next);
         publishOrder(next);
         return next;
     }
 
-    public synchronized OrderItem cancelOrder(String orderNo) {
+    public OrderItem cancelOrder(String orderNo) {
         return cancelOrder(orderNo, null);
     }
 
-    public synchronized OrderItem cancelOrder(String orderNo, Long userId) {
+    /**
+     * 取消订单。
+     *
+     * <p>批次4：去掉方法级 {@code synchronized}（原来锁 {@code this}），改成 DB 状态 CAS。
+     * 原实现的致命问题是它与 {@link #payOrder} 锁在<b>两个互不排斥的 monitor</b> 上
+     * （cancel 锁 this、pay 锁 orderLock），两者可以同时进入临界区，
+     * 于是出现"同一笔订单既支付成功又取消成功"。
+     * 现在 {@code UPDATE orders SET status='CANCELLED' WHERE status IN ('CREATED','UNPAID')}
+     * 与支付侧的 {@code ... SET status='PAYING' WHERE status IN ('CREATED','UNPAID')}
+     * 争抢同一行的行锁，数据库保证只有一个能赢。
+     */
+    public OrderItem cancelOrder(String orderNo, Long userId) {
         OrderItem order = requiredOrder(orderNo);
         if (userId != null && !Objects.equals(order.userId(), userId)) {
             throw new IllegalArgumentException("order not found");
         }
-        OrderStateMachine.assertCanCancel(order);
-        OrderItem next = order.withStatus(
-            OrderStatus.CANCELLED,
-            "订单已取消",
-            order.deliveredAt()
-        );
-        orders.put(orderNo, next);
-        persistOrderSnapshot(next);
-        publishOrder(next);
-        return next;
+        if (fundsLedgerEnabled() && fundsLedgerStore.currentStatus(orderNo) != null) {
+            boolean cancelled = fundsLedgerStore.compareAndSetStatusFromEither(
+                orderNo,
+                OrderStatus.CREATED.name(),
+                OrderStatus.UNPAID.name(),
+                OrderStatus.CANCELLED.name()
+            );
+            if (!cancelled) {
+                syncOrderStatusFromDb(order, fundsLedgerStore.currentStatus(orderNo));
+                throw new IllegalStateException("only unpaid orders can be cancelled");
+            }
+            OrderItem next = order.withStatus(OrderStatus.CANCELLED, "订单已取消", order.deliveredAt());
+            orders.put(orderNo, next);
+            // CAS 已经把 status 落库并赢下了竞争，这里补齐 remark 等描述字段
+            persistOrderSnapshot(next);
+            restoreStockForCancelledOrder(next);
+            publishOrder(next);
+            return next;
+        }
+        synchronized (orderLock) {
+            OrderItem latest = requiredOrder(orderNo);
+            OrderStateMachine.assertCanCancel(latest);
+            OrderItem next = latest.withStatus(
+                OrderStatus.CANCELLED,
+                "订单已取消",
+                latest.deliveredAt()
+            );
+            orders.put(orderNo, next);
+            persistOrderSnapshot(next);
+            publishOrder(next);
+            return next;
+        }
+    }
+
+    /** 取消未支付订单时归还下单阶段预扣的库存（卡密类不占 stock_count，跳过）。 */
+    private void restoreStockForCancelledOrder(OrderItem order) {
+        if (order.goodsType() == GoodsType.CARD || !fundsLedgerEnabled()) {
+            return;
+        }
+        fundsLedgerStore.restoreStock(order.goodsId(), order.quantity());
+        catalogService.goodsMap().remove(order.goodsId());
     }
 
     private OrderItem deliverCardsAfterPayment(OrderItem order, OffsetDateTime paidAt) {
@@ -3516,16 +3650,29 @@ public class InMemoryShopRepository {
         Long boundCardKindId = item == null ? null : item.cardKindId();
         Optional<List<String>> persistentDelivery = tryDeliverPersistentCards(order, boundCardKindId);
         if (persistentDelivery.isPresent()) {
+            // 发完货把标称库存对齐到真实剩余卡密数，否则 goods.stock_count 永远停在发货前的值
+            if (boundCardKindId == null) {
+                refreshGoodsStock(order.goodsId());
+            } else {
+                refreshGoodsStockForCardKind(boundCardKindId);
+            }
             return completeCardDelivery(order, paidAt, persistentDelivery.get());
         }
-        List<CardSecret> available = cards.values().stream()
-            .filter(card -> boundCardKindId == null
-                ? Objects.equals(card.goodsId(), order.goodsId())
-                : Objects.equals(card.cardKindId(), boundCardKindId))
-            .filter(card -> "AVAILABLE".equals(card.status()))
-            .sorted(Comparator.comparing(CardSecret::id))
-            .limit(order.quantity())
-            .toList();
+        // 缺陷 A2/A3：持久化模式下不再有"内存卡兜底"这条路。
+        // 唯一并发安全的发货实现是 PersistentOrderStore.deliverCardsForOrder
+        // （FOR UPDATE SKIP LOCKED + 条件 UPDATE ... WHERE status='UNSOLD'）。
+        // 它失败就是真的没卡，走缺货/退款流程；绝不能拿空的内存 Map 再"兜"一次，
+        // 那只会把同一张卡发两遍或凭空发不存在的卡。
+        List<CardSecret> available = fundsLedgerEnabled()
+            ? List.of()
+            : cards.values().stream()
+                .filter(card -> boundCardKindId == null
+                    ? Objects.equals(card.goodsId(), order.goodsId())
+                    : Objects.equals(card.cardKindId(), boundCardKindId))
+                .filter(card -> "AVAILABLE".equals(card.status()))
+                .sorted(Comparator.comparing(CardSecret::id))
+                .limit(order.quantity())
+                .toList();
         if (available.size() < order.quantity()) {
             OrderItem failed = order.withProcurementResult(
                 OrderStatus.FAILED,
@@ -3537,7 +3684,7 @@ public class InMemoryShopRepository {
             );
             orders.put(order.orderNo(), failed);
             persistOrderSnapshot(failed);
-            if (systemSetting.autoRefundEnabled() && order.paymentNo() != null) {
+            if (configService.systemSetting().autoRefundEnabled() && order.paymentNo() != null) {
                 createRefund(order, "卡密库存不足自动退款");
                 failed = failed.withStatus(OrderStatus.REFUNDED, "卡密库存不足，系统已自动退款", null);
                 orders.put(order.orderNo(), failed);
@@ -3638,15 +3785,23 @@ public class InMemoryShopRepository {
             try {
                 ProcurementSubmitResult result = submitProcurementOrder(order, channel, supplier);
                 attempts.add(attempt(channel, "SUCCESS", result.attemptMessage()));
-                return order.withProcurementResult(
-                    OrderStatus.PROCURING,
-                    result.deliveryItems(),
-                    List.copyOf(attempts),
-                    trigger + "成功：已提交到 " + channel.supplierName() + "，等待上游处理",
-                    order.paidAt(),
-                    null
-                );
+                return order
+                    .withUpstreamOrderNo(firstText(result.upstreamOrderNo(), order.upstreamOrderNo(), ""))
+                    .withProcurementResult(
+                        OrderStatus.PROCURING,
+                        result.deliveryItems(),
+                        List.copyOf(attempts),
+                        trigger + "成功：已提交到 " + channel.supplierName() + "，等待上游处理",
+                        order.paidAt(),
+                        null
+                    );
+            } catch (SupplierTransportException ex) {
+                // 缺陷 A4：超时 / 连接异常 / 5xx / 响应无法解析 —— 上游是否已受理未知。
+                // 绝不能置 FAILED（上游可能已扣我方预付款），必须转中间态等待回调或对账，
+                // 也不能继续尝试下一个渠道（否则同一笔订单可能在两家上游各下一单）。
+                return unknownProcurementResult(order, channel, attempts, trigger, ex);
             } catch (RuntimeException ex) {
+                // 上游明确拒单（SupplierBusinessException）或本地前置校验失败 —— 可安全判失败并降级下一渠道。
                 attempts.add(attempt(channel, "FAILED", "提交失败：" + ex.getMessage()));
             }
         }
@@ -3661,316 +3816,62 @@ public class InMemoryShopRepository {
         );
     }
 
+    /** 仅供测试注入 HTTP 桩，验证上游超时/拒单两类语义（缺陷 A4）。生产代码不调用。 */
+    void replaceSupplierHttpClientForTest(SupplierHttpClient stub) {
+        this.supplierHttp = stub;
+    }
+
+    /**
+     * 缺陷 A4：上游结果未知时的统一落点。
+     *
+     * <p>渠道尝试记录状态写 {@code PROCURING}（而非 FAILED），订单转中间态 {@code PROCURING}，
+     * 并尽力记录上游订单号（超时场景通常拿不到，此时保留原值）。
+     * 后续由 {@code refreshUpstreamOrderStatusIfNeeded} 或上游异步回调收敛为终态。</p>
+     */
+    private OrderItem unknownProcurementResult(
+        OrderItem order,
+        GoodsChannelItem channel,
+        List<ChannelAttemptItem> attempts,
+        String trigger,
+        SupplierTransportException ex
+    ) {
+        List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
+        nextAttempts.add(attempt(channel, "PROCURING", "上游结果未知，待对账：" + ex.getMessage()));
+        return order.withProcurementResult(
+            OrderStatus.PROCURING,
+            order.deliveryItems() == null ? List.of() : order.deliveryItems(),
+            List.copyOf(nextAttempts),
+            trigger + "结果未知：" + channel.supplierName() + " 未在超时时间内明确应答，已转采购中等待上游确认",
+            order.paidAt(),
+            null
+        );
+    }
+
     private ProcurementSubmitResult submitProcurementOrder(
         OrderItem order,
         GoodsChannelItem channel,
         SupplierItem supplier
     ) {
-        if (!isApiSupplier(supplier) && !isFuluSupplier(supplier) && !isFengzhushouSupplier(supplier) && !isChengquanSupplier(supplier) && !isFanchenSupplier(supplier) && !isJingzhaoSupplier(supplier)) {
-            throw new IllegalStateException("供应商暂不支持真实下单");
-        }
+        // 批次3 分发链④：原为「6 个 isXxx 或串守卫 + 6 段 if 分发 + 尾部卡速售兜底」。
+        SupplierAdapter adapter = supplierAdapters.find(supplier)
+            .filter(SupplierAdapter::supportsOrderSubmit)
+            .orElseThrow(() -> new IllegalStateException("供应商暂不支持真实下单"));
         if (isPlaceholderBaseUrl(supplier.baseUrl())) {
             throw new IllegalStateException("供应商地址是占位地址，不能真实下单");
         }
-        if (isKakayunSupplier(supplier)) {
-            return submitKakayunProcurementOrder(order, channel, supplier);
-        }
-        if (isFuluSupplier(supplier)) {
-            return submitFuluProcurementOrder(order, channel, supplier);
-        }
-        if (isFengzhushouSupplier(supplier)) {
-            return submitFengzhushouProcurementOrder(order, channel, supplier);
-        }
-        if (isChengquanSupplier(supplier)) {
-            return submitChengquanProcurementOrder(order, channel, supplier);
-        }
-        if (isFanchenSupplier(supplier)) {
-            return submitFanchenProcurementOrder(order, channel, supplier);
-        }
-        if (isJingzhaoSupplier(supplier)) {
-            return submitJingzhaoProcurementOrder(order, channel, supplier);
-        }
-        JsonNode root = submitKasushouOrder(order, channel, supplier);
-        ensureKasushouOk(root, "order submit");
-        JsonNode data = root.path("data");
-        String upstreamOrderNo = firstText(
-            textValue(data, "ordersn", "order_sn", "orderNo", "order_no"),
-            textValue(root, "ordersn", "order_sn", "orderNo", "order_no"),
-            ""
-        );
-        String externalOrderNo = firstText(
-            textValue(data, "external_orderno", "externalOrderNo", "external_order_no"),
-            order.orderNo(),
-            ""
-        );
-        String totalPrice = textValue(data, "total_price", "totalPrice", "amount");
-        List<String> deliveryItems = new ArrayList<>();
-        if (StringUtils.hasText(upstreamOrderNo)) {
-            deliveryItems.add("上游订单号：" + upstreamOrderNo);
-        }
-        if (StringUtils.hasText(externalOrderNo)) {
-            deliveryItems.add("外部订单号：" + externalOrderNo);
-        }
-        String priceText = StringUtils.hasText(totalPrice) ? "，上游金额：" + totalPrice : "";
-        String attemptMessage = "上游已接单，等待处理"
-            + (StringUtils.hasText(upstreamOrderNo) ? "，上游订单号：" + upstreamOrderNo : "")
-            + priceText;
-        return new ProcurementSubmitResult(List.copyOf(deliveryItems), attemptMessage);
-    }
-
-    private ProcurementSubmitResult submitKakayunProcurementOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        JsonNode root = submitKakayunOrder(order, channel, supplier);
-        int code = intValue(root.path("code"), -1);
-        if (code != 1 && code != 9999) {
-            String message = textValue(root, "msg", "message", "error");
-            throw new IllegalStateException("kakayun order submit failed: code=" + code
-                + (StringUtils.hasText(message) ? " message=" + message : ""));
-        }
-        JsonNode data = root.path("data");
-        String upstreamOrderNo = firstText(
-            textValue(data, "orderno", "orderNo", "order_no"),
-            textValue(root, "orderno", "orderNo", "order_no"),
-            ""
-        );
-        String externalOrderNo = firstText(
-            textValue(data, "usorderno", "usOrderNo", "external_order_no"),
-            order.orderNo(),
-            ""
-        );
-        String totalPrice = textValue(data, "money", "total_price", "totalPrice", "amount");
-        List<String> deliveryItems = new ArrayList<>();
-        if (StringUtils.hasText(upstreamOrderNo)) {
-            deliveryItems.add("上游订单号：" + upstreamOrderNo);
-        }
-        if (StringUtils.hasText(externalOrderNo)) {
-            deliveryItems.add("外部订单号：" + externalOrderNo);
-        }
-        String prefix = code == 9999 ? "上游返回处理中，已提交待查单" : "上游已接单，等待处理";
-        String priceText = StringUtils.hasText(totalPrice) ? "，上游金额：" + totalPrice : "";
-        String attemptMessage = prefix
-            + (StringUtils.hasText(upstreamOrderNo) ? "，上游订单号：" + upstreamOrderNo : "")
-            + priceText;
-        return new ProcurementSubmitResult(List.copyOf(deliveryItems), attemptMessage);
-    }
-
-    private JsonNode submitKasushouOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        validateKasushouCredentials(supplier);
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("id", kasushouGoodsId(channel.supplierGoodsId()));
-        if (StringUtils.hasText(supplier.callbackUrl())) {
-            body.put("url", supplier.callbackUrl().trim());
-        }
-        body.put("external_orderno", order.orderNo());
-        body.put("mark", defaultText(order.buyerRemark(), ""));
-        body.put("quantity", order.quantity() == null ? 1 : order.quantity());
-
-        Map<String, Object> attach = new LinkedHashMap<>();
-        if (StringUtils.hasText(order.rechargeAccount())) {
-            attach.put("recharge_account", order.rechargeAccount().trim());
-        }
-        if (!attach.isEmpty()) {
-            body.put("attach", attach);
-        }
-        return kasushouPostJson(supplier, "/api/v1/order/buy", body, "order submit");
-    }
-
-    private JsonNode submitKakayunOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        validateKakayunCredentials(supplier);
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("goodsid", kasushouGoodsId(channel.supplierGoodsId()));
-        body.put("buynum", order.quantity() == null ? 1 : order.quantity());
-        body.put("usorderno", order.orderNo());
-        body.put("maxmoney", order.payAmount());
-        if (StringUtils.hasText(order.rechargeAccount())) {
-            body.put("attach", order.rechargeAccount().trim());
-        }
-        if (StringUtils.hasText(supplier.callbackUrl())) {
-            body.put("callbackurl", supplier.callbackUrl().trim());
-        }
-        return kakayunPostJson(supplier, "/dockapiv3/order/create", body, "order submit");
-    }
-
-    private ProcurementSubmitResult submitFuluProcurementOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        JsonNode root = submitFuluOrder(order, channel, supplier);
-        ensureFuluOk(root, "order submit");
-        verifyFuluResponseSign(root, supplier, "order submit");
-        FuluOrderStatus upstream = fuluOrderStatusFromResult(root.path("result").asText(""));
-        List<String> deliveryItems = mergedDeliveryItems(List.of(), upstream);
-        String priceText = upstream.totalPrice() == null ? "" : "，上游金额：" + upstream.totalPrice();
-        String attemptMessage = "上游已接单，等待处理"
-            + (StringUtils.hasText(upstream.upstreamOrderNo()) ? "，上游订单号：" + upstream.upstreamOrderNo() : "")
-            + priceText;
-        return new ProcurementSubmitResult(List.copyOf(deliveryItems), attemptMessage);
-    }
-
-    private JsonNode submitFuluOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        validateFuluCredentials(supplier);
-        Map<String, Object> biz = new LinkedHashMap<>();
-        biz.put("product_id", defaultText(channel.supplierGoodsId(), "").trim());
-        biz.put("customer_order_no", order.orderNo());
-        if (StringUtils.hasText(order.rechargeAccount())) {
-            biz.put("charge_account", order.rechargeAccount().trim());
-        }
-        biz.put("buy_num", order.quantity() == null ? 1 : order.quantity());
-        if (StringUtils.hasText(order.orderIp())) {
-            biz.put("charge_ip", order.orderIp().trim());
-        }
-        biz.put("customer_price", order.payAmount());
-        return fuluPostJson(supplier, "order.notify", biz, "order submit");
-    }
-
-    private ProcurementSubmitResult submitFengzhushouProcurementOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        JsonNode root = submitFengzhushouOrder(order, channel, supplier);
-        int code = intValue(root.path("retcode"), -1);
-        if (isFengzhushouPublicError(code)) {
-            String message = textValue(root, "msg", "message", "error");
-            throw new IllegalStateException("fengzhushou order submit failed: code=" + code
-                + (StringUtils.hasText(message) ? " message=" + message : ""));
-        }
-        String prefix = code == 9999 || code != 0 ? "上游返回处理中，已提交待查单" : "上游已收单，等待处理";
+        UpstreamSubmitResult result = adapter.submitOrder(supplierContext(supplier), order, channel);
         return new ProcurementSubmitResult(
-            List.of("外部订单号：" + order.orderNo()),
-            prefix + "，外部订单号：" + order.orderNo()
+            result.deliveryItems(),
+            result.attemptMessage(),
+            result.upstreamOrderNo()
         );
     }
 
-    private JsonNode submitFengzhushouOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        validateFengzhushouCredentials(supplier);
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("projectCode", fengzhushouProjectCode(supplier));
-        body.put("timestamp", String.valueOf(Instant.now().toEpochMilli()));
-        body.put("skuCode", defaultText(channel.supplierGoodsId(), "").trim());
-        body.put("channelOrderNo", order.orderNo());
-        body.put("account", defaultText(order.rechargeAccount(), "").trim());
-        body.put("num", order.quantity() == null ? 1 : order.quantity());
-        body.put("callbackUrl", defaultText(supplier.callbackUrl(), "").trim());
-        body.put("skuPrice", order.payAmount());
-        body.put("ext", defaultText(order.buyerRemark(), "").trim());
-        body.put("sign", FengzhushouSignatureUtil.sign(body, fengzhushouSignKey(supplier)));
-        return fengzhushouPostJson(supplier, "/fzs-stdopen-api/api/v1/sendgoods", body, "order submit");
-    }
-
-    private ProcurementSubmitResult submitChengquanProcurementOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        JsonNode root = submitChengquanOrder(order, channel, supplier);
-        ensureChengquanOk(root, "order submit");
-        JsonNode data = root.path("data");
-        String upstreamOrderNo = firstText(textValue(data, "order_no", "orderNo", "order_id", "orderId"), textValue(root, "order_no", "orderNo"), "");
-        String status = firstText(textValue(data, "status", "order_status", "orderStatus"), "RECHARGE", "");
-        String amount = firstText(textValue(data, "amount", "money", "price"), "", "");
-        List<String> deliveryItems = new ArrayList<>();
-        if (StringUtils.hasText(upstreamOrderNo)) {
-            deliveryItems.add("上游订单号：" + upstreamOrderNo);
-        }
-        deliveryItems.add("外部订单号：" + order.orderNo());
-        String attemptMessage = "上游已接单，状态：" + status
-            + (StringUtils.hasText(upstreamOrderNo) ? "，上游订单号：" + upstreamOrderNo : "")
-            + (StringUtils.hasText(amount) ? "，上游金额：" + amount : "");
-        return new ProcurementSubmitResult(List.copyOf(deliveryItems), attemptMessage);
-    }
-
-    private JsonNode submitChengquanOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        validateChengquanCredentials(supplier);
-        Map<String, Object> body = chengquanBaseParams(supplier);
-        body.put("order_no", order.orderNo());
-        body.put("recharge_number", defaultText(order.rechargeAccount(), "").trim());
-        body.put("product_id", defaultText(channel.supplierGoodsId(), "").trim());
-        body.put("amount", order.quantity() == null ? 1 : order.quantity());
-        body.put("version", "v1");
-        if (StringUtils.hasText(supplier.callbackUrl())) {
-            body.put("notify_url", supplier.callbackUrl().trim());
-        }
-        body.put("sign", ChengquanSignatureUtil.sign(body, chengquanSecret(supplier)));
-        return chengquanPostJson(supplier, "/order/directCharge", body, "order submit");
-    }
-
-    private ProcurementSubmitResult submitFanchenProcurementOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        JsonNode root = submitFanchenOrder(order, channel, supplier);
-        String code = textValue(root, "resultno");
-        if (!Set.of("0", "2").contains(code)) {
-            throw new IllegalStateException("fanchen order submit failed: code=" + code
-                + (StringUtils.hasText(textValue(root, "remark1", "msg", "message")) ? " message=" + textValue(root, "remark1", "msg", "message") : ""));
-        }
-        String upstreamOrderNo = textValue(root, "orderid", "orderId");
-        String amount = textValue(root, "ordercash", "amount");
-        List<String> deliveryItems = new ArrayList<>();
-        if (StringUtils.hasText(upstreamOrderNo)) {
-            deliveryItems.add("上游订单号：" + upstreamOrderNo);
-        }
-        deliveryItems.add("外部订单号：" + order.orderNo());
-        String attemptMessage = "上游已接单，等待处理"
-            + (StringUtils.hasText(upstreamOrderNo) ? "，上游订单号：" + upstreamOrderNo : "")
-            + (StringUtils.hasText(amount) ? "，上游金额：" + amount : "");
-        return new ProcurementSubmitResult(List.copyOf(deliveryItems), attemptMessage);
-    }
-
-    private JsonNode submitFanchenOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        validateFanchenCredentials(supplier);
-        Map<String, Object> body = fanchenBaseParams(supplier);
-        body.put("productid", defaultText(channel.supplierGoodsId(), "").trim());
-        body.put("num", String.valueOf(order.quantity() == null ? 1 : order.quantity()));
-        body.put("areaid", "");
-        body.put("serverid", "");
-        body.put("account", defaultText(order.rechargeAccount(), "").trim());
-        body.put("spordertime", DateTimeFormatter.ofPattern("yyyyMMddHHmmss").format(ZonedDateTime.now(CHINA_ZONE)));
-        body.put("sporderid", order.orderNo());
-        body.put("sign", FanchenSignatureUtil.sign(
-            body,
-            List.of("userid", "productid", "num", "areaid", "serverid", "account", "spordertime", "sporderid"),
-            fanchenKey(supplier)
-        ));
-        if (StringUtils.hasText(supplier.callbackUrl())) {
-            body.put("back_url", supplier.callbackUrl().trim());
-        }
-        body.put("checkprice", order.payAmount());
-        return fanchenPostJson(supplier, "/fcgameonlinepay.do", body, "order submit");
-    }
-
-    private ProcurementSubmitResult submitJingzhaoProcurementOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        JsonNode root = submitJingzhaoOrder(order, channel, supplier);
-        ensureJingzhaoOk(root, "order submit");
-        JsonNode data = root.path("data");
-        JingzhaoOrderStatus upstream = jingzhaoOrderStatusFromNode(data, order.orderNo());
-        List<String> deliveryItems = mergedDeliveryItems(List.of(), upstream);
-        String attemptMessage = "上游已接单，状态：" + jingzhaoStatusLabel(upstream.status())
-            + (StringUtils.hasText(upstream.upstreamOrderNo()) ? "，上游订单号：" + upstream.upstreamOrderNo() : "")
-            + (upstream.totalPrice() == null ? "" : "，上游金额：" + upstream.totalPrice());
-        return new ProcurementSubmitResult(List.copyOf(deliveryItems), attemptMessage);
-    }
-
-    private JsonNode submitJingzhaoOrder(OrderItem order, GoodsChannelItem channel, SupplierItem supplier) {
-        Map<String, Object> body = jingzhaoBaseParams(supplier);
-        body.put("product_id", defaultText(channel.supplierGoodsId(), "").trim());
-        body.put("quantity", order.quantity() == null ? 1 : order.quantity());
-        body.put("outer_order_id", order.orderNo());
-        body.put("safe_cost", order.payAmount());
-        if (StringUtils.hasText(order.rechargeAccount())) {
-            body.put("recharge_account", order.rechargeAccount().trim());
-        }
-        if (StringUtils.hasText(supplier.callbackUrl())) {
-            body.put("notify_url", supplier.callbackUrl().trim());
-        }
-        if (StringUtils.hasText(order.orderIp())) {
-            body.put("client_ip", order.orderIp().trim());
-        }
-        body.put("sign", JingzhaoSignatureUtil.sign(body, jingzhaoKey(supplier)));
-        return jingzhaoPostJson(supplier, "/api/buy", body, "order submit");
-    }
-
-    private Object kasushouGoodsId(String supplierGoodsId) {
-        String value = defaultText(supplierGoodsId, "").trim();
-        if (!StringUtils.hasText(value)) {
-            throw new IllegalStateException("上游商品ID为空");
-        }
-        try {
-            return Long.parseLong(value);
-        } catch (NumberFormatException ex) {
-            return value;
-        }
-    }
-
+    /** 批次3：新增 upstreamOrderNo，供缺陷 A4 把上游订单号落到 orders.upstream_order_no。 */
     private record ProcurementSubmitResult(
         List<String> deliveryItems,
-        String attemptMessage
+        String attemptMessage,
+        String upstreamOrderNo
     ) {
     }
 
@@ -3996,7 +3897,11 @@ public class InMemoryShopRepository {
             }
             return order;
         }
-        if (!isApiSupplier(supplier) && !isFuluSupplier(supplier) && !isFengzhushouSupplier(supplier) && !isChengquanSupplier(supplier) && !isFanchenSupplier(supplier) && !isJingzhaoSupplier(supplier)) {
+        // 批次3 分发链⑤：原为「6 个 isXxx 或串守卫 + 6 段 if + 卡速售兜底」，每段都是同一套
+        // 「查上游 → enrichAttempt → 映射本地状态 → 合并交付项 → 保存 → 变更时推送」流水，共约 200 行。
+        // 现由适配器返回归一化的 UpstreamOrderSnapshot，流水只写一遍。
+        SupplierAdapter adapter = supplierAdapters.find(supplier).orElse(null);
+        if (adapter == null) {
             if (strict) {
                 throw new IllegalStateException("该上游供应商暂不支持刷新回调信息");
             }
@@ -4009,175 +3914,7 @@ public class InMemoryShopRepository {
             return order;
         }
         try {
-            if (isFuluSupplier(supplier)) {
-                FuluOrderStatus upstream = fetchFuluOrderStatus(order, supplier);
-                GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-                ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-                List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-                int index = nextAttempts.lastIndexOf(successAttempt);
-                if (index >= 0) {
-                    nextAttempts.set(index, enrichedAttempt);
-                }
-                OrderStatus nextStatus = fuluLocalOrderStatus(upstream.status(), order.status());
-                OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-                List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-                String message = fuluDeliveryMessage(upstream);
-                OrderItem next = order.withProcurementResult(
-                    nextStatus,
-                    deliveryItems,
-                    List.copyOf(nextAttempts),
-                    message,
-                    order.paidAt(),
-                    deliveredAt
-                );
-                orders.put(next.orderNo(), next);
-                persistOrderSnapshot(next);
-                if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
-                    publishOrder(next);
-                }
-                return next;
-            }
-            if (isChengquanSupplier(supplier)) {
-                ChengquanOrderStatus upstream = fetchChengquanOrderStatus(order, supplier);
-                GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-                ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-                List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-                int index = nextAttempts.lastIndexOf(successAttempt);
-                if (index >= 0) {
-                    nextAttempts.set(index, enrichedAttempt);
-                }
-                OrderStatus nextStatus = chengquanLocalOrderStatus(upstream.status(), order.status());
-                OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-                List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-                String message = chengquanDeliveryMessage(upstream);
-                OrderItem next = order.withProcurementResult(
-                    nextStatus,
-                    deliveryItems,
-                    List.copyOf(nextAttempts),
-                    message,
-                    order.paidAt(),
-                    deliveredAt
-                );
-                orders.put(next.orderNo(), next);
-                persistOrderSnapshot(next);
-                if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
-                    publishOrder(next);
-                }
-                return next;
-            }
-            if (isFanchenSupplier(supplier)) {
-                FanchenOrderStatus upstream = fetchFanchenOrderStatus(order, supplier);
-                GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-                ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-                List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-                int index = nextAttempts.lastIndexOf(successAttempt);
-                if (index >= 0) {
-                    nextAttempts.set(index, enrichedAttempt);
-                }
-                OrderStatus nextStatus = fanchenLocalOrderStatus(upstream.status(), order.status());
-                OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-                List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-                String message = fanchenDeliveryMessage(upstream);
-                OrderItem next = order.withProcurementResult(
-                    nextStatus,
-                    deliveryItems,
-                    List.copyOf(nextAttempts),
-                    message,
-                    order.paidAt(),
-                    deliveredAt
-                );
-                orders.put(next.orderNo(), next);
-                persistOrderSnapshot(next);
-                if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
-                    publishOrder(next);
-                }
-                return next;
-            }
-            if (isJingzhaoSupplier(supplier)) {
-                JingzhaoOrderStatus upstream = fetchJingzhaoOrderStatus(order, supplier);
-                GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-                ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-                List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-                int index = nextAttempts.lastIndexOf(successAttempt);
-                if (index >= 0) {
-                    nextAttempts.set(index, enrichedAttempt);
-                }
-                OrderStatus nextStatus = jingzhaoLocalOrderStatus(upstream.status(), order.status());
-                OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-                List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-                String message = jingzhaoDeliveryMessage(upstream);
-                OrderItem next = order.withProcurementResult(
-                    nextStatus,
-                    deliveryItems,
-                    List.copyOf(nextAttempts),
-                    message,
-                    order.paidAt(),
-                    deliveredAt
-                );
-                orders.put(next.orderNo(), next);
-                persistOrderSnapshot(next);
-                if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
-                    publishOrder(next);
-                }
-                return next;
-            }
-            if (isFengzhushouSupplier(supplier)) {
-                FengzhushouOrderStatus upstream = fetchFengzhushouOrderStatus(order, supplier);
-                GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-                ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-                List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-                int index = nextAttempts.lastIndexOf(successAttempt);
-                if (index >= 0) {
-                    nextAttempts.set(index, enrichedAttempt);
-                }
-                OrderStatus nextStatus = fengzhushouLocalOrderStatus(upstream.status(), order.status());
-                OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-                List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-                String message = fengzhushouDeliveryMessage(upstream);
-                OrderItem next = order.withProcurementResult(
-                    nextStatus,
-                    deliveryItems,
-                    List.copyOf(nextAttempts),
-                    message,
-                    order.paidAt(),
-                    deliveredAt
-                );
-                orders.put(next.orderNo(), next);
-                persistOrderSnapshot(next);
-                if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
-                    publishOrder(next);
-                }
-                return next;
-            }
-            if (isKakayunSupplier(supplier)) {
-                KakayunOrderStatus upstream = fetchKakayunOrderStatus(order, supplier);
-                GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
-                ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
-                List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-                int index = nextAttempts.lastIndexOf(successAttempt);
-                if (index >= 0) {
-                    nextAttempts.set(index, enrichedAttempt);
-                }
-                OrderStatus nextStatus = kakayunLocalOrderStatus(upstream.status(), order.status());
-                OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-                List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-                String message = kakayunDeliveryMessage(upstream);
-                OrderItem next = order.withProcurementResult(
-                    nextStatus,
-                    deliveryItems,
-                    List.copyOf(nextAttempts),
-                    message,
-                    order.paidAt(),
-                    deliveredAt
-                );
-                orders.put(next.orderNo(), next);
-                persistOrderSnapshot(next);
-                if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
-                    publishOrder(next);
-                }
-                return next;
-            }
-            KasushouOrderStatus upstream = fetchKasushouOrderStatus(order, supplier);
+            UpstreamOrderSnapshot upstream = adapter.fetchOrderStatus(supplierContext(supplier), order, order.status());
             GoodsIntegrationItem remote = upstreamGoodsSnapshot(supplier, successAttempt.supplierGoodsId()).orElse(null);
             ChannelAttemptItem enrichedAttempt = enrichAttempt(successAttempt, upstream, remote);
             List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
@@ -4185,20 +3922,21 @@ public class InMemoryShopRepository {
             if (index >= 0) {
                 nextAttempts.set(index, enrichedAttempt);
             }
-            OrderStatus nextStatus = kasushouLocalOrderStatus(upstream.status(), order.status());
+            OrderStatus nextStatus = upstream.localStatus();
             OffsetDateTime deliveredAt = nextStatus == OrderStatus.DELIVERED ? OffsetDateTime.now() : order.deliveredAt();
-            List<String> deliveryItems = mergedDeliveryItems(order.deliveryItems(), upstream);
-            String message = kasushouDeliveryMessage(upstream);
-            OrderItem next = order.withProcurementResult(
-                nextStatus,
-                deliveryItems,
-                List.copyOf(nextAttempts),
-                message,
-                order.paidAt(),
-                deliveredAt
-            );
-            orders.put(next.orderNo(), next);
-            persistOrderSnapshot(next);
+            List<String> deliveryItems = upstream.mergedDeliveryItems(order.deliveryItems());
+            String message = upstream.deliveryMessage();
+            OrderItem next = order
+                .withUpstreamOrderNo(firstText(upstream.upstreamOrderNo(), order.upstreamOrderNo(), ""))
+                .withProcurementResult(
+                    nextStatus,
+                    deliveryItems,
+                    List.copyOf(nextAttempts),
+                    message,
+                    order.paidAt(),
+                    deliveredAt
+                );
+            saveOrder(next);
             if (nextStatus != order.status() || !Objects.equals(message, order.deliveryMessage())) {
                 publishOrder(next);
             }
@@ -4209,244 +3947,6 @@ public class InMemoryShopRepository {
             }
             return order;
         }
-    }
-
-    private KasushouOrderStatus fetchKasushouOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("external_orderno", order.orderNo());
-        body.put("ordersn", "");
-        body.put("day", "0");
-        JsonNode root = kasushouPostJson(supplier, "/api/v1/order/info", body, "order info sync");
-        ensureKasushouOk(root, "order info sync");
-        JsonNode data = root.path("data");
-        JsonNode node = data.isArray() && data.size() > 0 ? data.get(0) : data;
-        if (node == null || node.isMissingNode() || node.isNull()) {
-            throw new IllegalStateException("kasushou order info sync failed: data is empty");
-        }
-        List<String> cards = new ArrayList<>();
-        JsonNode cardList = node.path("card_list");
-        if (cardList.isArray()) {
-            for (JsonNode card : cardList) {
-                String cardNo = textValue(card, "card_no", "cardNo");
-                String cardPassword = textValue(card, "card_password", "cardPassword", "password");
-                String line = StringUtils.hasText(cardNo)
-                    ? "卡号：" + cardNo + (StringUtils.hasText(cardPassword) ? " 卡密：" + cardPassword : "")
-                    : (StringUtils.hasText(cardPassword) ? "卡密：" + cardPassword : "");
-                if (StringUtils.hasText(line)) {
-                    cards.add(line);
-                }
-            }
-        }
-        return new KasushouOrderStatus(
-            textValue(node, "ordersn", "order_sn", "orderNo", "order_no"),
-            textValue(node, "external_orderno", "externalOrderNo", "external_order_no"),
-            intValue(node.path("status"), 0),
-            textValue(node, "recharge_hints", "rechargeHints", "message", "msg"),
-            optionalDecimalValue(node, "total_price", "totalPrice", "amount"),
-            List.copyOf(cards),
-            abbreviate(node.toString(), 1200)
-        );
-    }
-
-    private KakayunOrderStatus fetchKakayunOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("usorderno", order.orderNo());
-        JsonNode root = kakayunPostJson(supplier, "/dockapiv3/order/get", body, "order info sync");
-        ensureKakayunOk(root, "order info sync");
-        JsonNode data = root.path("data");
-        JsonNode node = data.isArray() && data.size() > 0 ? data.get(0) : data;
-        if (node == null || node.isMissingNode() || node.isNull()) {
-            throw new IllegalStateException("kakayun order info sync failed: data is empty");
-        }
-        List<String> cards = new ArrayList<>();
-        JsonNode cardList = firstExisting(node, "cards", "cardlist", "cardList");
-        if (cardList != null && cardList.isArray()) {
-            for (JsonNode card : cardList) {
-                String cardNo = textValue(card, "card_no", "cardNo", "cardno");
-                String cardPassword = textValue(card, "card_pwd", "cardPwd", "card_password", "password");
-                String line = StringUtils.hasText(cardNo)
-                    ? "卡号：" + cardNo + (StringUtils.hasText(cardPassword) ? " 卡密：" + cardPassword : "")
-                    : (StringUtils.hasText(cardPassword) ? "卡密：" + cardPassword : "");
-                if (StringUtils.hasText(line)) {
-                    cards.add(line);
-                }
-            }
-        } else if (cardList != null && StringUtils.hasText(cardList.asText())) {
-            cards.add(cardList.asText());
-        }
-        return new KakayunOrderStatus(
-            textValue(node, "orderno", "orderNo", "order_no"),
-            firstText(textValue(node, "usorderno", "usOrderNo"), order.orderNo(), ""),
-            intValue(node.path("status"), 0),
-            firstText(textValue(node, "receipt", "refundreceipt", "message", "msg"), textValue(root, "msg", "message"), ""),
-            optionalDecimalValue(node, "money", "total_price", "amount"),
-            List.copyOf(cards),
-            abbreviate(node.toString(), 1200)
-        );
-    }
-
-    private FuluOrderStatus fetchFuluOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> biz = new LinkedHashMap<>();
-        biz.put("customer_order_no", order.orderNo());
-        JsonNode root = fuluPostJson(supplier, "order.query", biz, "order info sync");
-        int code = intValue(root.path("code"), -1);
-        if (code == 4011 || code == 5000) {
-            String message = firstText(textValue(root, "msg", "message", "sub_msg"), "上游暂未返回最终状态", "");
-            return new FuluOrderStatus(
-                "",
-                order.orderNo(),
-                "",
-                "",
-                2,
-                message,
-                null,
-                List.of(),
-                abbreviate(root.toString(), 1200)
-            );
-        }
-        ensureFuluOk(root, "order info sync");
-        verifyFuluResponseSign(root, supplier, "order info sync");
-        return fuluOrderStatusFromResult(root.path("result").asText(""));
-    }
-
-    private FengzhushouOrderStatus fetchFengzhushouOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("projectCode", fengzhushouProjectCode(supplier));
-        body.put("timestamp", String.valueOf(Instant.now().toEpochMilli()));
-        body.put("channelOrderNo", order.orderNo());
-        body.put("sign", FengzhushouSignatureUtil.sign(body, fengzhushouSignKey(supplier)));
-        JsonNode root = fengzhushouPostJson(supplier, "/fzs-stdopen-api/api/v1/queryorder", body, "order info sync");
-        int code = intValue(root.path("retcode"), -1);
-        if (code == 9999 || code == 3000) {
-            return new FengzhushouOrderStatus(
-                "",
-                order.orderNo(),
-                code,
-                firstText(textValue(root, "msg", "message"), "上游暂未返回最终状态", ""),
-                null,
-                abbreviate(root.toString(), 1200)
-            );
-        }
-        JsonNode data = root.path("data");
-        return new FengzhushouOrderStatus(
-            firstText(textValue(data, "orderNo", "order_no", "orderId"), textValue(root, "orderNo", "order_no"), ""),
-            order.orderNo(),
-            code,
-            textValue(root, "msg", "message"),
-            optionalDecimalValue(data, "skuPrice", "price", "amount", "totalPrice"),
-            abbreviate(root.toString(), 1200)
-        );
-    }
-
-    private ChengquanOrderStatus fetchChengquanOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> body = chengquanBaseParams(supplier);
-        body.put("order_no", order.orderNo());
-        body.put("sign", ChengquanSignatureUtil.sign(body, chengquanSecret(supplier)));
-        JsonNode root = chengquanPostJson(supplier, "/order/get", body, "order info sync");
-        ensureChengquanOk(root, "order info sync");
-        JsonNode data = root.path("data");
-        return new ChengquanOrderStatus(
-            firstText(textValue(data, "order_no", "orderNo", "order_id", "orderId"), order.orderNo(), ""),
-            order.orderNo(),
-            firstText(textValue(data, "status", "order_status", "orderStatus"), textValue(root, "status"), "RECHARGE"),
-            firstText(textValue(data, "message", "msg", "remark"), textValue(root, "message", "msg"), ""),
-            optionalDecimalValue(data, "amount", "money", "price"),
-            abbreviate(root.toString(), 1200)
-        );
-    }
-
-    private FanchenOrderStatus fetchFanchenOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> body = fanchenBaseParams(supplier);
-        body.put("sporderid", order.orderNo());
-        body.put("sign", FanchenSignatureUtil.sign(body, List.of("userid", "sporderid"), fanchenKey(supplier)));
-        JsonNode root = fanchenPostJson(supplier, "/fcsearchpay.do", body, "order info sync");
-        String code = textValue(root, "resultno");
-        return new FanchenOrderStatus(
-            textValue(root, "orderid", "orderId"),
-            firstText(textValue(root, "sporderid", "sporderId"), order.orderNo(), ""),
-            code,
-            firstText(textValue(root, "remark1", "msg", "message"), textValue(root, "productname", "productName"), ""),
-            optionalDecimalValue(root, "ordercash", "amount"),
-            fanchenCards(root),
-            abbreviate(root.toString(), 1200)
-        );
-    }
-
-    private JingzhaoOrderStatus fetchJingzhaoOrderStatus(OrderItem order, SupplierItem supplier) {
-        Map<String, Object> body = jingzhaoBaseParams(supplier);
-        body.put("outer_order_id", order.orderNo());
-        body.put("sign", JingzhaoSignatureUtil.sign(body, jingzhaoKey(supplier)));
-        JsonNode root = jingzhaoPostJson(supplier, "/api/outer-order", body, "order info sync");
-        ensureJingzhaoOk(root, "order info sync");
-        return jingzhaoOrderStatusFromNode(root.path("data"), order.orderNo());
-    }
-
-    private JingzhaoOrderStatus jingzhaoOrderStatusFromNode(JsonNode node, String fallbackExternalOrderNo) {
-        JsonNode safeNode = node == null || node.isMissingNode() || node.isNull() ? OBJECT_MAPPER.createObjectNode() : node;
-        List<String> cards = new ArrayList<>();
-        JsonNode cardList = firstExisting(safeNode, "cards", "cardList", "card_list");
-        if (cardList != null && cardList.isArray()) {
-            for (JsonNode card : cardList) {
-                String cardNo = firstText(textValue(card, "card_no", "cardNo", "no"), "", "");
-                String cardPassword = firstText(textValue(card, "card_password", "cardPassword", "password"), "", "");
-                String expiredAt = textValue(card, "expired_at", "expiredAt");
-                String line = StringUtils.hasText(cardNo)
-                    ? "卡号：" + cardNo + (StringUtils.hasText(cardPassword) ? " 卡密：" + cardPassword : "")
-                    : (StringUtils.hasText(cardPassword) ? "卡密：" + cardPassword : "");
-                if (StringUtils.hasText(line) && StringUtils.hasText(expiredAt)) {
-                    line += " 有效期：" + expiredAt;
-                }
-                if (StringUtils.hasText(line)) {
-                    cards.add(line);
-                }
-            }
-        }
-        JsonNode ticketList = firstExisting(safeNode, "tickets", "ticketList", "ticket_list");
-        if (ticketList != null && ticketList.isArray()) {
-            for (JsonNode ticket : ticketList) {
-                String value = firstText(textValue(ticket, "ticket", "url"), textValue(ticket, "no"), "");
-                String expiredAt = textValue(ticket, "expired_at", "expiredAt");
-                String line = StringUtils.hasText(value) ? "卡券：" + value : "";
-                if (StringUtils.hasText(line) && StringUtils.hasText(expiredAt)) {
-                    line += " 有效期：" + expiredAt;
-                }
-                if (StringUtils.hasText(line)) {
-                    cards.add(line);
-                }
-            }
-        }
-        return new JingzhaoOrderStatus(
-            firstText(textValue(safeNode, "order_id", "orderId", "id"), "", ""),
-            firstText(textValue(safeNode, "outer_order_id", "outerOrderId"), fallbackExternalOrderNo, ""),
-            intValue(firstExisting(safeNode, "state", "status"), 501),
-            firstText(textValue(safeNode, "state_info", "stateInfo", "recharge_info", "rechargeInfo", "message", "msg"), "", ""),
-            optionalDecimalValue(safeNode, "total_price", "totalPrice", "product_price", "productPrice"),
-            List.copyOf(cards),
-            abbreviate(safeNode.toString(), 1200)
-        );
-    }
-
-    private List<String> fanchenCards(JsonNode root) {
-        JsonNode cardsNode = firstExisting(root, "cards", "cardList", "card_list");
-        if (cardsNode == null || !cardsNode.isArray()) {
-            return List.of();
-        }
-        List<String> cards = new ArrayList<>();
-        for (JsonNode card : cardsNode) {
-            String cardNo = textValue(card, "cardno", "cardNo", "card_no");
-            String cardPsw = textValue(card, "cardpsw", "cardPsw", "card_password", "password");
-            String effectTime = textValue(card, "effecttime", "effectTime", "expire_time");
-            String line = StringUtils.hasText(cardNo)
-                ? "卡号：" + cardNo + (StringUtils.hasText(cardPsw) ? " 卡密：" + cardPsw : "")
-                : (StringUtils.hasText(cardPsw) ? "卡密：" + cardPsw : "");
-            if (StringUtils.hasText(line) && StringUtils.hasText(effectTime)) {
-                line += " 有效期：" + effectTime;
-            }
-            if (StringUtils.hasText(line)) {
-                cards.add(line);
-            }
-        }
-        return List.copyOf(cards);
     }
 
     private Optional<GoodsIntegrationItem> upstreamGoodsSnapshot(SupplierItem supplier, String supplierGoodsId) {
@@ -4461,19 +3961,25 @@ public class InMemoryShopRepository {
         }
     }
 
+    /**
+     * 批次3：原 7 个 enrichAttempt 重载（每家一个上游状态 record）合并为一个。
+     * 字段取值口径与原实现逐一对齐：上游状态标签、本地状态名、回调文案、价格与商品名回落顺序均不变。
+     */
     private ChannelAttemptItem enrichAttempt(
         ChannelAttemptItem attempt,
-        KasushouOrderStatus upstream,
+        UpstreamOrderSnapshot upstream,
         GoodsIntegrationItem remote
     ) {
-        String upstreamStatus = kasushouStatusLabel(upstream.status());
-        String localStatus = upstream.status() == 3 ? "DELIVERED"
-            : (upstream.status() == 4 || upstream.status() == 5 || upstream.status() == -1 ? "FAILED" : "PROCURING");
+        String upstreamStatus = upstream.upstreamStatusLabel();
         String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
         BigDecimal price = upstream.totalPrice() == null
             ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
             : upstream.totalPrice();
-        String goodsName = remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName();
+        // 原实现里只有福禄会带上游商品名（productName），其余 6 家直接用远端快照名/尝试记录名。
+        // 这里保持完全一致的回落顺序：上游有名字才参与 firstText，否则沿用原来的二选一。
+        String goodsName = StringUtils.hasText(upstream.goodsName())
+            ? firstText(upstream.goodsName(), remote == null ? "" : remote.supplierGoodsName(), attempt.supplierGoodsName())
+            : (remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName());
         return new ChannelAttemptItem(
             attempt.channelId(),
             attempt.supplierId(),
@@ -4485,671 +3991,39 @@ public class InMemoryShopRepository {
             upstreamStatus,
             callbackMessage,
             upstream.rawResponse(),
+            attempt.callbackUrl(),
             attempt.priority(),
-            localStatus,
+            upstream.localStatus().name(),
             callbackMessage,
             OffsetDateTime.now()
         );
-    }
-
-    private ChannelAttemptItem enrichAttempt(
-        ChannelAttemptItem attempt,
-        KakayunOrderStatus upstream,
-        GoodsIntegrationItem remote
-    ) {
-        String upstreamStatus = kakayunStatusLabel(upstream.status());
-        OrderStatus nextStatus = kakayunLocalOrderStatus(upstream.status(), OrderStatus.PROCURING);
-        String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
-        BigDecimal price = upstream.totalPrice() == null
-            ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
-            : upstream.totalPrice();
-        String goodsName = remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName();
-        return new ChannelAttemptItem(
-            attempt.channelId(),
-            attempt.supplierId(),
-            attempt.supplierName(),
-            attempt.supplierGoodsId(),
-            goodsName,
-            price,
-            upstreamStatus,
-            upstreamStatus,
-            callbackMessage,
-            upstream.rawResponse(),
-            attempt.priority(),
-            nextStatus.name(),
-            callbackMessage,
-            OffsetDateTime.now()
-        );
-    }
-
-    private ChannelAttemptItem enrichAttempt(
-        ChannelAttemptItem attempt,
-        FuluOrderStatus upstream,
-        GoodsIntegrationItem remote
-    ) {
-        String upstreamStatus = fuluStatusLabel(upstream.status());
-        OrderStatus nextStatus = fuluLocalOrderStatus(upstream.status(), OrderStatus.PROCURING);
-        String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
-        BigDecimal price = upstream.totalPrice() == null
-            ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
-            : upstream.totalPrice();
-        String goodsName = firstText(upstream.productName(), remote == null ? "" : remote.supplierGoodsName(), attempt.supplierGoodsName());
-        return new ChannelAttemptItem(
-            attempt.channelId(),
-            attempt.supplierId(),
-            attempt.supplierName(),
-            attempt.supplierGoodsId(),
-            goodsName,
-            price,
-            upstreamStatus,
-            upstreamStatus,
-            callbackMessage,
-            upstream.rawResponse(),
-            attempt.priority(),
-            nextStatus.name(),
-            callbackMessage,
-            OffsetDateTime.now()
-        );
-    }
-
-    private ChannelAttemptItem enrichAttempt(
-        ChannelAttemptItem attempt,
-        FengzhushouOrderStatus upstream,
-        GoodsIntegrationItem remote
-    ) {
-        String upstreamStatus = fengzhushouStatusLabel(upstream.status());
-        OrderStatus nextStatus = fengzhushouLocalOrderStatus(upstream.status(), OrderStatus.PROCURING);
-        String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
-        BigDecimal price = upstream.totalPrice() == null
-            ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
-            : upstream.totalPrice();
-        String goodsName = remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName();
-        return new ChannelAttemptItem(
-            attempt.channelId(),
-            attempt.supplierId(),
-            attempt.supplierName(),
-            attempt.supplierGoodsId(),
-            goodsName,
-            price,
-            upstreamStatus,
-            upstreamStatus,
-            callbackMessage,
-            upstream.rawResponse(),
-            attempt.priority(),
-            nextStatus.name(),
-            callbackMessage,
-            OffsetDateTime.now()
-        );
-    }
-
-    private ChannelAttemptItem enrichAttempt(
-        ChannelAttemptItem attempt,
-        ChengquanOrderStatus upstream,
-        GoodsIntegrationItem remote
-    ) {
-        String upstreamStatus = chengquanStatusLabel(upstream.status());
-        OrderStatus nextStatus = chengquanLocalOrderStatus(upstream.status(), OrderStatus.PROCURING);
-        String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
-        BigDecimal price = upstream.totalPrice() == null
-            ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
-            : upstream.totalPrice();
-        String goodsName = remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName();
-        return new ChannelAttemptItem(
-            attempt.channelId(),
-            attempt.supplierId(),
-            attempt.supplierName(),
-            attempt.supplierGoodsId(),
-            goodsName,
-            price,
-            upstreamStatus,
-            upstreamStatus,
-            callbackMessage,
-            upstream.rawResponse(),
-            attempt.priority(),
-            nextStatus.name(),
-            callbackMessage,
-            OffsetDateTime.now()
-        );
-    }
-
-    private ChannelAttemptItem enrichAttempt(
-        ChannelAttemptItem attempt,
-        FanchenOrderStatus upstream,
-        GoodsIntegrationItem remote
-    ) {
-        String upstreamStatus = fanchenStatusLabel(upstream.status());
-        OrderStatus nextStatus = fanchenLocalOrderStatus(upstream.status(), OrderStatus.PROCURING);
-        String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
-        BigDecimal price = upstream.totalPrice() == null
-            ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
-            : upstream.totalPrice();
-        String goodsName = remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName();
-        return new ChannelAttemptItem(
-            attempt.channelId(),
-            attempt.supplierId(),
-            attempt.supplierName(),
-            attempt.supplierGoodsId(),
-            goodsName,
-            price,
-            upstreamStatus,
-            upstreamStatus,
-            callbackMessage,
-            upstream.rawResponse(),
-            attempt.priority(),
-            nextStatus.name(),
-            callbackMessage,
-            OffsetDateTime.now()
-        );
-    }
-
-    private ChannelAttemptItem enrichAttempt(
-        ChannelAttemptItem attempt,
-        JingzhaoOrderStatus upstream,
-        GoodsIntegrationItem remote
-    ) {
-        String upstreamStatus = jingzhaoStatusLabel(upstream.status());
-        OrderStatus nextStatus = jingzhaoLocalOrderStatus(upstream.status(), OrderStatus.PROCURING);
-        String callbackMessage = firstText(upstream.hints(), attempt.callbackMessage(), attempt.message());
-        BigDecimal price = upstream.totalPrice() == null
-            ? (remote == null ? attempt.supplierPrice() : remote.supplierPrice())
-            : upstream.totalPrice();
-        String goodsName = remote == null ? attempt.supplierGoodsName() : remote.supplierGoodsName();
-        return new ChannelAttemptItem(
-            attempt.channelId(),
-            attempt.supplierId(),
-            attempt.supplierName(),
-            attempt.supplierGoodsId(),
-            goodsName,
-            price,
-            upstreamStatus,
-            upstreamStatus,
-            callbackMessage,
-            upstream.rawResponse(),
-            attempt.priority(),
-            nextStatus.name(),
-            callbackMessage,
-            OffsetDateTime.now()
-        );
-    }
-
-    private OrderStatus kasushouLocalOrderStatus(int upstreamStatus, OrderStatus fallback) {
-        return switch (upstreamStatus) {
-            case 3 -> OrderStatus.DELIVERED;
-            case 4, 5, -1 -> OrderStatus.FAILED;
-            default -> fallback == null ? OrderStatus.PROCURING : fallback;
-        };
-    }
-
-    private String kasushouStatusLabel(int status) {
-        return switch (status) {
-            case 1 -> "PENDING";
-            case 2 -> "PROCESSING";
-            case 3 -> "DELIVERED";
-            case 4 -> "CANCELLED";
-            case 5 -> "REFUNDED";
-            case -1 -> "UNPAID";
-            default -> "UNKNOWN";
-        };
-    }
-
-    private String kasushouDeliveryMessage(KasushouOrderStatus upstream) {
-        String statusLabel = switch (upstream.status()) {
-            case 1 -> "上游等待处理";
-            case 2 -> "上游正在处理";
-            case 3 -> "上游交易成功";
-            case 4 -> "上游已取消交易";
-            case 5 -> "上游已退款";
-            case -1 -> "上游未支付";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private OrderStatus kakayunLocalOrderStatus(int upstreamStatus, OrderStatus fallback) {
-        return switch (upstreamStatus) {
-            case 5 -> OrderStatus.DELIVERED;
-            case 2, 4 -> OrderStatus.FAILED;
-            default -> fallback == null ? OrderStatus.PROCURING : fallback;
-        };
-    }
-
-    private String kakayunStatusLabel(int status) {
-        return switch (status) {
-            case 0 -> "PAID";
-            case 1 -> "PAID_OR_CARD_DONE";
-            case 2 -> "UNPAID";
-            case 3 -> "PROCESSING";
-            case 4 -> "FAILED";
-            case 5 -> "DELIVERED";
-            default -> "UNKNOWN";
-        };
-    }
-
-    private String kakayunDeliveryMessage(KakayunOrderStatus upstream) {
-        String statusLabel = switch (upstream.status()) {
-            case 0, 1 -> "上游已受理";
-            case 2 -> "上游未付款或失败";
-            case 3 -> "上游正在处理";
-            case 4 -> "上游处理失败";
-            case 5 -> "上游交易成功";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private OrderStatus fuluLocalOrderStatus(int upstreamStatus, OrderStatus fallback) {
-        return switch (upstreamStatus) {
-            case 3 -> OrderStatus.DELIVERED;
-            case 4 -> OrderStatus.FAILED;
-            default -> fallback == null ? OrderStatus.PROCURING : fallback;
-        };
-    }
-
-    private String fuluStatusLabel(int status) {
-        return switch (status) {
-            case 1 -> "UNTREATED";
-            case 2 -> "PROCESSING";
-            case 3 -> "SUCCESS";
-            case 4 -> "FAIL";
-            default -> "UNKNOWN";
-        };
-    }
-
-    private String fuluDeliveryMessage(FuluOrderStatus upstream) {
-        String statusLabel = switch (upstream.status()) {
-            case 1 -> "上游未处理";
-            case 2 -> "上游充值中";
-            case 3 -> "上游充值成功";
-            case 4 -> "上游充值失败";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private OrderStatus fengzhushouLocalOrderStatus(int upstreamStatus, OrderStatus fallback) {
-        return switch (upstreamStatus) {
-            case 1 -> OrderStatus.DELIVERED;
-            case 9, 2000, 3100, 3104, 3999, 4001, 4002 -> OrderStatus.FAILED;
-            default -> fallback == null ? OrderStatus.PROCURING : fallback;
-        };
-    }
-
-    private boolean isFengzhushouPublicError(int code) {
-        return code == 102 || code == 103 || code == 107 || code == 400 || code == 1000;
-    }
-
-    private String fengzhushouStatusLabel(int status) {
-        return switch (status) {
-            case 0 -> "PROCESSING";
-            case 1 -> "SUCCESS";
-            case 9 -> "FAIL";
-            case 2000 -> "SKU_OFFLINE";
-            case 3000 -> "ORDER_NOT_FOUND";
-            case 3100 -> "ACCOUNT_RESTRICTED";
-            case 3104 -> "PRICE_MISMATCH";
-            case 3999 -> "ORDER_CREATE_FAILED";
-            case 4001 -> "DEDUCT_FAILED";
-            case 4002 -> "BALANCE_NOT_ENOUGH";
-            case 9999 -> "UNKNOWN";
-            default -> "UNKNOWN";
-        };
-    }
-
-    private String fengzhushouDeliveryMessage(FengzhushouOrderStatus upstream) {
-        String statusLabel = switch (upstream.status()) {
-            case 0 -> "上游发货中";
-            case 1 -> "上游发货成功";
-            case 9 -> "上游发货失败";
-            case 2000 -> "上游单品不存在或已下架";
-            case 3000 -> "上游暂未查到订单";
-            case 3100 -> "充值账号无法购买此商品";
-            case 3104 -> "上游价格不匹配";
-            case 3999 -> "上游订单生成失败";
-            case 4001 -> "上游扣款失败";
-            case 4002 -> "上游账户余额不足";
-            case 9999 -> "上游系统内部错误，状态待确认";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private OrderStatus chengquanLocalOrderStatus(String upstreamStatus, OrderStatus fallback) {
-        String normalized = normalize(upstreamStatus);
-        if ("success".equals(normalized)) {
-            return OrderStatus.DELIVERED;
-        }
-        if ("failure".equals(normalized) || "fail".equals(normalized)) {
-            return OrderStatus.FAILED;
-        }
-        return fallback == null ? OrderStatus.PROCURING : fallback;
-    }
-
-    private String chengquanStatusLabel(String status) {
-        String normalized = normalize(status);
-        if ("success".equals(normalized)) return "SUCCESS";
-        if ("failure".equals(normalized) || "fail".equals(normalized)) return "FAILURE";
-        if ("recharge".equals(normalized)) return "RECHARGE";
-        return StringUtils.hasText(status) ? status : "UNKNOWN";
-    }
-
-    private String chengquanDeliveryMessage(ChengquanOrderStatus upstream) {
-        String normalized = normalize(upstream.status());
-        String statusLabel = switch (normalized) {
-            case "success" -> "上游充值成功";
-            case "failure", "fail" -> "上游充值失败";
-            case "recharge" -> "上游充值中";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private OrderStatus fanchenLocalOrderStatus(String upstreamStatus, OrderStatus fallback) {
-        return switch (defaultText(upstreamStatus, "").trim()) {
-            case "1" -> OrderStatus.DELIVERED;
-            case "9" -> OrderStatus.FAILED;
-            case "5007" -> fallback == null ? OrderStatus.PROCURING : fallback;
-            default -> fallback == null ? OrderStatus.PROCURING : fallback;
-        };
-    }
-
-    private String fanchenStatusLabel(String status) {
-        return switch (defaultText(status, "").trim()) {
-            case "0" -> "WAITING";
-            case "1" -> "SUCCESS";
-            case "2" -> "PROCESSING";
-            case "9" -> "FAILED_REFUNDED";
-            case "5007" -> "ORDER_NOT_FOUND";
-            default -> StringUtils.hasText(status) ? status : "UNKNOWN";
-        };
-    }
-
-    private String fanchenDeliveryMessage(FanchenOrderStatus upstream) {
-        String statusLabel = switch (defaultText(upstream.status(), "").trim()) {
-            case "0", "2" -> "上游充值中";
-            case "1" -> "上游充值成功";
-            case "9" -> "上游充值失败已退款";
-            case "5007" -> "上游暂未查到订单";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private OrderStatus jingzhaoLocalOrderStatus(int upstreamStatus, OrderStatus fallback) {
-        return switch (upstreamStatus) {
-            case 200 -> OrderStatus.DELIVERED;
-            case 500 -> OrderStatus.FAILED;
-            default -> fallback == null ? OrderStatus.PROCURING : fallback;
-        };
-    }
-
-    private String jingzhaoStatusLabel(int status) {
-        return switch (status) {
-            case 100 -> "WAITING";
-            case 101 -> "PROCESSING";
-            case 200 -> "SUCCESS";
-            case 500 -> "FAILED";
-            case 501 -> "UNKNOWN";
-            default -> "UNKNOWN";
-        };
-    }
-
-    private String jingzhaoDeliveryMessage(JingzhaoOrderStatus upstream) {
-        String statusLabel = switch (upstream.status()) {
-            case 100 -> "上游等待发货";
-            case 101 -> "上游正在充值";
-            case 200 -> "上游交易成功";
-            case 500 -> "上游交易失败";
-            case 501 -> "上游状态未知";
-            default -> "上游状态未知";
-        };
-        String hints = StringUtils.hasText(upstream.hints()) ? "：" + upstream.hints() : "";
-        return statusLabel + hints;
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, KasushouOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        items.addAll(upstream.cards());
-        return List.copyOf(items);
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, KakayunOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        items.addAll(upstream.cards());
-        return List.copyOf(items);
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, FuluOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        items.addAll(upstream.cards());
-        return List.copyOf(items);
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, FengzhushouOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        return List.copyOf(items);
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, ChengquanOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        return List.copyOf(items);
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, FanchenOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        items.addAll(upstream.cards());
-        return List.copyOf(items);
-    }
-
-    private List<String> mergedDeliveryItems(List<String> currentItems, JingzhaoOrderStatus upstream) {
-        LinkedHashSet<String> items = new LinkedHashSet<>();
-        if (currentItems != null) {
-            items.addAll(currentItems);
-        }
-        if (StringUtils.hasText(upstream.upstreamOrderNo())) {
-            items.add("上游订单号：" + upstream.upstreamOrderNo());
-        }
-        if (StringUtils.hasText(upstream.externalOrderNo())) {
-            items.add("外部订单号：" + upstream.externalOrderNo());
-        }
-        if (upstream.totalPrice() != null) {
-            items.add("上游金额：" + upstream.totalPrice());
-        }
-        if (StringUtils.hasText(upstream.hints())) {
-            items.add("上游结果：" + upstream.hints());
-        }
-        items.addAll(upstream.cards());
-        return List.copyOf(items);
-    }
-
-    private record KasushouOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        int status,
-        String hints,
-        BigDecimal totalPrice,
-        List<String> cards,
-        String rawResponse
-    ) {
-    }
-
-    private record KakayunOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        int status,
-        String hints,
-        BigDecimal totalPrice,
-        List<String> cards,
-        String rawResponse
-    ) {
-    }
-
-    private record FuluOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        String productId,
-        String productName,
-        int status,
-        String hints,
-        BigDecimal totalPrice,
-        List<String> cards,
-        String rawResponse
-    ) {
-    }
-
-    private record FengzhushouOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        int status,
-        String hints,
-        BigDecimal totalPrice,
-        String rawResponse
-    ) {
-    }
-
-    private record ChengquanOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        String status,
-        String hints,
-        BigDecimal totalPrice,
-        String rawResponse
-    ) {
-    }
-
-    private record FanchenOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        String status,
-        String hints,
-        BigDecimal totalPrice,
-        List<String> cards,
-        String rawResponse
-    ) {
-    }
-
-    private record JingzhaoOrderStatus(
-        String upstreamOrderNo,
-        String externalOrderNo,
-        int status,
-        String hints,
-        BigDecimal totalPrice,
-        List<String> cards,
-        String rawResponse
-    ) {
     }
 
     private ChannelAttemptItem attempt(GoodsChannelItem channel, String status, String message) {
+        SupplierItem supplier = findSupplierSnapshot(channel.supplierId()).orElse(null);
+        String effectiveCallbackUrl = "SUCCESS".equals(status) || "PROCURING".equals(status)
+            ? SupplierCallbackUrlResolver.effectiveUrl(configService.outboundPublicBaseUrl(), supplier)
+            : "";
+        String callbackUrl = SupplierCallbackUrlResolver.callbackSentOnSubmit(effectiveCallbackUrl, supplier)
+            ? effectiveCallbackUrl
+            : "";
         return new ChannelAttemptItem(
             channel.id(),
             channel.supplierId(),
             channel.supplierName(),
             channel.supplierGoodsId(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            callbackUrl,
             channel.priority(),
             status,
             message,
             OffsetDateTime.now()
         );
-    }
-
-    public DeliveryResult deliveryResult(String orderNo) {
-        OrderItem order = requiredOrder(orderNo);
-        return deliveryResult(orderNo, order.userId());
     }
 
     public DeliveryResult deliveryResult(String orderNo, Long userId) {
@@ -5166,6 +4040,12 @@ public class InMemoryShopRepository {
                 "卡密已显示，请尽快使用。系统不会在日志中记录明文。"
             ))
             .toList();
+        if (deliveredCards.isEmpty() && order.goodsType() == GoodsType.CARD) {
+            deliveredCards = order.deliveryItems().stream()
+                .filter(StringUtils::hasText)
+                .map(this::persistentDeliveryCard)
+                .toList();
+        }
         boolean viewedBefore = !deliveredCards.isEmpty() && !viewedDeliveryOrders.add(order.orderNo());
         return new DeliveryResult(
             order.orderNo(),
@@ -5176,6 +4056,15 @@ public class InMemoryShopRepository {
             order.deliveryMessage(),
             deliveredCards,
             viewedBefore
+        );
+    }
+
+    private DeliveryCardItem persistentDeliveryCard(String content) {
+        String[] parts = content.trim().split("\\|", 2);
+        return new DeliveryCardItem(
+            parts[0],
+            parts.length > 1 ? parts[1] : "",
+            "卡密已显示，请尽快使用。系统不会在日志中记录明文。"
         );
     }
 
@@ -5194,11 +4083,6 @@ public class InMemoryShopRepository {
         return expireOrderIfNeeded(order, OffsetDateTime.now());
     }
 
-    private void expireStaleUnpaidOrders() {
-        OffsetDateTime now = OffsetDateTime.now();
-        orders.values().forEach(order -> expireOrderIfNeeded(order, now));
-    }
-
     private OrderItem expireOrderIfNeeded(OrderItem order, OffsetDateTime now) {
         if (!OrderStateMachine.canExpirePayment(order.status())) {
             return order;
@@ -5215,6 +4099,21 @@ public class InMemoryShopRepository {
         persistOrderSnapshot(expired);
         publishOrder(expired);
         return expired;
+    }
+
+    private void saveOrder(OrderItem order) {
+        if (order == null) {
+            return;
+        }
+        synchronized (orderLock) {
+            orders.put(order.orderNo(), order);
+            persistOrderSnapshot(order);
+        }
+    }
+
+    private void saveAndPublishOrder(OrderItem order) {
+        saveOrder(order);
+        publishOrder(order);
     }
 
     private void publishOrder(OrderItem order) {
@@ -5282,6 +4181,7 @@ public class InMemoryShopRepository {
             attempt.callbackStatus(),
             attempt.callbackMessage(),
             attempt.rawResponse(),
+            attempt.callbackUrl(),
             attempt.priority(),
             attempt.status(),
             attempt.message(),
@@ -5293,9 +4193,7 @@ public class InMemoryShopRepository {
         if (!List.of(OrderStatus.DELIVERED, OrderStatus.FAILED, OrderStatus.REFUNDED).contains(order.status())) {
             return;
         }
-        boolean exists = smsLogs.values().stream()
-            .anyMatch(log -> Objects.equals(log.orderNo(), order.orderNo()) && Objects.equals(log.templateType(), String.valueOf(order.status())));
-        if (exists) {
+        if (auditService.hasSmsLog(order.orderNo(), String.valueOf(order.status()))) {
             return;
         }
         String mobile = order.rechargeAccount();
@@ -5304,12 +4202,18 @@ public class InMemoryShopRepository {
         }
         boolean validMobile = StringUtils.hasText(mobile) && mobile.matches("1\\d{10}");
         String content = "订单" + order.orderNo() + "状态：" + order.status() + "，商品：" + order.goodsName();
-        String status = systemSetting.smsEnabled() && validMobile ? "SENT" : "SKIPPED";
-        String error = systemSetting.smsEnabled() ? (validMobile ? "" : "手机号不可用") : "短信未启用";
-        Long id = smsLogId.getAndIncrement();
-        SmsLogItem log = new SmsLogItem(id, order.orderNo(), validMobile ? mobile : "", String.valueOf(order.status()), content, status, error, OffsetDateTime.now());
-        smsLogs.put(id, log);
-        persistSmsLog(log);
+        SystemSettingItem setting = configService.systemSetting();
+        String status = setting.smsEnabled() && validMobile ? "SENT" : "SKIPPED";
+        String error = setting.smsEnabled() ? (validMobile ? "" : "手机号不可用") : "短信未启用";
+        auditService.appendSmsLog(
+            order.orderNo(),
+            validMobile ? mobile : "",
+            String.valueOf(order.status()),
+            content,
+            status,
+            error,
+            OffsetDateTime.now()
+        );
     }
 
     private SupplierItem requiredSupplier(Long id) {
@@ -5344,27 +4248,6 @@ public class InMemoryShopRepository {
             .findFirst();
         persistent.ifPresent(item -> suppliers.put(item.id(), item));
         return persistent;
-    }
-
-    private SupplierItem testKasushouConnection(SupplierItem item) {
-        validateKasushouCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能测试真实连接");
-        }
-
-        JsonNode root = kasushouPostJson(item, "/api/v1/user/info", Map.of(), "test connection");
-        ensureKasushouOk(root, "test connection");
-        return item.withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem refreshKasushouBalance(SupplierItem item) {
-        validateKasushouCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能刷新真实余额");
-        }
-        JsonNode root = kasushouPostJson(item, "/api/v1/user/info", Map.of(), "balance refresh");
-        ensureKasushouOk(root, "balance refresh");
-        return item.withBalance(kasushouBalance(root));
     }
 
     private RemoteGoodsSyncResult fetchKasushouGoods(SupplierItem item, Long cateId, String keyword, int page, int limit) {
@@ -5408,234 +4291,108 @@ public class InMemoryShopRepository {
         );
     }
 
+    /**
+     * 批次3 分发链⑥：原为 5 段 if + 逐家写死的 {@code Math.min(limit, 100)}（卡速售不夹取），
+     * 现由 {@link SupplierAdapter#maxRemoteGoodsPageSize()} 声明，夹取语义逐家保持不变。
+     */
     private RemoteGoodsSyncResult fetchIntegratedRemoteGoods(SupplierItem item, Long cateId, String keyword, int page, int limit) {
         if (isPlaceholderBaseUrl(item.baseUrl())) {
             throw new IllegalArgumentException("供应商 API 地址仍是占位地址，不能拉取上游商品");
         }
-        if (isKasushouSupplier(item)) {
-            return fetchKasushouGoods(item, cateId, keyword, page, limit);
+        SupplierAdapter adapter = supplierAdapters.require(item);
+        if (!adapter.supportsRemoteGoodsSync()) {
+            throw new IllegalArgumentException(adapter.manualGoodsMappingHint());
         }
-        if (isKakayunSupplier(item)) {
-            return fetchKakayunGoods(item, cateId, keyword, page, Math.min(limit, 100));
-        }
-        if (isChengquanSupplier(item)) {
-            return fetchChengquanGoods(item, cateId, keyword, page, Math.min(limit, 100));
-        }
-        if (isFanchenSupplier(item)) {
-            return fetchFanchenGoods(item, keyword, page, Math.min(limit, 100));
-        }
-        if (isJingzhaoSupplier(item)) {
-            return fetchJingzhaoGoods(item, cateId, keyword, page, Math.min(limit, 100));
-        }
-        throw new IllegalArgumentException("supplier platformType is not supported");
+        int effectiveLimit = Math.min(limit, adapter.maxRemoteGoodsPageSize());
+        return adapter.fetchRemoteGoods(supplierContext(item), cateId, keyword, page, effectiveLimit);
     }
 
-    private SupplierItem testKakayunConnection(SupplierItem item) {
-        validateKakayunCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能测试真实连接");
+    /**
+     * 商品条目映射端口实现。全部委托回原有私有方法，商品字段映射逻辑零改动。
+     */
+    private final SupplierGoodsMappingPort goodsMappingPort = new SupplierGoodsMappingPort() {
+        @Override
+        public RemoteGoodsItem kasushouItem(Long supplierId, JsonNode node, Map<String, String> categoryNames,
+                                            String selectedCategoryId, String selectedCategoryName) {
+            return remoteGoodsItem(supplierId, node, categoryNames, selectedCategoryId, selectedCategoryName);
         }
-        JsonNode root = kakayunPostJson(item, "/dockapiv3/user/info", Map.of(), "test connection");
-        ensureKakayunOk(root, "test connection");
-        return item.withLastSyncAt(OffsetDateTime.now());
-    }
 
-    private SupplierItem refreshKakayunBalance(SupplierItem item) {
-        validateKakayunCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能刷新真实余额");
+        @Override
+        public RemoteGoodsItem kakayunItem(Long supplierId, JsonNode node, Map<String, String> categoryNames,
+                                           String selectedCategoryId, String selectedCategoryName) {
+            return kakayunRemoteGoodsItem(supplierId, node, categoryNames, selectedCategoryId, selectedCategoryName);
         }
-        JsonNode root = kakayunPostJson(item, "/dockapiv3/user/info", Map.of(), "balance refresh");
-        ensureKakayunOk(root, "balance refresh");
-        return item.withBalance(kakayunBalance(root));
-    }
 
-    private RemoteGoodsSyncResult fetchKakayunGoods(SupplierItem item, Long groupId, String keyword, int page, int limit) {
-        validateKakayunCredentials(item);
+        @Override
+        public RemoteGoodsItem chengquanItem(Long supplierId, JsonNode node, Map<String, String> categoryNames,
+                                             String selectedCategoryId, String selectedCategoryName) {
+            return chengquanRemoteGoodsItem(supplierId, node, categoryNames, selectedCategoryId, selectedCategoryName);
+        }
 
-        JsonNode groupRoot = kakayunPostJson(item, "/dockapiv3/goods/group", Map.of(), "category sync");
-        ensureKakayunOk(groupRoot, "category sync");
-        List<Map<String, Object>> categories = kakayunCategories(groupRoot.path("data"));
-        Map<String, String> categoryNames = remoteCategoryNames(categories);
-        String selectedCategoryId = groupId == null || groupId == 0 ? "" : String.valueOf(groupId);
-        String selectedCategoryName = categoryNames.getOrDefault(selectedCategoryId, "");
+        @Override
+        public RemoteGoodsItem fanchenItem(Long supplierId, JsonNode node) {
+            return fanchenRemoteGoodsItem(supplierId, node);
+        }
 
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("page", page);
-        body.put("limit", limit);
-        if (StringUtils.hasText(keyword)) {
-            body.put("goodsname", keyword.trim());
+        @Override
+        public RemoteGoodsItem jingzhaoItem(Long supplierId, JsonNode node) {
+            return jingzhaoRemoteGoodsItem(supplierId, node);
         }
-        if (StringUtils.hasText(selectedCategoryId)) {
-            body.put("groupid", selectedCategoryId);
+
+        @Override
+        public List<Map<String, Object>> kasushouCategories(JsonNode data) {
+            return InMemoryShopRepository.this.kasushouCategories(data);
         }
-        JsonNode listRoot = kakayunPostJson(item, "/dockapiv3/goods/all", body, "goods list sync");
-        ensureKakayunOk(listRoot, "goods list sync");
-        JsonNode data = listRoot.path("data");
-        JsonNode listNode = data.isArray() ? data : firstExisting(data, "list", "goods", "records", "items", "data");
-        if (listNode == null || !listNode.isArray()) {
-            throw new IllegalStateException("kakayun goods list sync failed: data list is missing");
+
+        @Override
+        public List<Map<String, Object>> kakayunCategories(JsonNode data) {
+            return InMemoryShopRepository.this.kakayunCategories(data);
         }
-        int total = intValue(firstExisting(listRoot, "count", "total"), listNode.size());
-        if (data.isObject()) {
-            total = intValue(firstExisting(data, "count", "total"), total);
+
+        @Override
+        public Map<String, String> categoryNames(List<Map<String, Object>> categories) {
+            return remoteCategoryNames(categories);
         }
-        List<RemoteGoodsItem> items = new ArrayList<>();
-        for (JsonNode node : listNode) {
-            items.add(kakayunRemoteGoodsItem(item.id(), node, categoryNames, selectedCategoryId, selectedCategoryName));
+
+        @Override
+        public String jingzhaoGoodsTypeLabel(String type) {
+            return InMemoryShopRepository.this.jingzhaoGoodsTypeLabel(type);
         }
-        OffsetDateTime syncedAt = OffsetDateTime.now();
-        return new RemoteGoodsSyncResult(
-            item.id(),
-            syncedAt,
-            total,
-            items,
-            categories,
-            page,
-            limit,
-            "synced " + items.size() + " kakayun goods from remote total " + total
+
+        @Override
+        public boolean matchesKeyword(RemoteGoodsItem item, String keyword) {
+            return !StringUtils.hasText(keyword)
+                || normalize(item.goodsName()).contains(normalize(keyword))
+                || normalize(item.supplierGoodsId()).contains(normalize(keyword));
+        }
+
+        @Override
+        public List<Map<String, Object>> toMapList(JsonNode node) {
+            if (node == null || !node.isArray()) {
+                return List.of();
+            }
+            return OBJECT_MAPPER.convertValue(node, LIST_MAP_TYPE);
+        }
+    };
+
+    /** 组装一次适配器调用的上下文。密钥仍由仓储持有，只把本次要用的明文传入。 */
+    private SupplierCallContext supplierContext(SupplierItem item) {
+        return new SupplierCallContext(
+            item,
+            resolvedSupplierApiKey(item),
+            supplierHttp,
+            goodsMappingPort,
+            SupplierCallbackUrlResolver.effectiveUrl(configService.outboundPublicBaseUrl(), item)
         );
     }
 
-    private RemoteGoodsSyncResult fetchChengquanGoods(SupplierItem item, Long typeId, String keyword, int page, int limit) {
-        validateChengquanCredentials(item);
-        Map<String, Object> typeBody = chengquanBaseParams(item);
-        typeBody.put("sign", ChengquanSignatureUtil.sign(typeBody, chengquanSecret(item)));
-        JsonNode typeRoot = chengquanPostJson(item, "/coupon/type/list", typeBody, "category sync");
-        ensureChengquanOk(typeRoot, "category sync");
-        JsonNode typeList = firstExisting(typeRoot.path("data"), "list", "records", "items", "data");
-        if (typeList == null || !typeList.isArray()) {
-            typeList = typeRoot.path("data").isArray() ? typeRoot.path("data") : OBJECT_MAPPER.createArrayNode();
+    /** 原 7 个 xxxApiKey()/xxxSecret()/xxxKey() 逻辑完全一致：先取内存明文，回落 item.apiKey()。 */
+    private String resolvedSupplierApiKey(SupplierItem item) {
+        String apiKey = supplierApiKeys.get(item.id());
+        if (!StringUtils.hasText(apiKey)) {
+            apiKey = item.apiKey();
         }
-        List<Map<String, Object>> categories = OBJECT_MAPPER.convertValue(typeList, LIST_MAP_TYPE);
-        Map<String, String> categoryNames = remoteCategoryNames(categories);
-        String selectedCategoryId = typeId == null || typeId == 0 ? "" : String.valueOf(typeId);
-        String selectedCategoryName = categoryNames.getOrDefault(selectedCategoryId, "");
-
-        Map<String, Object> body = chengquanBaseParams(item);
-        body.put("page", page);
-        body.put("page_size", limit);
-        if (StringUtils.hasText(selectedCategoryId)) {
-            body.put("type_id", selectedCategoryId);
-        }
-        body.put("sign", ChengquanSignatureUtil.sign(body, chengquanSecret(item)));
-        JsonNode listRoot = chengquanPostJson(item, "/coupon/type/goods/list", body, "goods list sync");
-        ensureChengquanOk(listRoot, "goods list sync");
-        JsonNode data = listRoot.path("data");
-        JsonNode listNode = data.isArray() ? data : firstExisting(data, "list", "records", "items", "data");
-        if (listNode == null || !listNode.isArray()) {
-            throw new IllegalStateException("chengquan goods list sync failed: data list is missing");
-        }
-        int total = intValue(firstExisting(data, "total", "count"), listNode.size());
-        List<RemoteGoodsItem> items = new ArrayList<>();
-        for (JsonNode node : listNode) {
-            RemoteGoodsItem remote = chengquanRemoteGoodsItem(item.id(), node, categoryNames, selectedCategoryId, selectedCategoryName);
-            if (!StringUtils.hasText(keyword) || normalize(remote.goodsName()).contains(normalize(keyword)) || normalize(remote.supplierGoodsId()).contains(normalize(keyword))) {
-                items.add(remote);
-            }
-        }
-        OffsetDateTime syncedAt = OffsetDateTime.now();
-        return new RemoteGoodsSyncResult(
-            item.id(),
-            syncedAt,
-            total,
-            items,
-            categories,
-            page,
-            limit,
-            "synced " + items.size() + " chengquan goods from remote total " + total
-        );
-    }
-
-    private RemoteGoodsSyncResult fetchFanchenGoods(SupplierItem item, String keyword, int page, int limit) {
-        validateFanchenCredentials(item);
-        Map<String, Object> body = fanchenBaseParams(item);
-        body.put("productid", "");
-        body.put("sign", FanchenSignatureUtil.sign(body, List.of("userid", "productid"), fanchenKey(item)));
-        JsonNode root = fanchenPostJson(item, "/fcuserproductprice.do", body, "goods list sync");
-        ensureFanchenOk(root, "goods list sync", Set.of("1"));
-        JsonNode listNode = firstExisting(root, "products", "data", "list", "items");
-        if (listNode == null || !listNode.isArray()) {
-            throw new IllegalStateException("fanchen goods list sync failed: products is missing");
-        }
-        List<RemoteGoodsItem> allItems = new ArrayList<>();
-        Map<String, String> categoryNames = new LinkedHashMap<>();
-        for (JsonNode node : listNode) {
-            String categoryId = textValue(node, "category_id", "categoryId");
-            String categoryName = textValue(node, "category_name", "categoryName");
-            if (StringUtils.hasText(categoryId) && StringUtils.hasText(categoryName)) {
-                categoryNames.put(categoryId, categoryName);
-            }
-            RemoteGoodsItem remote = fanchenRemoteGoodsItem(item.id(), node);
-            if (!StringUtils.hasText(keyword) || normalize(remote.goodsName()).contains(normalize(keyword)) || normalize(remote.supplierGoodsId()).contains(normalize(keyword))) {
-                allItems.add(remote);
-            }
-        }
-        int from = Math.max(0, (page - 1) * limit);
-        int to = Math.min(allItems.size(), from + limit);
-        List<RemoteGoodsItem> items = from >= allItems.size() ? List.of() : allItems.subList(from, to);
-        List<Map<String, Object>> categories = categoryNames.entrySet().stream()
-            .map(entry -> {
-                Map<String, Object> category = new LinkedHashMap<>();
-                category.put("id", entry.getKey());
-                category.put("name", entry.getValue());
-                return category;
-            })
-            .toList();
-        OffsetDateTime syncedAt = OffsetDateTime.now();
-        return new RemoteGoodsSyncResult(
-            item.id(),
-            syncedAt,
-            allItems.size(),
-            List.copyOf(items),
-            categories,
-            page,
-            limit,
-            "synced " + items.size() + " fanchen goods from remote total " + allItems.size()
-        );
-    }
-
-    private RemoteGoodsSyncResult fetchJingzhaoGoods(SupplierItem item, Long ignoredCategoryId, String keyword, int page, int limit) {
-        validateJingzhaoCredentials(item);
-        Map<String, Object> body = jingzhaoBaseParams(item);
-        body.put("sign", JingzhaoSignatureUtil.sign(body, jingzhaoKey(item)));
-        JsonNode root = jingzhaoPostJson(item, "/api/product-list", body, "goods list sync");
-        ensureJingzhaoOk(root, "goods list sync");
-        JsonNode listNode = root.path("data").isArray() ? root.path("data") : firstExisting(root.path("data"), "list", "records", "items", "data");
-        if (listNode == null || !listNode.isArray()) {
-            throw new IllegalStateException("jingzhao goods list sync failed: data list is missing");
-        }
-        List<RemoteGoodsItem> allItems = new ArrayList<>();
-        Map<String, String> categoriesByType = new LinkedHashMap<>();
-        for (JsonNode node : listNode) {
-            RemoteGoodsItem remote = jingzhaoRemoteGoodsItem(item.id(), node);
-            categoriesByType.putIfAbsent(remote.goodsType(), jingzhaoGoodsTypeLabel(remote.goodsType()));
-            if (!StringUtils.hasText(keyword) || normalize(remote.goodsName()).contains(normalize(keyword)) || normalize(remote.supplierGoodsId()).contains(normalize(keyword))) {
-                allItems.add(remote);
-            }
-        }
-        int from = Math.max(0, (page - 1) * limit);
-        int to = Math.min(allItems.size(), from + limit);
-        List<RemoteGoodsItem> items = from >= allItems.size() ? List.of() : allItems.subList(from, to);
-        List<Map<String, Object>> categories = categoriesByType.entrySet().stream()
-            .map(entry -> {
-                Map<String, Object> category = new LinkedHashMap<>();
-                category.put("id", entry.getKey());
-                category.put("name", entry.getValue());
-                return category;
-            })
-            .toList();
-        OffsetDateTime syncedAt = OffsetDateTime.now();
-        return new RemoteGoodsSyncResult(
-            item.id(),
-            syncedAt,
-            allItems.size(),
-            List.copyOf(items),
-            categories,
-            page,
-            limit,
-            "synced " + items.size() + " jingzhao goods from remote total " + allItems.size()
-        );
+        return defaultText(apiKey, "").trim();
     }
 
     private List<Map<String, Object>> kakayunCategories(JsonNode data) {
@@ -5693,18 +4450,6 @@ public class InMemoryShopRepository {
             channel == null ? null : channel.id(),
             OBJECT_MAPPER.convertValue(node, MAP_TYPE)
         );
-    }
-
-    private void validateKakayunCredentials(SupplierItem item) {
-        if (!StringUtils.hasText(item.baseUrl())) {
-            throw new IllegalArgumentException("kakayun baseUrl is required");
-        }
-        if (!StringUtils.hasText(kakayunIdentity(item))) {
-            throw new IllegalArgumentException("kakayun userid is required");
-        }
-        if (!StringUtils.hasText(kakayunApiKey(item))) {
-            throw new IllegalArgumentException("kakayun key is required");
-        }
     }
 
     private JsonNode kakayunPostJson(SupplierItem item, String path, Map<String, Object> bodyObject, String action) {
@@ -5767,426 +4512,6 @@ public class InMemoryShopRepository {
         }
     }
 
-    private BigDecimal kakayunBalance(JsonNode root) {
-        BigDecimal balance = optionalDecimalValue(root, "money", "balance", "user_money", "account_balance");
-        if (balance != null) {
-            return balance;
-        }
-        JsonNode data = root.path("data");
-        balance = optionalDecimalValue(data, "money", "balance", "user_money", "account_balance");
-        if (balance != null) {
-            return balance;
-        }
-        throw new IllegalStateException("kakayun balance refresh failed: balance field is missing");
-    }
-
-    private SupplierItem testFuluConnection(SupplierItem item) {
-        validateFuluCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能测试真实连接");
-        }
-        JsonNode root = fuluPostJson(item, "merchant.balance.query", Map.of(), "test connection");
-        ensureFuluOk(root, "test connection");
-        verifyFuluResponseSign(root, item, "test connection");
-        return item.withBalance(fuluBalance(root)).withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem refreshFuluBalance(SupplierItem item) {
-        validateFuluCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能刷新真实余额");
-        }
-        JsonNode root = fuluPostJson(item, "merchant.balance.query", Map.of(), "balance refresh");
-        ensureFuluOk(root, "balance refresh");
-        verifyFuluResponseSign(root, item, "balance refresh");
-        return item.withBalance(fuluBalance(root));
-    }
-
-    private SupplierItem testFengzhushouConnection(SupplierItem item) {
-        validateFengzhushouCredentials(item);
-        return item.withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem refreshFengzhushouBalance(SupplierItem item) {
-        validateFengzhushouCredentials(item);
-        return item.withBalance(item.balance() == null ? BigDecimal.ZERO : item.balance()).withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem testChengquanConnection(SupplierItem item) {
-        return refreshChengquanBalance(item).withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem refreshChengquanBalance(SupplierItem item) {
-        validateChengquanCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能刷新真实余额");
-        }
-        Map<String, Object> body = chengquanBaseParams(item);
-        body.put("sign", ChengquanSignatureUtil.sign(body, chengquanSecret(item)));
-        JsonNode root = chengquanPostJson(item, "/user/balance/get", body, "balance refresh");
-        ensureChengquanOk(root, "balance refresh");
-        BigDecimal balance = optionalDecimalValue(root.path("data"), "balance", "money", "amount");
-        if (balance == null) {
-            balance = optionalDecimalValue(root, "balance", "money", "amount");
-        }
-        if (balance == null) {
-            throw new IllegalStateException("chengquan balance refresh failed: balance field is missing");
-        }
-        return item.withBalance(balance).withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem testFanchenConnection(SupplierItem item) {
-        return refreshFanchenBalance(item).withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private SupplierItem refreshFanchenBalance(SupplierItem item) {
-        validateFanchenCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            throw new IllegalStateException("供应商地址是占位地址，不能刷新真实余额");
-        }
-        Map<String, Object> body = fanchenBaseParams(item);
-        body.put("sign", FanchenSignatureUtil.sign(body, List.of("userid"), fanchenKey(item)));
-        JsonNode root = fanchenPostJson(item, "/fcsearchbalance.do", body, "balance refresh");
-        ensureFanchenOk(root, "balance refresh", Set.of("1"));
-        BigDecimal balance = optionalDecimalValue(root, "balance", "fundbalance", "fundBalance");
-        if (balance == null) {
-            throw new IllegalStateException("fanchen balance refresh failed: balance field is missing");
-        }
-        return item.withBalance(balance).withLastSyncAt(OffsetDateTime.now());
-    }
-
-    private void validateFuluCredentials(SupplierItem item) {
-        if (!StringUtils.hasText(item.baseUrl())) {
-            throw new IllegalArgumentException("fulu baseUrl is required");
-        }
-        if (!StringUtils.hasText(fuluAppKey(item))) {
-            throw new IllegalArgumentException("fulu app_key is required");
-        }
-        if (!StringUtils.hasText(fuluAppSecret(item))) {
-            throw new IllegalArgumentException("fulu app_secret is required");
-        }
-    }
-
-    private void validateFengzhushouCredentials(SupplierItem item) {
-        if (!StringUtils.hasText(item.baseUrl())) {
-            throw new IllegalArgumentException("fengzhushou baseUrl is required");
-        }
-        if (!StringUtils.hasText(fengzhushouProjectCode(item))) {
-            throw new IllegalArgumentException("fengzhushou projectCode is required");
-        }
-        if (!StringUtils.hasText(fengzhushouSignKey(item))) {
-            throw new IllegalArgumentException("fengzhushou signKey is required");
-        }
-    }
-
-    private JsonNode fengzhushouPostJson(SupplierItem item, String path, Map<String, Object> body, String action) {
-        validateFengzhushouCredentials(item);
-        Duration timeout = Duration.ofSeconds(normalizedTimeoutSeconds(item.timeoutSeconds()));
-        try {
-            URI uri = URI.create(trimTrailingSlash(item.baseUrl().trim()) + path);
-            String payload = OBJECT_MAPPER.writeValueAsString(body == null ? Map.of() : body);
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                .timeout(timeout)
-                .version(HttpClient.Version.HTTP_1_1)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .header("User-Agent", "xiyiyun-fengzhushou-client/1.0")
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                .build();
-            HttpResponse<String> response = HttpClient.newBuilder()
-                .connectTimeout(timeout)
-                .build()
-                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("fengzhushou " + action + " failed: HTTP "
-                    + response.statusCode() + " " + abbreviate(response.body(), 300));
-            }
-            return OBJECT_MAPPER.readTree(response.body());
-        } catch (IllegalStateException ex) {
-            throw ex;
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("fengzhushou " + action + " interrupted");
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("fengzhushou " + action + " failed: invalid JSON payload or response");
-        } catch (Exception ex) {
-            throw new IllegalStateException("fengzhushou " + action + " failed: " + ex.getMessage());
-        }
-    }
-
-    private void validateChengquanCredentials(SupplierItem item) {
-        if (!StringUtils.hasText(item.baseUrl())) {
-            throw new IllegalArgumentException("chengquan baseUrl is required");
-        }
-        if (!StringUtils.hasText(chengquanAppId(item))) {
-            throw new IllegalArgumentException("chengquan app_id is required");
-        }
-        if (!StringUtils.hasText(chengquanSecret(item))) {
-            throw new IllegalArgumentException("chengquan key is required");
-        }
-    }
-
-    private Map<String, Object> chengquanBaseParams(SupplierItem item) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("app_id", chengquanAppId(item));
-        body.put("timestamp", String.valueOf(Instant.now().toEpochMilli()));
-        return body;
-    }
-
-    private JsonNode chengquanPostJson(SupplierItem item, String path, Map<String, Object> body, String action) {
-        validateChengquanCredentials(item);
-        Duration timeout = Duration.ofSeconds(normalizedTimeoutSeconds(item.timeoutSeconds()));
-        try {
-            URI uri = URI.create(trimTrailingSlash(item.baseUrl().trim()) + path);
-            String payload = OBJECT_MAPPER.writeValueAsString(body == null ? Map.of() : body);
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                .timeout(timeout)
-                .version(HttpClient.Version.HTTP_1_1)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .header("User-Agent", "xiyiyun-chengquan-client/1.0")
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                .build();
-            HttpResponse<String> response = HttpClient.newBuilder()
-                .connectTimeout(timeout)
-                .build()
-                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("chengquan " + action + " failed: HTTP "
-                    + response.statusCode() + " " + abbreviate(response.body(), 300));
-            }
-            return OBJECT_MAPPER.readTree(response.body());
-        } catch (IllegalStateException ex) {
-            throw ex;
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("chengquan " + action + " interrupted");
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("chengquan " + action + " failed: invalid JSON payload or response");
-        } catch (Exception ex) {
-            throw new IllegalStateException("chengquan " + action + " failed: " + ex.getMessage());
-        }
-    }
-
-    private void ensureChengquanOk(JsonNode root, String action) {
-        int code = intValue(firstExisting(root, "code", "retcode"), -1);
-        if (code != 7000 && code != 0) {
-            String message = textValue(root, "msg", "message", "error");
-            throw new IllegalStateException("chengquan " + action + " failed: code=" + code
-                + (StringUtils.hasText(message) ? " message=" + message : ""));
-        }
-    }
-
-    private SupplierItem testJingzhaoConnection(SupplierItem item) {
-        return refreshJingzhaoBalance(item);
-    }
-
-    private SupplierItem refreshJingzhaoBalance(SupplierItem item) {
-        validateJingzhaoCredentials(item);
-        if (isPlaceholderBaseUrl(item.baseUrl())) {
-            return item.withBalance(item.balance() == null ? BigDecimal.ZERO : item.balance());
-        }
-        Map<String, Object> body = jingzhaoBaseParams(item);
-        body.put("sign", JingzhaoSignatureUtil.sign(body, jingzhaoKey(item)));
-        JsonNode root = jingzhaoPostJson(item, "/api/customer", body, "balance refresh");
-        ensureJingzhaoOk(root, "balance refresh");
-        return item.withBalance(decimalValue(root.path("data"), "balance"));
-    }
-
-    private void validateJingzhaoCredentials(SupplierItem item) {
-        if (!StringUtils.hasText(item.baseUrl())) {
-            throw new IllegalArgumentException("jingzhao baseUrl is required");
-        }
-        if (!StringUtils.hasText(jingzhaoCustomerId(item))) {
-            throw new IllegalArgumentException("jingzhao customer_id is required");
-        }
-        if (!StringUtils.hasText(jingzhaoKey(item))) {
-            throw new IllegalArgumentException("jingzhao key is required");
-        }
-    }
-
-    private Map<String, Object> jingzhaoBaseParams(SupplierItem item) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("customer_id", jingzhaoCustomerId(item));
-        body.put("timestamp", String.valueOf(Instant.now().getEpochSecond()));
-        return body;
-    }
-
-    private JsonNode jingzhaoPostJson(SupplierItem item, String path, Map<String, Object> body, String action) {
-        validateJingzhaoCredentials(item);
-        Duration timeout = Duration.ofSeconds(normalizedTimeoutSeconds(item.timeoutSeconds()));
-        try {
-            URI uri = URI.create(trimTrailingSlash(item.baseUrl().trim()) + path);
-            String payload = JingzhaoSignatureUtil.formBody(body == null ? Map.of() : body);
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                .timeout(timeout)
-                .version(HttpClient.Version.HTTP_1_1)
-                .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-                .header("Accept", "application/json")
-                .header("User-Agent", "xiyiyun-jingzhao-client/1.0")
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                .build();
-            HttpResponse<String> response = HttpClient.newBuilder()
-                .connectTimeout(timeout)
-                .build()
-                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("jingzhao " + action + " failed: HTTP "
-                    + response.statusCode() + " " + abbreviate(response.body(), 300));
-            }
-            return OBJECT_MAPPER.readTree(response.body());
-        } catch (IllegalStateException ex) {
-            throw ex;
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("jingzhao " + action + " interrupted");
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("jingzhao " + action + " failed: invalid JSON payload or response");
-        } catch (Exception ex) {
-            throw new IllegalStateException("jingzhao " + action + " failed: " + ex.getMessage());
-        }
-    }
-
-    private void ensureJingzhaoOk(JsonNode root, String action) {
-        String code = textValue(root, "code");
-        if (!"ok".equalsIgnoreCase(defaultText(code, ""))) {
-            String message = textValue(root, "message", "msg", "error");
-            throw new IllegalStateException("jingzhao " + action + " failed: code=" + code
-                + (StringUtils.hasText(message) ? " message=" + message : ""));
-        }
-    }
-
-    private void validateFanchenCredentials(SupplierItem item) {
-        if (!StringUtils.hasText(item.baseUrl())) {
-            throw new IllegalArgumentException("fanchen baseUrl is required");
-        }
-        if (!StringUtils.hasText(fanchenUserId(item))) {
-            throw new IllegalArgumentException("fanchen userid is required");
-        }
-        if (!StringUtils.hasText(fanchenKey(item))) {
-            throw new IllegalArgumentException("fanchen key is required");
-        }
-    }
-
-    private Map<String, Object> fanchenBaseParams(SupplierItem item) {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("userid", fanchenUserId(item));
-        return body;
-    }
-
-    private JsonNode fanchenPostJson(SupplierItem item, String path, Map<String, Object> body, String action) {
-        validateFanchenCredentials(item);
-        Duration timeout = Duration.ofSeconds(normalizedTimeoutSeconds(item.timeoutSeconds()));
-        try {
-            URI uri = URI.create(trimTrailingSlash(item.baseUrl().trim()) + path);
-            String payload = formUrlEncoded(body == null ? Map.of() : body, GBK_CHARSET);
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                .timeout(timeout)
-                .version(HttpClient.Version.HTTP_1_1)
-                .header("Content-Type", "application/x-www-form-urlencoded; charset=GBK")
-                .header("Accept", "application/json")
-                .header("User-Agent", "xiyiyun-fanchen-client/1.0")
-                .POST(HttpRequest.BodyPublishers.ofString(payload, GBK_CHARSET))
-                .build();
-            HttpResponse<String> response = HttpClient.newBuilder()
-                .connectTimeout(timeout)
-                .build()
-                .send(request, HttpResponse.BodyHandlers.ofString(GBK_CHARSET));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("fanchen " + action + " failed: HTTP "
-                    + response.statusCode() + " " + abbreviate(response.body(), 300));
-            }
-            return OBJECT_MAPPER.readTree(response.body());
-        } catch (IllegalStateException ex) {
-            throw ex;
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("fanchen " + action + " interrupted");
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("fanchen " + action + " failed: invalid JSON response");
-        } catch (Exception ex) {
-            throw new IllegalStateException("fanchen " + action + " failed: " + ex.getMessage());
-        }
-    }
-
-    private void ensureFanchenOk(JsonNode root, String action, Set<String> successCodes) {
-        String code = textValue(root, "resultno");
-        if (!successCodes.contains(code)) {
-            String message = textValue(root, "remark1", "msg", "message");
-            throw new IllegalStateException("fanchen " + action + " failed: code=" + code
-                + (StringUtils.hasText(message) ? " message=" + message : ""));
-        }
-    }
-
-    private JsonNode fuluPostJson(SupplierItem item, String method, Map<String, Object> bizObject, String action) {
-        validateFuluCredentials(item);
-        Duration timeout = Duration.ofSeconds(normalizedTimeoutSeconds(item.timeoutSeconds()));
-        Map<String, Object> biz = new LinkedHashMap<>();
-        if (bizObject != null) {
-            biz.putAll(bizObject);
-        }
-        try {
-            Map<String, String> body = new LinkedHashMap<>();
-            body.put("app_key", fuluAppKey(item));
-            body.put("method", method);
-            body.put("timestamp", FULU_TIMESTAMP_FORMAT.format(ZonedDateTime.now(CHINA_ZONE)));
-            body.put("version", "1.0");
-            body.put("format", "json");
-            body.put("charset", "utf-8");
-            body.put("sign_type", "md5");
-            body.put("biz_content", OBJECT_MAPPER.writeValueAsString(biz));
-            body.put("sign", FuluSignatureUtil.requestSign(body, fuluAppSecret(item)));
-            String payload = OBJECT_MAPPER.writeValueAsString(body);
-            HttpRequest request = HttpRequest.newBuilder(URI.create(item.baseUrl().trim()))
-                .timeout(timeout)
-                .version(HttpClient.Version.HTTP_1_1)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .header("User-Agent", "xiyiyun-fulu-client/1.0")
-                .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
-                .build();
-            HttpResponse<String> response = HttpClient.newBuilder()
-                .connectTimeout(timeout)
-                .build()
-                .send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                throw new IllegalStateException("fulu " + action + " failed: HTTP "
-                    + response.statusCode() + " " + abbreviate(response.body(), 300));
-            }
-            return OBJECT_MAPPER.readTree(response.body());
-        } catch (IllegalStateException ex) {
-            throw ex;
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("fulu " + action + " interrupted");
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("fulu " + action + " failed: invalid JSON payload or response");
-        } catch (Exception ex) {
-            throw new IllegalStateException("fulu " + action + " failed: " + ex.getMessage());
-        }
-    }
-
-    private void ensureFuluOk(JsonNode root, String action) {
-        int code = intValue(root.path("code"), -1);
-        if (code != 200) {
-            String message = textValue(root, "msg", "message", "sub_msg", "error");
-            throw new IllegalStateException("fulu " + action + " failed: code=" + code
-                + (StringUtils.hasText(message) ? " message=" + message : ""));
-        }
-    }
-
-    private void verifyFuluResponseSign(JsonNode root, SupplierItem item, String action) {
-        String sign = textValue(root, "sign");
-        String result = root.path("result").asText("");
-        if (!StringUtils.hasText(sign) || !StringUtils.hasText(result)) {
-            return;
-        }
-        String expected = FuluSignatureUtil.responseSign(result, fuluAppSecret(item));
-        if (!Objects.equals(sign.trim().toLowerCase(Locale.ROOT), expected)) {
-            throw new IllegalStateException("fulu " + action + " failed: invalid response sign");
-        }
-    }
-
     private SupplierItem resolveFuluCallbackSupplier(Long supplierId, Map<String, Object> body) {
         if (supplierId != null) {
             SupplierItem supplier = requiredSupplier(supplierId);
@@ -6234,87 +4559,6 @@ public class InMemoryShopRepository {
             return OBJECT_MAPPER.writeValueAsString(value);
         } catch (JsonProcessingException ex) {
             return String.valueOf(value);
-        }
-    }
-
-    private BigDecimal fuluBalance(JsonNode root) {
-        String result = root.path("result").asText("");
-        if (!StringUtils.hasText(result)) {
-            throw new IllegalStateException("fulu balance refresh failed: result is empty");
-        }
-        try {
-            JsonNode node = OBJECT_MAPPER.readTree(result);
-            JsonNode balances = firstExisting(node, "Balances", "balances", "BalanceList", "balanceList");
-            BigDecimal fallback = optionalDecimalValue(node, "Balance", "balance", "amount");
-            if (balances != null && balances.isArray()) {
-                for (JsonNode item : balances) {
-                    int accountType = intValue(firstExisting(item, "AccountType", "accountType"), -1);
-                    BigDecimal balance = optionalDecimalValue(item, "Balance", "balance");
-                    if (accountType == 1 && balance != null) {
-                        return balance;
-                    }
-                    if (fallback == null && balance != null) {
-                        fallback = balance;
-                    }
-                }
-            }
-            if (fallback != null) {
-                return fallback;
-            }
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("fulu balance refresh failed: invalid result JSON");
-        }
-        throw new IllegalStateException("fulu balance refresh failed: balance field is missing");
-    }
-
-    private FuluOrderStatus fuluOrderStatusFromResult(String result) {
-        if (!StringUtils.hasText(result)) {
-            throw new IllegalStateException("fulu order info sync failed: result is empty");
-        }
-        try {
-            JsonNode node = OBJECT_MAPPER.readTree(result);
-            List<String> cards = new ArrayList<>();
-            JsonNode cardList = firstExisting(node, "card_pwds", "cardPwds", "cards", "card_list");
-            if (cardList != null && cardList.isArray()) {
-                for (JsonNode card : cardList) {
-                    String cardNo = textValue(card, "card_no", "cardNo", "card");
-                    String cardPwd = textValue(card, "card_pwd", "cardPwd", "card_password", "password");
-                    String expireTime = textValue(card, "expire_time", "expireTime");
-                    String line = StringUtils.hasText(cardNo)
-                        ? "卡号：" + cardNo + (StringUtils.hasText(cardPwd) ? " 卡密：" + cardPwd : "")
-                        : (StringUtils.hasText(cardPwd) ? "卡密：" + cardPwd : "");
-                    if (StringUtils.hasText(line) && StringUtils.hasText(expireTime)) {
-                        line = line + " 有效期：" + expireTime;
-                    }
-                    if (StringUtils.hasText(line)) {
-                        cards.add(line);
-                    }
-                }
-            }
-            List<String> hints = new ArrayList<>();
-            for (String value : List.of(
-                textValue(node, "charge_remark", "chargeRemark", "message", "msg"),
-                textValue(node, "inner_charge_remark", "innerChargeRemark"),
-                textValue(node, "express_name", "expressName"),
-                textValue(node, "express_no", "expressNo")
-            )) {
-                if (StringUtils.hasText(value)) {
-                    hints.add(value);
-                }
-            }
-            return new FuluOrderStatus(
-                textValue(node, "order_id", "orderId", "order_no", "orderNo"),
-                textValue(node, "customer_order_no", "customerOrderNo"),
-                textValue(node, "product_id", "productId"),
-                textValue(node, "product_name", "productName"),
-                intValue(firstExisting(node, "order_status", "orderStatus", "status"), 0),
-                String.join("；", hints),
-                optionalDecimalValue(node, "total_price", "totalPrice", "customer_price", "customerPrice"),
-                List.copyOf(cards),
-                abbreviate(node.toString(), 1200)
-            );
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("fulu order info sync failed: invalid result JSON");
         }
     }
 
@@ -6484,7 +4728,7 @@ public class InMemoryShopRepository {
         if (!StringUtils.hasText(sign)) {
             throw new IllegalArgumentException("jingzhao callback sign is required");
         }
-        String expected = JingzhaoSignatureUtil.sign(body, jingzhaoKey(supplier));
+        String expected = JingzhaoSignatureUtil.callbackSign(body, jingzhaoKey(supplier));
         if (!Objects.equals(sign.trim().toLowerCase(Locale.ROOT), expected)) {
             throw new IllegalArgumentException("jingzhao callback sign invalid");
         }
@@ -6585,21 +4829,6 @@ public class InMemoryShopRepository {
         }
     }
 
-    private BigDecimal kasushouBalance(JsonNode root) {
-        BigDecimal balance = optionalDecimalValue(root,
-            "balance", "money", "user_money", "userMoney", "amount", "account_balance", "accountBalance");
-        if (balance != null) {
-            return balance;
-        }
-        JsonNode data = root.path("data");
-        balance = optionalDecimalValue(data,
-            "balance", "money", "user_money", "userMoney", "amount", "account_balance", "accountBalance");
-        if (balance != null) {
-            return balance;
-        }
-        throw new IllegalStateException("kasushou balance refresh failed: balance field is missing");
-    }
-
     private List<Map<String, Object>> kasushouCategories(JsonNode data) {
         JsonNode categoryNode = data.isArray() ? data : firstExisting(data, "list", "cate", "cates", "category", "categories");
         if (categoryNode == null || !categoryNode.isArray()) {
@@ -6680,72 +4909,6 @@ public class InMemoryShopRepository {
         }
     }
 
-    private List<RemoteGoodsItem> enrichKasushouCategoryInfo(
-        SupplierItem item,
-        List<Map<String, Object>> categories,
-        Map<String, String> categoryNames,
-        String keyword,
-        List<RemoteGoodsItem> items
-    ) {
-        Set<String> missingIds = items.stream()
-            .filter(goods -> !StringUtils.hasText(goods.categoryName()))
-            .map(RemoteGoodsItem::supplierGoodsId)
-            .filter(StringUtils::hasText)
-            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-        if (missingIds.isEmpty()) {
-            return items;
-        }
-
-        Map<String, RemoteCategoryRef> matchedCategories = new java.util.HashMap<>();
-        int requests = 0;
-        for (RemoteCategoryRef category : prioritizedRemoteCategoryRefs(categories, keyword)) {
-            if (missingIds.isEmpty() || requests >= KASUSHOU_CATEGORY_ENRICH_MAX_REQUESTS) {
-                break;
-            }
-            int page = 1;
-            int total = Integer.MAX_VALUE;
-            while (missingIds.size() > 0
-                && page <= KASUSHOU_CATEGORY_ENRICH_MAX_PAGES
-                && (page - 1) * KASUSHOU_CATEGORY_ENRICH_LIMIT < total
-                && requests < KASUSHOU_CATEGORY_ENRICH_MAX_REQUESTS) {
-                requests++;
-                Map<String, Object> body = new java.util.LinkedHashMap<>();
-                body.put("cate_id", category.id());
-                body.put("keyword", defaultText(keyword, ""));
-                body.put("limit", KASUSHOU_CATEGORY_ENRICH_LIMIT);
-                body.put("page", page);
-                JsonNode root = kasushouPostJson(item, "/api/v1/goods/list", body, "category goods lookup");
-                ensureKasushouOk(root, "category goods lookup");
-                JsonNode data = root.path("data");
-                total = intValue(data.path("total"), 0);
-                JsonNode listNode = data.path("list");
-                if (!listNode.isArray()) {
-                    break;
-                }
-                for (JsonNode node : listNode) {
-                    String remoteId = textValue(node, "id", "goods_id", "goodsId");
-                    if (missingIds.remove(remoteId)) {
-                        matchedCategories.put(remoteId, category);
-                    }
-                }
-                page++;
-            }
-        }
-
-        if (matchedCategories.isEmpty()) {
-            return items;
-        }
-        return items.stream()
-            .map(goods -> {
-                RemoteCategoryRef category = matchedCategories.get(goods.supplierGoodsId());
-                if (category == null) {
-                    return goods;
-                }
-                return remoteGoodsItemWithCategory(goods, category.id(), categoryNames.getOrDefault(category.id(), category.name()));
-            })
-            .toList();
-    }
-
     private List<RemoteCategoryRef> prioritizedRemoteCategoryRefs(List<Map<String, Object>> categories, String keyword) {
         String normalizedKeyword = normalize(keyword);
         List<RemoteCategoryRef> refs = new ArrayList<>();
@@ -6821,10 +4984,6 @@ public class InMemoryShopRepository {
     }
 
     private record RemoteCategoryRef(String id, String name, int depth) {
-    }
-
-    private URI kasushouUserInfoUri(String baseUrl) {
-        return kasushouUri(baseUrl, "/api/v1/user/info");
     }
 
     private URI kasushouUri(String baseUrl, String path) {
@@ -6904,129 +5063,61 @@ public class InMemoryShopRepository {
             || "on".equals(normalized);
     }
 
+    /**
+     * 批次3：原为 7 个 {@code isXxxSupplier} + 7 个 {@code isXxxPlatform}（各自一份别名表），
+     * 别名表已原样搬到 {@link SupplierPlatform} 的枚举常量上（含 {@code -} 转 {@code _} 归一化）。
+     * 这里只剩「回调报文按 app_key/账号找供应商」这一类身份判定还需要按家过滤。
+     */
+    private boolean isPlatform(SupplierItem item, SupplierPlatform platform) {
+        return item != null && platform.matches(item.platformType());
+    }
+
     private boolean isKasushouSupplier(SupplierItem item) {
-        return isKasushouPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.KASUSHOU);
     }
 
     private boolean isKakayunSupplier(SupplierItem item) {
-        return item != null && isKakayunPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.KAKAYUN);
     }
 
     private boolean isFuluSupplier(SupplierItem item) {
-        return item != null && isFuluPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.FULU);
     }
 
     private boolean isFengzhushouSupplier(SupplierItem item) {
-        return item != null && isFengzhushouPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.FENGZHUSHOU);
     }
 
     private boolean isChengquanSupplier(SupplierItem item) {
-        return item != null && isChengquanPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.CHENGQUAN);
     }
 
     private boolean isFanchenSupplier(SupplierItem item) {
-        return item != null && isFanchenPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.FANCHEN);
     }
 
     private boolean isJingzhaoSupplier(SupplierItem item) {
-        return item != null && isJingzhaoPlatform(item.platformType());
+        return isPlatform(item, SupplierPlatform.JINGZHAO);
     }
 
-    private boolean isApiSupplier(SupplierItem item) {
-        return item != null && isApiSupplierPlatform(item.platformType());
-    }
-
+    /**
+     * 批次3：原为「isApiSupplier(卡速售 or 咔咔云) or 橙券 or 梵尘 or 京兆」的 4 段或串，
+     * 现改为查注册表 + 适配器声明的能力位。新增一家供应商不再需要回来改这里。
+     */
     private boolean supportsRemoteGoodsSync(SupplierItem item) {
-        return isApiSupplier(item) || isChengquanSupplier(item) || isFanchenSupplier(item) || isJingzhaoSupplier(item);
+        return supplierAdapters.find(item).map(SupplierAdapter::supportsRemoteGoodsSync).orElse(false);
     }
 
-    private boolean isApiSupplierPlatform(String platformType) {
-        return isKasushouPlatform(platformType) || isKakayunPlatform(platformType);
-    }
-
-    private boolean isKasushouPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        return "kasushou_2".equals(normalizedPlatformType)
-            || "kasushou".equals(normalizedPlatformType)
-            || "kasu".equals(normalizedPlatformType);
-    }
-
-    private boolean isKakayunPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        return "kakayun".equals(normalizedPlatformType)
-            || "kaka_yun".equals(normalizedPlatformType)
-            || "kky".equals(normalizedPlatformType)
-            || "卡卡云".equals(defaultText(platformType, "").trim());
-    }
-
-    private boolean isFuluPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        String raw = defaultText(platformType, "").trim();
-        return "fulu".equals(normalizedPlatformType)
-            || "fulu_new".equals(normalizedPlatformType)
-            || "fulu_new_platform".equals(normalizedPlatformType)
-            || "福禄".equals(raw)
-            || "福禄新平台".equals(raw);
-    }
-
-    private boolean isFengzhushouPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        String raw = defaultText(platformType, "").trim();
-        return "fengzhushou".equals(normalizedPlatformType)
-            || "feng_zhushou".equals(normalizedPlatformType)
-            || "fzs".equals(normalizedPlatformType)
-            || "phone580".equals(normalizedPlatformType)
-            || "蜂助手".equals(raw)
-            || "蜂助手直充".equals(raw);
-    }
-
-    private boolean isChengquanPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        String raw = defaultText(platformType, "").trim();
-        return "chengquan".equals(normalizedPlatformType)
-            || "dx_chengquan".equals(normalizedPlatformType)
-            || "dingxin_chengquan".equals(normalizedPlatformType)
-            || "橙券".equals(raw)
-            || "鼎信橙券".equals(raw);
-    }
-
-    private boolean isFanchenPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        String raw = defaultText(platformType, "").trim();
-        return "fanchen_rj".equals(normalizedPlatformType)
-            || "fanchen".equals(normalizedPlatformType)
-            || "zhejiang_fanchen".equals(normalizedPlatformType)
-            || "梵尘瑞景".equals(raw)
-            || "浙江梵尘".equals(raw);
-    }
-
-    private boolean isJingzhaoPlatform(String platformType) {
-        String normalizedPlatformType = normalize(platformType).replace("-", "_");
-        String raw = defaultText(platformType, "").trim();
-        return "jingzhao".equals(normalizedPlatformType)
-            || "jingzhao_yun".equals(normalizedPlatformType)
-            || "xhygo".equals(normalizedPlatformType)
-            || "京兆".equals(raw)
-            || "京兆云".equals(raw);
-    }
-
+    /**
+     * 批次3：原为 5 段 if 逐家写死中文名（卡速售/咔咔云不在其中，回落 "该平台"）。
+     * 现改为查注册表取 displayName，仅对「不提供单品查询接口」的 5 家生效，
+     * 命中集合与回落文案与原实现完全一致。
+     */
     private String platformLabelForManualSupplier(SupplierItem item) {
-        if (isFuluSupplier(item)) {
-            return "福禄新平台";
-        }
-        if (isFengzhushouSupplier(item)) {
-            return "蜂助手";
-        }
-        if (isChengquanSupplier(item)) {
-            return "鼎信橙券";
-        }
-        if (isFanchenSupplier(item)) {
-            return "浙江梵尘";
-        }
-        if (isJingzhaoSupplier(item)) {
-            return "京兆云";
-        }
-        return "该平台";
+        return supplierAdapters.find(item)
+            .filter(adapter -> !adapter.supportsSingleGoodsQuery())
+            .map(SupplierAdapter::displayName)
+            .orElse("该平台");
     }
 
     private String kasushouIdentity(SupplierItem item) {
@@ -7065,7 +5156,14 @@ public class InMemoryShopRepository {
     }
 
     private String normalizedCallbackUrl(String callbackUrl) {
-        return defaultText(callbackUrl, "");
+        if (!StringUtils.hasText(callbackUrl)) {
+            return "";
+        }
+        String normalized = SupplierCallbackUrlResolver.normalizeCustomUrl(callbackUrl);
+        if (!StringUtils.hasText(normalized)) {
+            throw new IllegalArgumentException("callbackUrl must be a valid http or https URL");
+        }
+        return normalized;
     }
 
     private String normalizeClientIp(String value) {
@@ -7117,108 +5215,109 @@ public class InMemoryShopRepository {
         return value.substring(0, maxLength) + "...";
     }
 
+
     private UserItem requiredUser(Long id) {
-        UserItem item = findUserSnapshot(id).orElse(null);
-        if (item == null) {
-            throw new IllegalArgumentException("user not found");
-        }
-        return item;
+        return userService.requiredUser(id);
     }
 
-    public synchronized CardImportResult importCards(Long targetGoodsId, CardImportRequest request) {
-        if (findGoodsSnapshot(targetGoodsId).isEmpty()) {
-            throw new IllegalArgumentException("goods not found");
-        }
-        List<String> lines = cardLines(request);
-        int duplicateCount = 0;
-        List<Integer> failedLines = new ArrayList<>();
-        Set<String> seenInRequest = new LinkedHashSet<>();
-        Set<String> existing = new LinkedHashSet<>(cards.values().stream()
-            .filter(card -> Objects.equals(card.goodsId(), targetGoodsId))
-            .map(CardSecret::content)
-            .toList());
+    public CardImportResult importCards(Long targetGoodsId, CardImportRequest request) {
+        synchronized (cardLock) {
+            if (findGoodsSnapshot(targetGoodsId).isEmpty()) {
+                throw new IllegalArgumentException("goods not found");
+            }
+            List<String> lines = cardLines(request);
+            int duplicateCount = 0;
+            List<Integer> failedLines = new ArrayList<>();
+            Set<String> seenInRequest = new LinkedHashSet<>();
+            Set<String> existing = new LinkedHashSet<>(cards.values().stream()
+                .filter(card -> Objects.equals(card.goodsId(), targetGoodsId))
+                .map(CardSecret::content)
+                .toList());
 
-        int lineNo = 0;
-        int successCount = 0;
-        for (String raw : lines) {
-            lineNo++;
-            String content = raw == null ? "" : raw.trim();
-            if (!StringUtils.hasText(content)) {
-                failedLines.add(lineNo);
-                continue;
+            int lineNo = 0;
+            int successCount = 0;
+            for (String raw : lines) {
+                lineNo++;
+                String content = raw == null ? "" : raw.trim();
+                if (!StringUtils.hasText(content)) {
+                    failedLines.add(lineNo);
+                    continue;
+                }
+                if (existing.contains(content) || !seenInRequest.add(content)) {
+                    duplicateCount++;
+                    continue;
+                }
+                Long id = cardId.getAndIncrement();
+                CardSecret card = new CardSecret(
+                    id,
+                    targetGoodsId,
+                    "CARD-" + id,
+                    mask(content),
+                    content,
+                    mask(content),
+                    "AVAILABLE",
+                    null,
+                    OffsetDateTime.now(),
+                    null
+                );
+                cards.put(id, card);
+                persistImportedCard(card);
+                successCount++;
             }
-            if (existing.contains(content) || !seenInRequest.add(content)) {
-                duplicateCount++;
-                continue;
-            }
-            Long id = cardId.getAndIncrement();
-            CardSecret card = new CardSecret(
-                id,
-                targetGoodsId,
-                "CARD-" + id,
-                mask(content),
-                content,
-                mask(content),
-                "AVAILABLE",
-                null,
-                OffsetDateTime.now(),
-                null
-            );
-            cards.put(id, card);
-            persistImportedCard(card);
-            successCount++;
+            refreshGoodsStock(targetGoodsId);
+            return new CardImportResult(targetGoodsId, lines.size(), successCount, duplicateCount, List.copyOf(failedLines));
         }
-        refreshGoodsStock(targetGoodsId);
-        return new CardImportResult(targetGoodsId, lines.size(), successCount, duplicateCount, List.copyOf(failedLines));
     }
 
-    public synchronized CardImportResult importCardKindCards(Long targetCardKindId, CardImportRequest request) {
-        if (!cardKinds.containsKey(targetCardKindId)) {
-            throw new IllegalArgumentException("card kind not found");
-        }
-        List<String> lines = cardLines(request);
-        int duplicateCount = 0;
-        List<Integer> failedLines = new ArrayList<>();
-        Set<String> seenInRequest = new LinkedHashSet<>();
-        Set<String> existing = new LinkedHashSet<>(cards.values().stream()
-            .filter(card -> Objects.equals(card.cardKindId(), targetCardKindId))
-            .map(CardSecret::content)
-            .toList());
+    public CardImportResult importCardKindCards(Long targetCardKindId, CardImportRequest request) {
+        synchronized (cardLock) {
+            if (!catalogService.cardKindsMap().containsKey(targetCardKindId)) {
+                throw new IllegalArgumentException("card kind not found");
+            }
+            List<String> lines = cardLines(request);
+            int duplicateCount = 0;
+            List<Integer> failedLines = new ArrayList<>();
+            Set<String> seenInRequest = new LinkedHashSet<>();
+            Set<String> existing = new LinkedHashSet<>(cards.values().stream()
+                .filter(card -> Objects.equals(card.cardKindId(), targetCardKindId))
+                .map(CardSecret::content)
+                .toList());
 
-        int lineNo = 0;
-        int successCount = 0;
-        OffsetDateTime importedAt = OffsetDateTime.now();
-        for (String raw : lines) {
-            lineNo++;
-            String content = raw == null ? "" : raw.trim();
-            if (!StringUtils.hasText(content)) {
-                failedLines.add(lineNo);
-                continue;
+            int lineNo = 0;
+            int successCount = 0;
+            OffsetDateTime importedAt = OffsetDateTime.now();
+            for (String raw : lines) {
+                lineNo++;
+                String content = raw == null ? "" : raw.trim();
+                if (!StringUtils.hasText(content)) {
+                    failedLines.add(lineNo);
+                    continue;
+                }
+                if (existing.contains(content) || !seenInRequest.add(content)) {
+                    duplicateCount++;
+                    continue;
+                }
+                Long id = cardId.getAndIncrement();
+                CardSecret card = new CardSecret(
+                    id,
+                    null,
+                    "CARD-" + id,
+                    mask(content),
+                    content,
+                    mask(content),
+                    "AVAILABLE",
+                    null,
+                    importedAt,
+                    null,
+                    targetCardKindId
+                );
+                cards.put(id, card);
+                persistImportedCard(card);
+                successCount++;
             }
-            if (existing.contains(content) || !seenInRequest.add(content)) {
-                duplicateCount++;
-                continue;
-            }
-            Long id = cardId.getAndIncrement();
-            CardSecret card = new CardSecret(
-                id,
-                null,
-                "CARD-" + id,
-                mask(content),
-                content,
-                mask(content),
-                "AVAILABLE",
-                null,
-                importedAt,
-                null,
-                targetCardKindId
-            );
-            cards.put(id, card);
-            persistImportedCard(card);
-            successCount++;
+            refreshGoodsStockForCardKind(targetCardKindId);
+            return new CardImportResult(null, lines.size(), successCount, duplicateCount, List.copyOf(failedLines), targetCardKindId);
         }
-        refreshGoodsStockForCardKind(targetCardKindId);
-        return new CardImportResult(null, lines.size(), successCount, duplicateCount, List.copyOf(failedLines), targetCardKindId);
     }
 
     public List<CardSecret> listCards(Long goodsId) {
@@ -7242,7 +5341,7 @@ public class InMemoryShopRepository {
     }
 
     public List<CardSecret> listCardKindCards(Long cardKindId) {
-        if (!cardKinds.containsKey(cardKindId)) {
+        if (!catalogService.cardKindsMap().containsKey(cardKindId)) {
             throw new IllegalArgumentException("card kind not found");
         }
         return cards.values().stream()
@@ -7263,6 +5362,35 @@ public class InMemoryShopRepository {
             .sorted(Comparator.comparing(CardSecret::id))
             .toList();
     }
+
+    private Optional<OrderItem> findIdempotentOrder(Long userId, String requestId) {
+        String normalizedRequestId = defaultText(requestId, "").trim();
+        if (!StringUtils.hasText(normalizedRequestId)) {
+            return Optional.empty();
+        }
+        if (persistentOrderStore != null) {
+            return persistentOrderStore.findOrderByRequestId(userId, normalizedRequestId);
+        }
+        return allOrderSnapshots().stream()
+            .filter(order -> Objects.equals(order.userId(), userId))
+            .filter(order -> Objects.equals(defaultText(order.requestId(), "").trim(), normalizedRequestId))
+            .findFirst();
+    }
+
+    private boolean sameOrderRequest(OrderItem order, CreateOrderRequest request, String sourcePlatform, int quantity) {
+        return Objects.equals(order.goodsId(), request.goodsId())
+            && Objects.equals(order.quantity(), quantity)
+            && Objects.equals(normalizedOrderText(order.rechargeAccount()), normalizedOrderText(legacyRechargeAccount(request)))
+            && Objects.equals(order.rechargeFields(), normalizedRechargeFields(request.rechargeFields()))
+            && Objects.equals(normalizedOrderText(order.buyerRemark()), normalizedOrderText(request.buyerRemark()))
+            && Objects.equals(normalizeSalePlatform(order.platform()), normalizeSalePlatform(sourcePlatform));
+    }
+
+    private String normalizedOrderText(String value) {
+        return defaultText(value, "").trim();
+    }
+
+
 
     private OrderItem buildOrder(
         String orderNo,
@@ -7293,7 +5421,8 @@ public class InMemoryShopRepository {
             item.price(),
             item.price().multiply(BigDecimal.valueOf(quantity)),
             status,
-            request.rechargeAccount(),
+            legacyRechargeAccount(request),
+            normalizedRechargeFields(request.rechargeFields()),
             request.buyerRemark(),
             request.requestId(),
             null,
@@ -7320,30 +5449,8 @@ public class InMemoryShopRepository {
         };
     }
 
-    private void validateGoodsSalePlatform(GoodsItem item, String platform) {
-        if (!goodsAllowsPlatform(item, platform)) {
-            throw new IllegalStateException("该商品未开放当前端购买。");
-        }
-    }
 
-    private boolean goodsAllowsPlatform(GoodsItem item, String platform) {
-        String normalizedPlatform = normalizeSalePlatform(platform);
-        if (!StringUtils.hasText(normalizedPlatform)) {
-            return false;
-        }
-        List<String> available = normalizeSalePlatforms(item.availablePlatforms());
-        List<String> forbidden = normalizeSalePlatforms(item.forbiddenPlatforms());
-        boolean hasSalesTerminalRestriction = available.stream().anyMatch(SALES_TERMINAL_PLATFORMS::contains);
-        return !platformListContains(forbidden, normalizedPlatform)
-            && (!hasSalesTerminalRestriction || available.contains("all") || platformListContains(available, normalizedPlatform));
-    }
 
-    private boolean platformListContains(List<String> platforms, String platform) {
-        if (platforms.contains(platform)) {
-            return true;
-        }
-        return "web".equals(platform) && platforms.contains("pc");
-    }
 
     private String nextOrderNo(Long userId) {
         String normalizedUserId = userId == null ? "00000" : String.valueOf(userId);
@@ -7388,12 +5495,28 @@ public class InMemoryShopRepository {
         return payment;
     }
 
+    /**
+     * 建退款单<b>并把钱退回去</b>（缺陷 A1 的修复落点）。
+     *
+     * <p>原实现只做了三件事：{@code refunds.put} + 快照落库 + 写操作日志。
+     * <b>一分钱都没退</b>。订单被标成 REFUNDED，钱留在平台账上，
+     * 用户看到"已退款"但余额不动——这是最严重的资金缺陷。
+     *
+     * <p>现在退款走 {@link FundsLedgerStore#refundToBalance}，在<b>同一个数据库事务</b>里
+     * 完成「写退款记录 + 余额 {@code balance = balance + ?} + 写 CREDIT 流水」。
+     * 幂等由 {@code uk_balance_tx_biz (ORDER_REFUND, orderNo)} 保证：
+     * 重复调用不会重复退钱，也不会产生第二条退款单。
+     */
     private RefundItem createRefund(OrderItem order, String reason) {
-        Optional<RefundItem> existing = refunds.values().stream()
-            .filter(refund -> Objects.equals(refund.orderNo(), order.orderNo()))
-            .findFirst();
+        Optional<RefundItem> existing = findExistingRefund(order.orderNo());
         if (existing.isPresent()) {
-            return existing.get();
+            RefundItem refund = existing.get();
+            if (fundsLedgerEnabled()) {
+                // 历史脏数据补救：退款单已存在但从没真正退过钱的订单，
+                // 这里会把钱补上（幂等键保证只补一次）。
+                settleRefund(refund, reason);
+            }
+            return refund;
         }
         OffsetDateTime now = OffsetDateTime.now();
         RefundItem refund = new RefundItem(
@@ -7407,12 +5530,53 @@ public class InMemoryShopRepository {
             now,
             now
         );
+        if (fundsLedgerEnabled()) {
+            settleRefund(refund, reason);
+        } else {
+            persistRefundSnapshot(refund);
+        }
         refunds.put(refund.refundNo(), refund);
-        persistRefundSnapshot(refund);
         appendOperation("REFUND_CREATE", "REFUND", refund.refundNo(), reason);
         return refund;
     }
 
+    /** 退款单 + 加回余额 + CREDIT 流水，同一事务；幂等。 */
+    private void settleRefund(RefundItem refund, String reason) {
+        fundsLedgerStore.refundToBalance(refund, reason);
+        userService.usersMap().remove(refund.userId());
+    }
+
+    /** 查已存在的退款单：内存优先，持久化模式回查 DB（内存 Map 可能是空的）。 */
+    private Optional<RefundItem> findExistingRefund(String orderNo) {
+        Optional<RefundItem> inMemory = refunds.values().stream()
+            .filter(refund -> Objects.equals(refund.orderNo(), orderNo))
+            .findFirst();
+        if (inMemory.isPresent()) {
+            return inMemory;
+        }
+        if (persistentOrderStore == null) {
+            return Optional.empty();
+        }
+        try {
+            return persistentOrderStore.listRefunds().stream()
+                .filter(refund -> Objects.equals(refund.orderNo(), orderNo))
+                .findFirst();
+        } catch (RuntimeException ex) {
+            recordReadFallback("REFUND", defaultText(orderNo, ""), ex);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 记录支付回调。
+     *
+     * <p>批次4：改成<b>按幂等键落库</b>。原实现每次重放都无条件插一行，
+     * 10 次重放留 10 行；006 迁移建好的 {@code idempotency_key} 列从未被写入，
+     * 而 MySQL 唯一索引允许多个 NULL，于是 {@code uk_payment_callback_idem} 形同虚设。
+     *
+     * <p>现在幂等键由 provider + 支付单号 + 订单号 + 回调状态 + 渠道流水号 计算，
+     * 用 {@code INSERT IGNORE} 交给唯一索引去重，重放只留第一行。
+     */
     public void recordPaymentCallback(String provider, PaymentCallbackRequest request, String result, String message) {
         Long id = paymentCallbackLogId.getAndIncrement();
         PaymentCallbackLogItem log = new PaymentCallbackLogItem(
@@ -7427,6 +5591,10 @@ public class InMemoryShopRepository {
             OffsetDateTime.now()
         );
         paymentCallbackLogs.put(id, log);
+        if (fundsLedgerEnabled()) {
+            fundsLedgerStore.recordCallbackOnce(log);
+            return;
+        }
         persistPaymentCallbackLog(log);
     }
 
@@ -7438,6 +5606,7 @@ public class InMemoryShopRepository {
             persistentOrderStore.saveOrderSnapshot(order);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "ORDER", order.orderNo(), persistenceErrorMessage(ex));
+            throw ex;
         }
     }
 
@@ -7449,6 +5618,7 @@ public class InMemoryShopRepository {
             persistentOrderStore.savePaymentSnapshot(payment, null);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "PAYMENT", payment.paymentNo(), persistenceErrorMessage(ex));
+            throw ex;
         }
     }
 
@@ -7471,6 +5641,7 @@ public class InMemoryShopRepository {
             persistentOrderStore.saveRefundSnapshot(refund);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "REFUND", refund.refundNo(), persistenceErrorMessage(ex));
+            throw ex;
         }
     }
 
@@ -7482,151 +5653,26 @@ public class InMemoryShopRepository {
             persistentOrderStore.saveImportedCard(card);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "CARD", String.valueOf(card.id()), persistenceErrorMessage(ex));
+            throw ex;
         }
     }
 
-    private void persistCategorySnapshot(CategoryItem category) {
-        if (catalogPersistenceStore == null || category == null) {
-            return;
-        }
-        try {
-            catalogPersistenceStore.saveCategorySnapshot(category);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "CATEGORY", String.valueOf(category.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void deletePersistentCategory(Long id) {
-        if (catalogPersistenceStore == null || id == null) {
-            return;
-        }
-        try {
-            catalogPersistenceStore.deleteCategory(id);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "CATEGORY", String.valueOf(id), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void persistGoodsSnapshot(GoodsItem goods) {
-        if (catalogPersistenceStore == null || goods == null) {
-            return;
-        }
-        try {
-            catalogPersistenceStore.saveGoodsSnapshot(goods);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "GOODS", String.valueOf(goods.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void deletePersistentGoods(Long id) {
-        if (catalogPersistenceStore == null || id == null) {
-            return;
-        }
-        try {
-            catalogPersistenceStore.deleteGoods(id);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "GOODS", String.valueOf(id), persistenceErrorMessage(ex));
-        }
-    }
+
 
     private void persistUserSnapshot(UserItem user) {
-        if (catalogPersistenceStore == null || user == null) {
-            return;
-        }
-        try {
-            catalogPersistenceStore.saveUserSnapshot(user);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "USER", String.valueOf(user.id()), persistenceErrorMessage(ex));
-        }
+        userService.persistUserSnapshot(user);
     }
 
-    private void persistCardKind(CardKindItem item) {
-        if (configPersistenceStore == null || item == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveCardKind(item);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "CARD_KIND", String.valueOf(item.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void persistRechargeField(RechargeFieldItem item) {
-        if (configPersistenceStore == null || item == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveRechargeField(item);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "RECHARGE_FIELD", String.valueOf(item.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void deletePersistentRechargeField(Long id) {
-        if (configPersistenceStore == null || id == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.deleteRechargeField(id);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "RECHARGE_FIELD", String.valueOf(id), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void persistSupplier(SupplierItem item) {
-        if (configPersistenceStore == null || item == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveSupplier(item);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "SUPPLIER", String.valueOf(item.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void deletePersistentSupplier(Long id) {
-        if (configPersistenceStore == null || id == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.deleteSupplier(id);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "SUPPLIER", String.valueOf(id), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void persistGoodsChannel(GoodsChannelItem item) {
-        if (configPersistenceStore == null || item == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveGoodsChannel(item);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "GOODS_CHANNEL", String.valueOf(item.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void deletePersistentGoodsChannel(Long id) {
-        if (configPersistenceStore == null || id == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.deleteGoodsChannel(id);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "GOODS_CHANNEL", String.valueOf(id), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void deletePersistentGoodsChannelsByGoods(Long goodsId) {
-        if (configPersistenceStore == null || goodsId == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.deleteGoodsChannelsByGoods(goodsId);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "GOODS_CHANNEL", String.valueOf(goodsId), persistenceErrorMessage(ex));
-        }
-    }
 
     private void deletePersistentCardsByGoods(Long goodsId) {
         if (persistentOrderStore == null || goodsId == null) {
@@ -7636,6 +5682,7 @@ public class InMemoryShopRepository {
             persistentOrderStore.deleteCardsByGoods(goodsId);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "CARD", String.valueOf(goodsId), persistenceErrorMessage(ex));
+            throw ex;
         }
     }
 
@@ -7651,447 +5698,34 @@ public class InMemoryShopRepository {
         }
     }
 
-    private void persistUserGroup(UserGroupItem item) {
-        if (configPersistenceStore == null || item == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveUserGroup(item);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "USER_GROUP", String.valueOf(item.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void persistGroupRules(Long groupId, String ruleType, List<GroupRuleItem> rules) {
-        if (configPersistenceStore == null || groupId == null || !StringUtils.hasText(ruleType)) {
-            return;
-        }
-        try {
-            configPersistenceStore.replaceGroupRules(groupId, ruleType, rules == null ? List.of() : rules);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "GROUP_RULE", groupId + ":" + ruleType, persistenceErrorMessage(ex));
-        }
-    }
-
-    private void persistSystemSetting(SystemSettingItem item) {
-        if (configPersistenceStore == null || item == null) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveSystemSetting(item);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "SYSTEM_SETTING", "GLOBAL", persistenceErrorMessage(ex));
-        }
-    }
-
-    private void persistRuntimeSetting(String key, String value) {
-        if (configPersistenceStore == null || !StringUtils.hasText(key)) {
-            return;
-        }
-        try {
-            configPersistenceStore.saveRuntimeSetting(key, value);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "SETTING", key, persistenceErrorMessage(ex));
-        }
-    }
 
     private void persistPaymentChannels() {
         try {
             List<Map<String, Object>> payload = listPaymentChannels().stream()
                 .map(this::paymentChannelPayload)
                 .toList();
-            persistRuntimeSetting(PAYMENT_CHANNEL_SETTING_KEY, OBJECT_MAPPER.writeValueAsString(payload));
+            configService.savePaymentChannelsJson(OBJECT_MAPPER.writeValueAsString(payload));
         } catch (JsonProcessingException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "PAYMENT_CHANNEL", "LIST", ex.getMessage());
+            throw new IllegalStateException("payment channel serialization failed", ex);
         }
     }
 
-    private void persistPriceTemplates() {
-        try {
-            persistRuntimeSetting(PRICE_TEMPLATE_SETTING_KEY, OBJECT_MAPPER.writeValueAsString(listPriceTemplates()));
-        } catch (JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "PRICE_TEMPLATE", "LIST", ex.getMessage());
-        }
-    }
 
-    private void persistMemberCredential(MemberApiCredentialItem item) {
-        if (item == null) {
-            return;
-        }
-        try {
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("id", item.id());
-            payload.put("userId", item.userId());
-            payload.put("appKey", item.appKey());
-            payload.put("appSecretMasked", mask(item.appSecret()));
-            if (configPersistenceStore != null && StringUtils.hasText(item.appSecret())) {
-                Map<String, String> encryptedSecret = configPersistenceStore.encryptSecretForSetting(item.appSecret());
-                payload.put("appSecretCiphertext", encryptedSecret.get("ciphertext"));
-                payload.put("appSecretNonce", encryptedSecret.get("nonce"));
-                payload.put("appSecretKeyVersion", encryptedSecret.get("keyVersion"));
-                payload.put("appSecretHash", encryptedSecret.get("hash"));
-            }
-            payload.put("status", item.status());
-            payload.put("ipWhitelist", item.ipWhitelist());
-            payload.put("dailyLimit", item.dailyLimit());
-            payload.put("createdAt", item.createdAt() == null ? "" : item.createdAt().toString());
-            payload.put("lastUsedAt", item.lastUsedAt() == null ? "" : item.lastUsedAt().toString());
-            persistRuntimeSetting("member.credential." + item.userId(), OBJECT_MAPPER.writeValueAsString(payload));
-        } catch (JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "MEMBER_API", String.valueOf(item.userId()), ex.getMessage());
-        }
-    }
 
-    private void persistSmsLoginSetting() {
-        try {
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("enabled", smsLoginSetting.enabled());
-            payload.put("adminLoginEnabled", smsLoginSetting.adminLoginEnabled());
-            payload.put("h5LoginEnabled", smsLoginSetting.h5LoginEnabled());
-            payload.put("webLoginEnabled", smsLoginSetting.webLoginEnabled());
-            payload.put("provider", smsLoginSetting.provider());
-            payload.put("adminMobile", smsLoginSetting.adminMobile());
-            payload.put("codeLength", smsLoginSetting.codeLength());
-            payload.put("ttlSeconds", smsLoginSetting.ttlSeconds());
-            payload.put("cooldownSeconds", smsLoginSetting.cooldownSeconds());
-            payload.put("maxAttempts", smsLoginSetting.maxAttempts());
-            payload.put("genericConfig", smsLoginSetting.genericConfig());
-            payload.put("tencentConfig", smsLoginSetting.tencentConfig());
-            payload.put("aliyunConfig", smsLoginSetting.aliyunConfig());
-            persistRuntimeSetting(SMS_LOGIN_SETTING_KEY, OBJECT_MAPPER.writeValueAsString(payload));
-        } catch (JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "SMS_LOGIN_SETTING", "GLOBAL", ex.getMessage());
-        }
-    }
 
-    private void persistCaptchaSetting() {
-        try {
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("enabled", captchaSetting.enabled());
-            payload.put("adminLoginEnabled", captchaSetting.adminLoginEnabled());
-            payload.put("h5LoginEnabled", captchaSetting.h5LoginEnabled());
-            payload.put("webLoginEnabled", captchaSetting.webLoginEnabled());
-            payload.put("provider", captchaSetting.provider());
-            payload.put("tencentConfig", captchaSetting.tencentConfig());
-            payload.put("turnstileConfig", captchaSetting.turnstileConfig());
-            payload.put("genericConfig", captchaSetting.genericConfig());
-            persistRuntimeSetting(CAPTCHA_SETTING_KEY, OBJECT_MAPPER.writeValueAsString(payload));
-        } catch (JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "CAPTCHA_SETTING", "GLOBAL", ex.getMessage());
-        }
-    }
+    // 批次8D / 任务D1：短信登录设置 / 人机验证设置 / 员工账号三份 DB 镜像的
+    // 写入与读回都随实现搬到了 AuthService，仓储侧不再保留副本。
 
-    private void persistAdminStaff() {
-        try {
-            List<Map<String, Object>> payload = listAdminStaff().stream()
-                .map(item -> {
-                    Map<String, Object> data = new LinkedHashMap<>();
-                    data.put("id", item.id());
-                    data.put("account", item.account());
-                    data.put("nickname", item.nickname());
-                    data.put("status", item.status());
-                    data.put("permissions", item.permissions());
-                    data.put("createdAt", item.createdAt() == null ? "" : item.createdAt().toString());
-                    data.put("updatedAt", item.updatedAt() == null ? "" : item.updatedAt().toString());
-                    data.put("passwordHash", adminStaffPasswordHashes.get(item.id()));
-                    return data;
-                })
-                .toList();
-            persistRuntimeSetting(ADMIN_STAFF_SETTING_KEY, OBJECT_MAPPER.writeValueAsString(payload));
-        } catch (JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "ADMIN_STAFF", "LIST", ex.getMessage());
-        }
-    }
 
-    private void persistOperationLog(OperationLogItem log) {
-        if (auditPersistenceStore == null || log == null) {
-            return;
-        }
-        try {
-            auditPersistenceStore.saveOperationLog(log);
-        } catch (RuntimeException ignored) {
-            // Avoid recursive operation-log writes when the audit mirror itself is unavailable.
-        }
-    }
 
-    private void persistSmsLog(SmsLogItem log) {
-        if (auditPersistenceStore == null || log == null) {
-            return;
-        }
-        try {
-            auditPersistenceStore.saveSmsLog(log);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "SMS_LOG", String.valueOf(log.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private void persistOpenApiLog(OpenApiLogItem log) {
-        if (auditPersistenceStore == null || log == null) {
-            return;
-        }
-        try {
-            auditPersistenceStore.saveOpenApiLog(log);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_MIRROR_FAILED", "OPEN_API_LOG", String.valueOf(log.id()), persistenceErrorMessage(ex));
-        }
-    }
 
-    private Optional<List<CategoryItem>> persistentCategories() {
-        if (catalogPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<CategoryItem> items = catalogPersistenceStore.listCategories();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "CATEGORY", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
 
-    private Optional<List<GoodsItem>> persistentGoods() {
-        if (catalogPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<GoodsItem> items = catalogPersistenceStore.listGoods();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "GOODS", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
 
-    private Optional<List<UserItem>> persistentUsers() {
-        if (catalogPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<UserItem> items = catalogPersistenceStore.listUsers();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "USER", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
 
-    private Optional<List<CardKindItem>> persistentCardKinds() {
-        if (configPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<CardKindItem> items = configPersistenceStore.listCardKinds();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "CARD_KIND", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
 
-    private Optional<List<RechargeFieldItem>> persistentRechargeFields() {
-        if (configPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<RechargeFieldItem> items = configPersistenceStore.listRechargeFields();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "RECHARGE_FIELD", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private Optional<List<SupplierItem>> persistentSuppliers() {
-        if (configPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<SupplierItem> items = configPersistenceStore.listSuppliers();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "SUPPLIER", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private Optional<List<GoodsChannelItem>> persistentGoodsChannels() {
-        if (configPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<GoodsChannelItem> items = configPersistenceStore.listGoodsChannels();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "GOODS_CHANNEL", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private Optional<List<UserGroupItem>> persistentUserGroups() {
-        if (configPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<UserGroupItem> items = configPersistenceStore.listUserGroups();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "USER_GROUP", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private Optional<List<GroupRuleItem>> persistentGroupRules() {
-        if (configPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<GroupRuleItem> items = configPersistenceStore.listGroupRules();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "GROUP_RULE", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private void loadPersistentSystemSetting() {
-        if (configPersistenceStore == null) {
-            return;
-        }
-        try {
-            Map<String, String> settings = configPersistenceStore.systemSettings();
-            if (settings.isEmpty()) {
-                return;
-            }
-            systemSetting = new SystemSettingItem(
-                defaultText(settings.get("siteName"), systemSetting.siteName()),
-                defaultText(settings.get("logoUrl"), systemSetting.logoUrl()),
-                defaultText(settings.get("customerService"), systemSetting.customerService()),
-                defaultText(settings.get("companyName"), systemSetting.companyName()),
-                defaultText(settings.get("icpRecordNo"), systemSetting.icpRecordNo()),
-                defaultText(settings.get("policeRecordNo"), systemSetting.policeRecordNo()),
-                defaultText(settings.get("disclaimer"), systemSetting.disclaimer()),
-                defaultText(settings.get("paymentMode"), systemSetting.paymentMode()),
-                booleanSetting(settings, "autoRefundEnabled", systemSetting.autoRefundEnabled()),
-                defaultText(settings.get("smsProvider"), systemSetting.smsProvider()),
-                booleanSetting(settings, "smsEnabled", systemSetting.smsEnabled()),
-                intSetting(settings, "upstreamSyncSeconds", systemSetting.upstreamSyncSeconds(), 5),
-                booleanSetting(settings, "autoShelfEnabled", systemSetting.autoShelfEnabled()),
-                booleanSetting(settings, "autoPriceEnabled", systemSetting.autoPriceEnabled()),
-                booleanSetting(settings, "registrationEnabled", systemSetting.registrationEnabled()),
-                normalizeRegistrationType(defaultText(settings.get("registrationType"), systemSetting.registrationType())),
-                longSetting(settings, "defaultUserGroupId", systemSetting.defaultUserGroupId()),
-                Map.of("ops", defaultText(settings.get("notification.ops"), systemSetting.notificationReceivers().getOrDefault("ops", "")))
-            );
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "SYSTEM_SETTING", "GLOBAL", persistenceErrorMessage(ex));
-        }
-    }
-
-    private void loadSuperAdminCredentials() {
-        if (configPersistenceStore == null) {
-            return;
-        }
-        try {
-            Map<String, String> settings = configPersistenceStore.systemSettings();
-            String username = normalize(defaultText(settings.get(SUPER_ADMIN_USERNAME_KEY), ""));
-            String passwordHash = defaultText(settings.get(SUPER_ADMIN_PASSWORD_KEY), "");
-            String nickname = defaultText(settings.get(SUPER_ADMIN_NICKNAME_KEY), "").trim();
-            if (StringUtils.hasText(username)) {
-                adminUsername = username;
-            }
-            if (StringUtils.hasText(passwordHash)) {
-                adminPasswordBcrypt = passwordHash;
-            }
-            if (StringUtils.hasText(nickname)) {
-                adminNickname = nickname;
-            }
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "SUPER_ADMIN", "CREDENTIALS", persistenceErrorMessage(ex));
-        }
-    }
-
-    private void loadSmsLoginSetting() {
-        if (configPersistenceStore == null) {
-            return;
-        }
-        try {
-            String raw = configPersistenceStore.systemSettings().get(SMS_LOGIN_SETTING_KEY);
-            if (!StringUtils.hasText(raw)) {
-                return;
-            }
-            Map<String, Object> payload = OBJECT_MAPPER.readValue(raw, MAP_TYPE);
-            smsLoginSetting = new SmsLoginSettingItem(
-                booleanValue(payload.get("enabled"), smsLoginSetting.enabled()),
-                booleanValue(payload.get("adminLoginEnabled"), smsLoginSetting.adminLoginEnabled()),
-                booleanValue(payload.get("h5LoginEnabled"), smsLoginSetting.h5LoginEnabled()),
-                booleanValue(payload.get("webLoginEnabled"), smsLoginSetting.webLoginEnabled()),
-                normalizeSmsProvider(defaultText(payload.get("provider"), smsLoginSetting.provider())),
-                defaultText(payload.get("adminMobile"), smsLoginSetting.adminMobile()),
-                clampInt(intValue(payload.get("codeLength"), smsLoginSetting.codeLength()), 4, 8),
-                clampInt(intValue(payload.get("ttlSeconds"), smsLoginSetting.ttlSeconds()), 60, 1800),
-                clampInt(intValue(payload.get("cooldownSeconds"), smsLoginSetting.cooldownSeconds()), 10, 300),
-                clampInt(intValue(payload.get("maxAttempts"), smsLoginSetting.maxAttempts()), 1, 10),
-                normalizeSmsConfig(stringMap(payload.get("genericConfig"))),
-                normalizeSmsConfig(stringMap(payload.get("tencentConfig"))),
-                normalizeSmsConfig(stringMap(payload.get("aliyunConfig")))
-            );
-        } catch (RuntimeException | JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "SMS_LOGIN_SETTING", "GLOBAL", ex.getMessage());
-        }
-    }
-
-    private void loadCaptchaSetting() {
-        if (configPersistenceStore == null) {
-            return;
-        }
-        try {
-            String raw = configPersistenceStore.systemSettings().get(CAPTCHA_SETTING_KEY);
-            if (!StringUtils.hasText(raw)) {
-                return;
-            }
-            Map<String, Object> payload = OBJECT_MAPPER.readValue(raw, MAP_TYPE);
-            captchaSetting = new CaptchaSettingItem(
-                booleanValue(payload.get("enabled"), captchaSetting.enabled()),
-                booleanValue(payload.get("adminLoginEnabled"), captchaSetting.adminLoginEnabled()),
-                booleanValue(payload.get("h5LoginEnabled"), captchaSetting.h5LoginEnabled()),
-                booleanValue(payload.get("webLoginEnabled"), captchaSetting.webLoginEnabled()),
-                normalizeCaptchaProvider(defaultText(payload.get("provider"), captchaSetting.provider())),
-                normalizeSmsConfig(stringMap(payload.get("tencentConfig"))),
-                normalizeSmsConfig(stringMap(payload.get("turnstileConfig"))),
-                normalizeSmsConfig(stringMap(payload.get("genericConfig")))
-            );
-        } catch (RuntimeException | JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "CAPTCHA_SETTING", "GLOBAL", ex.getMessage());
-        }
-    }
-
-    private void loadAdminStaff() {
-        if (configPersistenceStore == null) {
-            return;
-        }
-        try {
-            String raw = configPersistenceStore.systemSettings().get(ADMIN_STAFF_SETTING_KEY);
-            if (!StringUtils.hasText(raw)) {
-                return;
-            }
-            adminStaff.clear();
-            adminStaffPasswordHashes.clear();
-            List<Map<String, Object>> items = OBJECT_MAPPER.readValue(raw, LIST_MAP_TYPE);
-            items.stream()
-                .filter(Objects::nonNull)
-                .forEach(item -> {
-                    AdminStaffItem staff = adminStaffFromPayload(item);
-                    String hash = defaultText(item.get("passwordHash"), "");
-                    if (staff.id() != null && StringUtils.hasText(staff.account()) && StringUtils.hasText(hash)) {
-                        adminStaff.put(staff.id(), staff);
-                        adminStaffPasswordHashes.put(staff.id(), hash);
-                    }
-                });
-            adminStaffId.set(maxAdminStaffId() + 1);
-        } catch (RuntimeException | JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "ADMIN_STAFF", "LIST", ex.getMessage());
-        }
-    }
 
     private void loadPaymentChannels() {
         if (configPersistenceStore == null) {
@@ -8099,7 +5733,7 @@ public class InMemoryShopRepository {
             return;
         }
         try {
-            String raw = configPersistenceStore.systemSettings().get(PAYMENT_CHANNEL_SETTING_KEY);
+            String raw = configService.paymentChannelsJson();
             if (!StringUtils.hasText(raw)) {
                 seedPaymentChannels(true);
                 return;
@@ -8115,48 +5749,15 @@ public class InMemoryShopRepository {
                 seedPaymentChannels(true);
             }
         } catch (RuntimeException | JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "PAYMENT_CHANNEL", "LIST", ex.getMessage());
+            recordReadFallback("PAYMENT_CHANNEL", "LIST", ex);
             seedPaymentChannels(false);
         }
     }
 
-    private void loadPriceTemplates() {
-        if (configPersistenceStore == null) {
-            priceTemplates.clear();
-            priceTemplates.add(defaultPriceTemplate());
-            return;
-        }
-        try {
-            String raw = configPersistenceStore.systemSettings().get(PRICE_TEMPLATE_SETTING_KEY);
-            if (!StringUtils.hasText(raw)) {
-                priceTemplates.clear();
-                priceTemplates.add(defaultPriceTemplate());
-                persistPriceTemplates();
-                return;
-            }
-            PriceTemplateItem[] items = OBJECT_MAPPER.readValue(raw, PriceTemplateItem[].class);
-            priceTemplates.clear();
-            for (PriceTemplateItem item : items) {
-                PriceTemplateItem next = sanitizePriceTemplate(item);
-                if (StringUtils.hasText(next.id()) && StringUtils.hasText(next.name())) {
-                    priceTemplates.add(next);
-                }
-            }
-            if (priceTemplates.isEmpty()) {
-                priceTemplates.add(defaultPriceTemplate());
-            }
-        } catch (RuntimeException | JsonProcessingException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "PRICE_TEMPLATE", "LIST", ex.getMessage());
-            priceTemplates.clear();
-            priceTemplates.add(defaultPriceTemplate());
-        }
-    }
 
-    private void ensurePriceTemplatesReady() {
-        if (priceTemplates.isEmpty()) {
-            loadPriceTemplates();
-        }
-    }
+
+
+
 
     private Optional<List<OrderItem>> persistentOrders() {
         if (persistentOrderStore == null) {
@@ -8166,7 +5767,7 @@ public class InMemoryShopRepository {
             List<OrderItem> items = persistentOrderStore.listOrders();
             return Optional.of(items);
         } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "ORDER", "LIST", persistenceErrorMessage(ex));
+            recordReadFallback("ORDER", "LIST", ex);
             return Optional.empty();
         }
     }
@@ -8187,7 +5788,7 @@ public class InMemoryShopRepository {
         try {
             return persistentOrderStore.findOrder(orderNo);
         } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "ORDER", orderNo, persistenceErrorMessage(ex));
+            recordReadFallback("ORDER", orderNo, ex);
             return Optional.empty();
         }
     }
@@ -8216,7 +5817,7 @@ public class InMemoryShopRepository {
             List<PaymentItem> items = persistentOrderStore.listPayments();
             return Optional.of(items);
         } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "PAYMENT", "LIST", persistenceErrorMessage(ex));
+            recordReadFallback("PAYMENT", "LIST", ex);
             return Optional.empty();
         }
     }
@@ -8229,7 +5830,7 @@ public class InMemoryShopRepository {
             List<PaymentCallbackLogItem> items = persistentOrderStore.listPaymentCallbackLogs();
             return Optional.of(items);
         } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "PAYMENT_CALLBACK", "LIST", persistenceErrorMessage(ex));
+            recordReadFallback("PAYMENT_CALLBACK", "LIST", ex);
             return Optional.empty();
         }
     }
@@ -8242,99 +5843,41 @@ public class InMemoryShopRepository {
             List<RefundItem> items = persistentOrderStore.listRefunds();
             return Optional.of(items);
         } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "REFUND", "LIST", persistenceErrorMessage(ex));
+            recordReadFallback("REFUND", "LIST", ex);
             return Optional.empty();
         }
     }
 
-    private Optional<MemberApiCredentialItem> persistentMemberCredential(Long userId) {
-        if (configPersistenceStore == null || userId == null) {
-            return Optional.empty();
-        }
-        try {
-            String raw = configPersistenceStore.systemSettings().get("member.credential." + userId);
-            if (!StringUtils.hasText(raw)) {
-                return Optional.empty();
-            }
-            Map<String, Object> payload = OBJECT_MAPPER.readValue(raw, MAP_TYPE);
-            OffsetDateTime createdAt = parseOffsetDateTime(defaultText(payload.get("createdAt"), ""));
-            OffsetDateTime lastUsedAt = parseOffsetDateTime(defaultText(payload.get("lastUsedAt"), ""));
-            return Optional.of(new MemberApiCredentialItem(
-                longValue(payload.get("id"), memberCredentials.values().stream().map(MemberApiCredentialItem::id).max(Long::compareTo).orElse(0L) + 1),
-                longValue(payload.get("userId"), userId),
-                defaultText(payload.get("appKey"), memberAppKey(userId)),
-                memberCredentialSecret(payload),
-                defaultText(payload.get("status"), "DISABLED"),
-                stringList(payload.get("ipWhitelist")),
-                intValue(payload.get("dailyLimit"), 1000),
-                createdAt == null ? OffsetDateTime.now() : createdAt,
-                lastUsedAt
-            ));
-        } catch (Exception ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "MEMBER_API", String.valueOf(userId), ex.getMessage());
-            return Optional.empty();
-        }
+
+
+    /**
+     * 记录一次「数据库读失败，回落到内存」。
+     *
+     * <h2>为什么必须打日志，而不是只写一条审计行</h2>
+     * 原来这 16 处只调 {@code appendOperation(...)}，异常对象整个被吞掉：
+     * 接口照样返回 200，列表只是变空或变旧，stdout 里一个字都没有。
+     * 批次8C 就踩了这个坑——分页 SQL 的 ESCAPE 转义写错导致语句语法报错，
+     * 但对外表现只是「订单列表恒为空」，排查时 grep 日志找不到任何异常，
+     * 一度误判成「SQL 执行成功但没匹配到数据」，白花一轮时间。
+     *
+     * <p>因此补一条带异常栈的 WARN。审计行保持原样（动作名、字段、参数顺序都不变），
+     * 运维在后台仍看得到 PERSISTENCE_READ_FALLBACK；日志则给出可定位的根因。
+     *
+     * <p>入参收 {@link Exception} 而非 RuntimeException：有 4 处 catch 的是
+     * {@code RuntimeException | JsonProcessingException}，静态类型是 Exception。
+     */
+    private void recordReadFallback(String targetType, String targetId, Exception ex) {
+        LOG.warn("数据库读失败，已回落到内存数据：target={}/{}；接口不会报错，但返回的数据可能为空或过期",
+            targetType, targetId, ex);
+        appendOperation("PERSISTENCE_READ_FALLBACK", targetType, targetId, persistenceErrorMessage(ex));
     }
 
-    private String memberCredentialSecret(Map<String, Object> payload) {
-        String ciphertext = defaultText(payload.get("appSecretCiphertext"), "");
-        String nonce = defaultText(payload.get("appSecretNonce"), "");
-        if (configPersistenceStore != null && StringUtils.hasText(ciphertext) && StringUtils.hasText(nonce)) {
-            return configPersistenceStore.decryptSecretFromSetting(ciphertext, nonce);
-        }
-        return defaultText(payload.get("appSecret"), memberAppSecret());
-    }
-
-    private Optional<List<SmsLogItem>> persistentSmsLogs() {
-        if (auditPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<SmsLogItem> items = auditPersistenceStore.listSmsLogs();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "SMS_LOG", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private Optional<List<OperationLogItem>> persistentOperationLogs() {
-        if (auditPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<OperationLogItem> items = auditPersistenceStore.listOperationLogs();
-            return Optional.of(items);
-        } catch (RuntimeException ignored) {
-            return Optional.empty();
-        }
-    }
-
-    private Optional<List<OpenApiLogItem>> persistentOpenApiLogs() {
-        if (auditPersistenceStore == null) {
-            return Optional.empty();
-        }
-        try {
-            List<OpenApiLogItem> items = auditPersistenceStore.listOpenApiLogs();
-            return Optional.of(items);
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "OPEN_API_LOG", "LIST", persistenceErrorMessage(ex));
-            return Optional.empty();
-        }
-    }
-
-    private String persistenceErrorMessage(RuntimeException ex) {
+    private String persistenceErrorMessage(Exception ex) {
         String message = ex.getMessage();
         if (!StringUtils.hasText(message)) {
             message = ex.getClass().getSimpleName();
         }
         return message.length() > 300 ? message.substring(0, 300) : message;
-    }
-
-    private Long allocateNextCandidateId(AtomicLong sequence, long maxExistingId) {
-        long id = Math.max(sequence.get(), maxExistingId + 1);
-        sequence.set(id + 1);
-        return id;
     }
 
     private Long allocateIncrementingId(AtomicLong sequence, long maxExistingId) {
@@ -8343,50 +5886,10 @@ public class InMemoryShopRepository {
         return id;
     }
 
-    private long maxCardKindId() {
-        long max = cardKinds.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<CardKindItem>> persistent = persistentCardKinds();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(CardKindItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
-    private long maxCategoryId() {
-        long max = categories.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<CategoryItem>> persistent = persistentCategories();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(CategoryItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
-    private long maxUserGroupId() {
-        long max = userGroups.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<UserGroupItem>> persistent = persistentUserGroups();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(UserGroupItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
-    private long maxRechargeFieldId() {
-        long max = rechargeFields.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<RechargeFieldItem>> persistent = persistentRechargeFields();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(RechargeFieldItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
-    private long maxGoodsChannelId() {
-        long max = goodsChannels.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<GoodsChannelItem>> persistent = persistentGoodsChannels();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(GoodsChannelItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
     private long maxSupplierId() {
         long max = suppliers.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
@@ -8397,189 +5900,28 @@ public class InMemoryShopRepository {
         return max;
     }
 
-    private long maxGoodsId() {
-        long max = goods.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<GoodsItem>> persistent = persistentGoods();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(GoodsItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
-    private long maxUserId() {
-        long max = users.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L);
-        Optional<List<UserItem>> persistent = persistentUsers();
-        if (persistent.isPresent()) {
-            max = Math.max(max, persistent.get().stream().map(UserItem::id).filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(0L));
-        }
-        return max;
-    }
 
-    private long maxAdminStaffId() {
-        return adminStaff.keySet().stream().filter(Objects::nonNull).mapToLong(Long::longValue).max().orElse(999L);
-    }
 
-    private Optional<RechargeFieldItem> findRechargeFieldSnapshot(Long id) {
-        if (id == null) {
-            return Optional.empty();
-        }
-        RechargeFieldItem memory = rechargeFields.get(id);
-        if (memory != null) {
-            return Optional.of(memory);
-        }
-        Optional<RechargeFieldItem> persistent = persistentRechargeFields().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.id(), id))
-            .findFirst();
-        persistent.ifPresent(item -> rechargeFields.put(item.id(), item));
-        return persistent;
-    }
 
-    private boolean rechargeFieldCodeExists(String code, Long excludeId) {
-        String normalizedCode = normalizeRechargeFieldCode(code);
-        if (!StringUtils.hasText(normalizedCode)) {
-            return false;
-        }
-        boolean memoryMatch = rechargeFields.values().stream()
-            .anyMatch(item -> !Objects.equals(item.id(), excludeId) && Objects.equals(item.code(), normalizedCode));
-        if (memoryMatch) {
-            return true;
-        }
-        return persistentRechargeFields().stream()
-            .flatMap(List::stream)
-            .anyMatch(item -> !Objects.equals(item.id(), excludeId) && Objects.equals(item.code(), normalizedCode));
-    }
 
-    private Optional<UserGroupItem> findUserGroupSnapshot(Long id) {
-        if (id == null) {
-            return Optional.empty();
-        }
-        UserGroupItem memory = userGroups.get(id);
-        if (memory != null) {
-            return Optional.of(memory);
-        }
-        Optional<UserGroupItem> persistent = persistentUserGroups().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.id(), id))
-            .findFirst();
-        persistent.ifPresent(item -> userGroups.put(item.id(), item));
-        return persistent;
-    }
 
-    private boolean userGroupNameExists(String name, Long excludeId) {
-        String normalizedName = normalize(name);
-        if (!StringUtils.hasText(normalizedName)) {
-            return false;
-        }
-        boolean memoryMatch = userGroups.values().stream()
-            .anyMatch(item -> !Objects.equals(item.id(), excludeId) && Objects.equals(normalize(item.name()), normalizedName));
-        if (memoryMatch) {
-            return true;
-        }
-        return persistentUserGroups().stream()
-            .flatMap(List::stream)
-            .anyMatch(item -> !Objects.equals(item.id(), excludeId) && Objects.equals(normalize(item.name()), normalizedName));
-    }
+
 
     private List<UserItem> allUserSnapshots() {
-        Map<Long, UserItem> snapshots = new java.util.LinkedHashMap<>();
-        persistentUsers().ifPresent(items -> items.forEach(item -> snapshots.put(item.id(), item)));
-        users.values().forEach(item -> snapshots.put(item.id(), item));
-        return snapshots.values().stream()
-            .sorted(Comparator.comparing(UserItem::id))
-            .toList();
+        return userService.allUserSnapshots();
     }
+
 
     private Optional<UserItem> findUserSnapshot(Long id) {
-        if (id == null) {
-            return Optional.empty();
-        }
-        UserItem memory = users.get(id);
-        if (memory != null) {
-            return Optional.of(memory);
-        }
-        Optional<UserItem> persistent = persistentUsers().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.id(), id))
-            .findFirst();
-        persistent.ifPresent(item -> users.put(item.id(), item));
-        return persistent;
+        return userService.findUserSnapshot(id);
     }
 
-    private Optional<GoodsItem> findGoodsSnapshot(Long id) {
-        if (id == null) {
-            return Optional.empty();
-        }
-        GoodsItem memory = goods.get(id);
-        if (memory != null) {
-            return Optional.of(memory);
-        }
-        Optional<GoodsItem> persistent = persistentGoods().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.id(), id))
-            .findFirst();
-        persistent.ifPresent(item -> goods.put(item.id(), item));
-        return persistent;
-    }
 
-    private List<CategoryItem> allCategorySnapshots() {
-        Map<Long, CategoryItem> snapshots = new java.util.LinkedHashMap<>();
-        persistentCategories().ifPresent(items -> items.forEach(item -> snapshots.put(item.id(), item)));
-        categories.values().forEach(item -> snapshots.put(item.id(), item));
-        return snapshots.values().stream()
-            .sorted(Comparator.comparing(CategoryItem::sort).thenComparing(CategoryItem::id))
-            .toList();
-    }
 
-    private Optional<CategoryItem> findCategorySnapshot(Long id) {
-        if (id == null || id == 0L) {
-            return Optional.empty();
-        }
-        CategoryItem memory = categories.get(id);
-        if (memory != null) {
-            return Optional.of(memory);
-        }
-        Optional<CategoryItem> persistent = persistentCategories().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.id(), id))
-            .findFirst();
-        persistent.ifPresent(item -> categories.put(item.id(), item));
-        return persistent;
-    }
 
-    private List<GoodsItem> allGoodsSnapshots() {
-        Map<Long, GoodsItem> snapshots = new java.util.LinkedHashMap<>();
-        persistentGoods().ifPresent(items -> items.forEach(item -> snapshots.put(item.id(), item)));
-        goods.values().forEach(item -> snapshots.put(item.id(), item));
-        return snapshots.values().stream()
-            .sorted(Comparator.comparing(GoodsItem::id))
-            .toList();
-    }
 
-    private List<GoodsChannelItem> allGoodsChannelSnapshots() {
-        Map<Long, GoodsChannelItem> snapshots = new java.util.LinkedHashMap<>();
-        persistentGoodsChannels().ifPresent(items -> items.forEach(item -> snapshots.put(item.id(), item)));
-        goodsChannels.values().forEach(item -> snapshots.put(item.id(), item));
-        return snapshots.values().stream()
-            .sorted(Comparator.comparing(GoodsChannelItem::id))
-            .toList();
-    }
 
-    private Optional<GoodsChannelItem> findGoodsChannelSnapshot(Long id) {
-        if (id == null) {
-            return Optional.empty();
-        }
-        GoodsChannelItem memory = goodsChannels.get(id);
-        if (memory != null) {
-            return Optional.of(memory);
-        }
-        Optional<GoodsChannelItem> persistent = persistentGoodsChannels().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.id(), id))
-            .findFirst();
-        persistent.ifPresent(item -> goodsChannels.put(item.id(), item));
-        return persistent;
-    }
 
     private boolean supplierNameExists(String name, Long excludeId) {
         String normalizedName = normalize(name);
@@ -8596,68 +5938,45 @@ public class InMemoryShopRepository {
             .anyMatch(item -> !Objects.equals(item.id(), excludeId) && Objects.equals(normalize(item.name()), normalizedName));
     }
 
+    /**
+     * 批次6 / 任务B：审计写入的<b>转发壳</b>。
+     *
+     * <p>刻意保留同名同签名的私有方法：仓储内 88 处调用点一个都不用改，
+     * 这次重构在那 88 条业务分支上不引入任何行为差异。
+     * 真正的职责（id 分配、内存态、DB 镜像、失败不递归）在 {@link AuditService}。
+     */
     private void appendOperation(String action, String resourceType, String resourceId, String remark) {
-        Long id = operationLogId.getAndIncrement();
-        OperationLogItem log = new OperationLogItem(
-            id,
-            "system",
-            action,
-            resourceType,
-            resourceId,
-            remark,
-            OffsetDateTime.now()
-        );
-        operationLogs.put(id, log);
-        persistOperationLog(log);
+        auditService.appendOperation(action, resourceType, resourceId, remark);
     }
 
     private boolean isProductMonitorChannel(GoodsChannelItem channel) {
         GoodsItem item = findGoodsSnapshot(channel.goodsId()).orElse(null);
         return item != null
             && !Boolean.FALSE.equals(item.monitoringEnabled())
-            && "ENABLED".equals(channel.status());
+            && "ENABLED".equals(channel.status())
+            && supportsRealtimeProductMonitor(channel.supplierId());
     }
 
-    private ProductMonitorState ensureProductMonitorState(Long channelId, OffsetDateTime now) {
-        return productMonitorStates.computeIfAbsent(channelId, id -> new ProductMonitorState(
-            id,
-            null,
-            now,
-            "WAITING",
-            "等待首次扫描",
-            0,
-            0,
-            false
-        ));
+    private boolean isProductMonitorChannel(GoodsChannelItem channel, Map<Long, GoodsItem> goodsById) {
+        if (channel == null || goodsById == null) {
+            return false;
+        }
+        GoodsItem item = goodsById.get(channel.goodsId());
+        return item != null
+            && !Boolean.FALSE.equals(item.monitoringEnabled())
+            && "ENABLED".equals(channel.status())
+            && supportsRealtimeProductMonitor(channel.supplierId());
     }
 
-    private ProductMonitorItem productMonitorItem(GoodsChannelItem channel, ProductMonitorState state) {
-        GoodsItem item = findGoodsSnapshot(channel.goodsId()).orElse(null);
-        return new ProductMonitorItem(
-            channel.id(),
-            channel.goodsId(),
-            item == null ? "-" : item.goodsName(),
-            channel.supplierId(),
-            channel.supplierName(),
-            channel.supplierGoodsId(),
-            isPrimaryProductMonitorChannel(channel),
-            state.lastResult(),
-            state.lastScanAt(),
-            state.nextScanAt(),
-            state.lastResult(),
-            state.lastMessage(),
-            state.scanCount(),
-            state.changeCount()
-        );
-    }
-
-    private boolean isPrimaryProductMonitorChannel(GoodsChannelItem channel) {
-        return allGoodsChannelSnapshots().stream()
-            .filter(this::isProductMonitorChannel)
-            .filter(item -> Objects.equals(item.goodsId(), channel.goodsId()))
-            .min(Comparator.comparing(GoodsChannelItem::priority).thenComparing(GoodsChannelItem::id))
-            .map(item -> Objects.equals(item.id(), channel.id()))
-            .orElse(false);
+    private boolean supportsRealtimeProductMonitor(Long supplierId) {
+        if (supplierId == null) {
+            return false;
+        }
+        SupplierItem supplier = findSupplierSnapshot(supplierId).orElse(null);
+        return supplier != null
+            && "ENABLED".equals(supplier.status())
+            && supportsRemoteGoodsSync(supplier)
+            && !isPlaceholderBaseUrl(supplier.baseUrl());
     }
 
     private MonitoredRemoteGoods monitoredRemoteGoods(
@@ -8759,19 +6078,6 @@ public class InMemoryShopRepository {
             current.forbiddenPlatforms(),
             current.cardKindId()
         );
-    }
-
-    private void trimProductMonitorLogs() {
-        int overflow = productMonitorLogs.size() - 300;
-        if (overflow <= 0) {
-            return;
-        }
-        productMonitorLogs.values().stream()
-            .sorted(Comparator.comparing(ProductMonitorLogItem::id))
-            .limit(overflow)
-            .map(ProductMonitorLogItem::id)
-            .toList()
-            .forEach(productMonitorLogs::remove);
     }
 
     private String normalizePayMethod(String value) {
@@ -8927,7 +6233,7 @@ public class InMemoryShopRepository {
             normalizePaymentTerminals(stringList(payload.get("terminals"))),
             normalizePaymentChannelStatus(defaultText(payload.get("status"), "")),
             intValue(payload.get("sort"), (int) (id * 10)),
-            normalizePaymentChannelConfig(stringMap(payload.get("config"))),
+            normalizePaymentChannelConfig(settingConfig(payload, "config")),
             defaultText(payload.get("remark"), ""),
             Optional.ofNullable(parseOffsetDateTime(defaultText(payload.get("createdAt"), ""))).orElse(now),
             Optional.ofNullable(parseOffsetDateTime(defaultText(payload.get("updatedAt"), ""))).orElse(now)
@@ -8943,80 +6249,14 @@ public class InMemoryShopRepository {
         payload.put("terminals", item.terminals());
         payload.put("status", item.status());
         payload.put("sort", item.sort());
-        payload.put("config", item.config());
+        putEncryptedConfig(payload, "config", item.config());
         payload.put("remark", item.remark());
         payload.put("createdAt", item.createdAt() == null ? "" : item.createdAt().toString());
         payload.put("updatedAt", item.updatedAt() == null ? "" : item.updatedAt().toString());
         return payload;
     }
 
-    private PriceTemplateItem sanitizePriceTemplate(PriceTemplateItem item) {
-        PriceTemplateItem source = item == null ? defaultPriceTemplate() : item;
-        String id = normalize(defaultText(source.id(), ""));
-        if (!StringUtils.hasText(id)) {
-            id = "tpl-" + System.currentTimeMillis();
-        }
-        List<PriceGroupRateItem> rates = source.groupRates() == null ? List.of() : source.groupRates().stream()
-            .filter(Objects::nonNull)
-            .map(rate -> new PriceGroupRateItem(
-                requiredText(rate.groupName(), "默认会员"),
-                defaultText(rate.color(), "#12a594"),
-                rate.value() == null ? BigDecimal.valueOf(100) : rate.value()
-            ))
-            .toList();
-        if (rates.isEmpty()) {
-            rates = defaultPriceTemplate().groupRates();
-        }
-        return new PriceTemplateItem(
-            id,
-            requiredText(source.name(), "价格模板"),
-            "fixed".equalsIgnoreCase(defaultText(source.adjustMode(), "")) ? "fixed" : "percent",
-            source.referencePrice() == null ? BigDecimal.valueOf(100) : source.referencePrice(),
-            rates,
-            source.enabled() == null || source.enabled()
-        );
-    }
 
-    private PriceTemplateItem defaultPriceTemplate() {
-        return new PriceTemplateItem(
-            "retail-default",
-            "默认加价模板",
-            "percent",
-            BigDecimal.valueOf(100),
-            List.of(
-                new PriceGroupRateItem("默认会员", "#ffb300", BigDecimal.valueOf(110)),
-                new PriceGroupRateItem("渠道 VIP", "#3aa5ff", BigDecimal.valueOf(108)),
-                new PriceGroupRateItem("受限会员", "#12a594", BigDecimal.valueOf(106))
-            ),
-            true
-        );
-    }
-
-    private void verifyUserPassword(UserItem user, LoginRequest request) {
-        if (user == null) {
-            return;
-        }
-        String hash = userPasswordHashes.computeIfAbsent(user.id(), this::persistentUserPasswordHash);
-        if (!StringUtils.hasText(hash)) {
-            return;
-        }
-        String password = request == null ? "" : defaultText(request.password(), request.code());
-        if (!ADMIN_PASSWORD_ENCODER.matches(password, hash)) {
-            throw new IllegalArgumentException("账号或密码不正确");
-        }
-    }
-
-    private String persistentUserPasswordHash(Long userId) {
-        if (configPersistenceStore == null || userId == null) {
-            return "";
-        }
-        try {
-            return defaultText(configPersistenceStore.systemSettings().get("user.password." + userId), "");
-        } catch (RuntimeException ex) {
-            appendOperation("PERSISTENCE_READ_FALLBACK", "USER_PASSWORD", String.valueOf(userId), persistenceErrorMessage(ex));
-            return "";
-        }
-    }
 
     private String hmacSha256(String secret, String payload) {
         try {
@@ -9059,55 +6299,26 @@ public class InMemoryShopRepository {
         return result.toString();
     }
 
-    private boolean constantTimeEquals(String expected, String actual) {
-        return MessageDigest.isEqual(
-            expected.getBytes(StandardCharsets.UTF_8),
-            defaultText(actual, "").toLowerCase(Locale.ROOT).getBytes(StandardCharsets.UTF_8)
-        );
-    }
 
-    private void appendOpenApiLog(Long userId, String appKey, String path, String status, String message) {
-        Long id = openApiLogId.getAndIncrement();
-        OpenApiLogItem log = new OpenApiLogItem(
-            id,
-            userId,
-            defaultText(appKey, ""),
-            defaultText(path, ""),
-            status,
-            message,
-            OffsetDateTime.now()
-        );
-        openApiLogs.put(id, log);
-        persistOpenApiLog(log);
-    }
 
-    private GoodsItem refreshStock(GoodsItem item) {
-        if (item.type() != GoodsType.CARD) {
-            return item;
-        }
-        return item.withStock(item.cardKindId() == null ? availableCardCount(item.id()) : availableCardKindCardCount(item.cardKindId()));
-    }
 
-    private void refreshGoodsStock(Long targetGoodsId) {
-        GoodsItem item = findGoodsSnapshot(targetGoodsId).orElse(null);
-        if (item != null && item.type() == GoodsType.CARD) {
-            GoodsItem refreshed = refreshStock(item);
-            goods.put(item.id(), refreshed);
-            persistGoodsSnapshot(refreshed);
-        }
-    }
 
-    private void refreshGoodsStockForCardKind(Long targetCardKindId) {
-        goods.values().stream()
-            .filter(item -> Objects.equals(item.cardKindId(), targetCardKindId))
-            .forEach(item -> {
-                GoodsItem refreshed = refreshStock(item);
-                goods.put(item.id(), refreshed);
-                persistGoodsSnapshot(refreshed);
-            });
-    }
 
+    /**
+     * 可售卡密数量（缺陷 A2/A3 的修复落点）。
+     *
+     * <p>原实现只数内存 {@code cards} Map。而这个 Map 在持久化模式下<b>从不被填充</b>
+     * （构造器里 {@code if (persistenceEnabled()) return;} 直接跳过所有 seed），
+     * 于是库里 600 张卡、内存 0 张，可售数恒为 0，CARD 商品根本下不了单。
+     *
+     * <p>修法是让 DB 成为唯一事实来源：持久化模式直接
+     * {@code SELECT COUNT(*) FROM cards WHERE status='UNSOLD'}。
+     * 注意状态词表不同——内存用 AVAILABLE，DB 用 UNSOLD，这也是当初两条路径对不上的原因之一。
+     */
     private int availableCardCount(Long targetGoodsId) {
+        if (fundsLedgerEnabled()) {
+            return fundsLedgerStore.availableCardCount(targetGoodsId, null);
+        }
         return (int) cards.values().stream()
             .filter(card -> Objects.equals(card.goodsId(), targetGoodsId))
             .filter(card -> "AVAILABLE".equals(card.status()))
@@ -9115,149 +6326,28 @@ public class InMemoryShopRepository {
     }
 
     private int availableCardKindCardCount(Long targetCardKindId) {
+        if (fundsLedgerEnabled()) {
+            return fundsLedgerStore.availableCardCount(null, targetCardKindId);
+        }
         return (int) cards.values().stream()
             .filter(card -> Objects.equals(card.cardKindId(), targetCardKindId))
             .filter(card -> "AVAILABLE".equals(card.status()))
             .count();
     }
 
-    private boolean containsKeyword(GoodsItem item, String keyword) {
-        return normalize(item.goodsName()).contains(keyword)
-            || normalize(item.name()).contains(keyword)
-            || normalize(item.subTitle()).contains(keyword)
-            || normalize(item.description()).contains(keyword)
-            || normalize(item.platform()).contains(keyword);
-    }
 
-    private Set<Long> categoryTreeIds(Long rootId) {
-        Set<Long> result = new LinkedHashSet<>();
-        collectCategoryTreeIds(rootId, result);
-        return result;
-    }
 
-    private void collectCategoryTreeIds(Long parentId, Set<Long> result) {
-        if (!result.add(parentId)) {
-            return;
-        }
-        allCategorySnapshots().stream()
-            .filter(category -> Objects.equals(category.parentId(), parentId))
-            .sorted(Comparator.comparing(CategoryItem::sort).thenComparing(CategoryItem::id))
-            .forEach(category -> collectCategoryTreeIds(category.id(), result));
-    }
 
-    private CategoryItem enrichCategory(CategoryItem item) {
-        return enrichCategory(item, null, null);
-    }
 
-    private CategoryItem enrichCategory(CategoryItem item, Map<Long, CategoryItem> categorySnapshot, Set<Long> parentIds) {
-        boolean enabled = item.enabled() == null || item.enabled();
-        return new CategoryItem(
-            item.id(),
-            item.name(),
-            item.nickname(),
-            item.parentId(),
-            item.icon(),
-            item.iconUrl(),
-            item.customIconUrl(),
-            item.sort(),
-            enabled,
-            categoryStatus(enabled),
-            categoryLevel(item.parentId(), categorySnapshot) + 1,
-            parentIds == null ? hasChildCategory(item.id()) : parentIds.contains(item.id())
-        );
-    }
 
-    private CardKindItem enrichCardKind(CardKindItem item) {
-        int total = (int) cards.values().stream()
-            .filter(card -> Objects.equals(card.cardKindId(), item.id()))
-            .count();
-        int available = availableCardKindCardCount(item.id());
-        int used = (int) cards.values().stream()
-            .filter(card -> Objects.equals(card.cardKindId(), item.id()))
-            .filter(card -> "USED".equals(card.status()))
-            .count();
-        return new CardKindItem(
-            item.id(),
-            item.name(),
-            item.type(),
-            item.cost(),
-            total,
-            available,
-            used
-        );
-    }
 
-    private void validateCategoryParent(Long id, Long parentId) {
-        Long nextParentId = parentId == null ? 0L : parentId;
-        if (Objects.equals(id, nextParentId)) {
-            throw new IllegalArgumentException("category cannot be moved under itself");
-        }
-        if (nextParentId != 0L && findCategorySnapshot(nextParentId).isEmpty()) {
-            throw new IllegalArgumentException("parent category not found");
-        }
-        if (nextParentId != 0L && categoryTreeIds(id).contains(nextParentId)) {
-            throw new IllegalArgumentException("category cannot be moved under its descendant");
-        }
-    }
 
-    private int categorySubtreeHeight(Long id) {
-        return allCategorySnapshots().stream()
-            .filter(category -> Objects.equals(category.parentId(), id))
-            .mapToInt(category -> categorySubtreeHeight(category.id()) + 1)
-            .max()
-            .orElse(1);
-    }
 
-    private boolean hasChildCategory(Long id) {
-        return allCategorySnapshots().stream().anyMatch(category -> Objects.equals(category.parentId(), id));
-    }
 
-    private boolean categoryEnabled(Boolean enabled, String status) {
-        if (enabled != null) {
-            return enabled;
-        }
-        if (!StringUtils.hasText(status)) {
-            return true;
-        }
-        String normalizedStatus = status.trim().toUpperCase(Locale.ROOT);
-        return !List.of("DISABLED", "DISABLE", "OFF", "INACTIVE", "FALSE", "0").contains(normalizedStatus);
-    }
 
-    private String categoryStatus(boolean enabled) {
-        return enabled ? "ENABLED" : "DISABLED";
-    }
 
-    private String normalizeCategoryIcon(String icon) {
-        return StringUtils.hasText(icon) ? icon.trim() : "";
-    }
 
-    private String normalizeCardKindType(String type) {
-        if (!StringUtils.hasText(type)) {
-            throw new IllegalArgumentException("card kind type is required");
-        }
-        String normalized = type.trim().toUpperCase(Locale.ROOT);
-        if (!List.of("ONCE", "REUSABLE").contains(normalized)) {
-            throw new IllegalArgumentException("card kind type must be ONCE or REUSABLE");
-        }
-        return normalized;
-    }
 
-    private Long normalizeGoodsCardKindId(GoodsType type, Long requestedCardKindId, Long currentCardKindId) {
-        if (type != GoodsType.CARD) {
-            if (requestedCardKindId != null) {
-                throw new IllegalArgumentException("card kind can only be bound to card goods");
-            }
-            return null;
-        }
-        Long nextCardKindId = requestedCardKindId == null ? currentCardKindId : requestedCardKindId;
-        if (nextCardKindId == null) {
-            return null;
-        }
-        if (!cardKinds.containsKey(nextCardKindId)) {
-            throw new IllegalArgumentException("card kind not found");
-        }
-        return nextCardKindId;
-    }
 
     private boolean containsOrderKeyword(OrderItem order, String keyword) {
         return normalize(order.orderNo()).contains(keyword)
@@ -9296,243 +6386,18 @@ public class InMemoryShopRepository {
         return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
-    private List<String> normalizePlatforms(List<String> platforms) {
-        if (platforms == null || platforms.isEmpty()) {
-            return List.of();
-        }
-        List<String> normalized = platforms.stream()
-            .map(this::normalize)
-            .filter(StringUtils::hasText)
-            .distinct()
-            .toList();
-        return normalized;
-    }
 
-    private List<String> normalizeSalePlatforms(List<String> platforms) {
-        if (platforms == null || platforms.isEmpty()) {
-            return List.of();
-        }
-        return platforms.stream()
-            .map(this::normalizeSalePlatform)
-            .filter(StringUtils::hasText)
-            .distinct()
-            .toList();
-    }
 
-    private String normalizeSalePlatform(String platform) {
-        String normalized = normalize(platform);
-        return switch (normalized) {
-            case "pc" -> "web";
-            case "member-api", "member_api" -> "api";
-            default -> normalized;
-        };
-    }
 
-    private List<String> normalizeImages(List<String> images) {
-        if (images == null || images.isEmpty()) {
-            return List.of();
-        }
-        return images.stream()
-            .map(value -> value == null ? "" : value.trim())
-            .filter(StringUtils::hasText)
-            .distinct()
-            .toList();
-    }
 
-    private List<GoodsDetailBlock> normalizeDetailBlocks(List<GoodsDetailBlock> blocks) {
-        if (blocks == null || blocks.isEmpty()) {
-            return List.of();
-        }
-        return blocks.stream()
-            .filter(Objects::nonNull)
-            .map(block -> {
-                String type = defaultText(block.type(), StringUtils.hasText(block.imageUrl()) ? "image" : "text").trim();
-                String imageUrl = block.imageUrl() == null ? "" : block.imageUrl().trim();
-                String text = block.text() == null ? "" : block.text().trim();
-                return new GoodsDetailBlock(type, imageUrl, text);
-            })
-            .filter(block -> StringUtils.hasText(block.imageUrl()) || StringUtils.hasText(block.text()))
-            .toList();
-    }
 
-    private List<GoodsIntegrationItem> normalizeIntegrations(List<GoodsIntegrationItem> integrations) {
-        if (integrations == null || integrations.isEmpty()) {
-            return List.of();
-        }
-        return integrations.stream()
-            .filter(Objects::nonNull)
-            .map(item -> new GoodsIntegrationItem(
-                defaultText(item.id(), UUID.randomUUID().toString()),
-                item.supplierId(),
-                defaultText(item.supplierName(), ""),
-                normalize(item.platformCode()),
-                defaultText(item.supplierGoodsId(), ""),
-                defaultText(item.supplierGoodsName(), ""),
-                item.supplierPrice() == null ? BigDecimal.ZERO : item.supplierPrice(),
-                defaultText(item.upstreamStatus(), "正常"),
-                item.upstreamStock() == null ? 0 : item.upstreamStock(),
-                defaultText(item.upstreamTitle(), item.supplierGoodsName()),
-                defaultText(item.lastSyncAt(), OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)),
-                true
-            ))
-            .filter(item -> StringUtils.hasText(item.platformCode()) || StringUtils.hasText(item.supplierGoodsId()))
-            .toList();
-    }
 
-    private GoodsItem withChannelIntegrations(GoodsItem item) {
-        if (item == null || item.id() == null) {
-            return item;
-        }
-        List<GoodsIntegrationItem> savedIntegrations = normalizeIntegrations(item.integrations());
-        Set<String> savedIntegrationKeys = savedIntegrations.stream()
-            .map(this::integrationKey)
-            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-        List<GoodsIntegrationItem> channelIntegrations = allGoodsChannelSnapshots().stream()
-            .filter(channel -> Objects.equals(channel.goodsId(), item.id()))
-            .sorted(Comparator.comparing(GoodsChannelItem::priority).thenComparing(GoodsChannelItem::id))
-            .map(this::goodsChannelIntegration)
-            .filter(integration -> savedIntegrationKeys.isEmpty() || savedIntegrationKeys.contains(integrationKey(integration)))
-            .toList();
-        if (channelIntegrations.isEmpty() && savedIntegrations.isEmpty()) {
-            return item;
-        }
 
-        Map<String, GoodsIntegrationItem> merged = new LinkedHashMap<>();
-        savedIntegrations.forEach(integration -> merged.put(integrationKey(integration), integration));
-        channelIntegrations.forEach(integration -> {
-            String key = integrationKey(integration);
-            if (isFallbackChannelIntegration(integration) && merged.containsKey(key)) {
-                return;
-            }
-            merged.put(key, integration);
-        });
-        return item.withIntegrations(List.copyOf(merged.values()));
-    }
 
-    private boolean isFallbackChannelIntegration(GoodsIntegrationItem integration) {
-        return integration != null
-            && integration.supplierPrice().compareTo(BigDecimal.ZERO) == 0
-            && Objects.equals(integration.upstreamStock(), 0)
-            && Objects.equals(defaultText(integration.supplierGoodsName(), ""), defaultText(integration.supplierGoodsId(), ""));
-    }
 
-    private boolean integrationChanged(GoodsIntegrationItem oldItem, GoodsIntegrationItem nextItem) {
-        if (oldItem == null) {
-            return true;
-        }
-        return oldItem.supplierPrice().compareTo(nextItem.supplierPrice()) != 0
-            || !Objects.equals(oldItem.upstreamStock(), nextItem.upstreamStock())
-            || !Objects.equals(defaultText(oldItem.supplierGoodsName(), ""), defaultText(nextItem.supplierGoodsName(), ""))
-            || !Objects.equals(defaultText(oldItem.upstreamStatus(), ""), defaultText(nextItem.upstreamStatus(), ""));
-    }
 
-    private synchronized void ensureGoodsChannelsForIntegrations(List<GoodsItem> items) {
-        if (items == null || items.isEmpty()) {
-            return;
-        }
-        List<GoodsChannelItem> channelSnapshots = allGoodsChannelSnapshots();
-        Set<String> existingKeys = new LinkedHashSet<>();
-        channelSnapshots.forEach(channel -> existingKeys.add(goodsChannelKey(channel.goodsId(), channel.supplierId(), channel.supplierGoodsId())));
 
-        OffsetDateTime now = OffsetDateTime.now();
-        for (GoodsItem item : items) {
-            if (item == null || item.id() == null || item.type() != GoodsType.DIRECT) {
-                continue;
-            }
-            List<GoodsIntegrationItem> integrations = normalizeIntegrations(item.integrations());
-            if (integrations.isEmpty()) {
-                continue;
-            }
-            Set<String> desiredKeys = integrations.stream()
-                .filter(integration -> !Boolean.FALSE.equals(integration.enabled()))
-                .filter(integration -> integration.supplierId() != null && StringUtils.hasText(integration.supplierGoodsId()))
-                .map(integration -> goodsChannelKey(item.id(), integration.supplierId(), integration.supplierGoodsId()))
-                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
-            channelSnapshots.stream()
-                .filter(channel -> Objects.equals(channel.goodsId(), item.id()))
-                .filter(channel -> !desiredKeys.contains(goodsChannelKey(channel.goodsId(), channel.supplierId(), channel.supplierGoodsId())))
-                .forEach(channel -> {
-                    goodsChannels.remove(channel.id());
-                    productMonitorStates.remove(channel.id());
-                    deletePersistentGoodsChannel(channel.id());
-                    existingKeys.remove(goodsChannelKey(channel.goodsId(), channel.supplierId(), channel.supplierGoodsId()));
-                    appendOperation("GOODS_CHANNEL_REPAIR_DELETE", "GOODS", String.valueOf(item.id()), channel.supplierGoodsId());
-                });
-            for (GoodsIntegrationItem integration : integrations) {
-                if (Boolean.FALSE.equals(integration.enabled()) || integration.supplierId() == null || !StringUtils.hasText(integration.supplierGoodsId())) {
-                    continue;
-                }
-                String key = goodsChannelKey(item.id(), integration.supplierId(), integration.supplierGoodsId());
-                if (existingKeys.contains(key)) {
-                    continue;
-                }
-                GoodsChannelItem channel = new GoodsChannelItem(
-                    allocateIncrementingId(channelId, maxGoodsChannelId()),
-                    item.id(),
-                    integration.supplierId(),
-                    firstText(
-                        Optional.ofNullable(suppliers.get(integration.supplierId())).map(SupplierItem::name).orElse(""),
-                        integration.supplierName(),
-                        "货源渠道"
-                    ),
-                    integration.supplierGoodsId(),
-                    10,
-                    30,
-                    "ENABLED",
-                    now
-                );
-                goodsChannels.put(channel.id(), channel);
-                persistGoodsChannel(channel);
-                existingKeys.add(key);
-                appendOperation("GOODS_CHANNEL_REPAIR", "GOODS", String.valueOf(item.id()), integration.supplierGoodsId());
-            }
-        }
-    }
 
-    private String goodsChannelKey(Long goodsId, Long supplierId, String supplierGoodsId) {
-        return defaultText(goodsId == null ? "" : String.valueOf(goodsId), "")
-            + ":" + defaultText(supplierId == null ? "" : String.valueOf(supplierId), "")
-            + ":" + defaultText(supplierGoodsId, "").trim();
-    }
-
-    private GoodsIntegrationItem goodsChannelIntegration(GoodsChannelItem channel) {
-        SupplierItem supplier = suppliers.get(channel.supplierId());
-        String supplierName = firstText(supplier == null ? "" : supplier.name(), channel.supplierName(), "货源渠道");
-        String platformCode = supplier == null ? String.valueOf(channel.supplierId()) : defaultText(supplier.platformType(), String.valueOf(channel.supplierId()));
-        Optional<RemoteGoodsItem> remote = Optional.ofNullable(remoteGoodsSyncResults.get(channel.supplierId()))
-            .flatMap(result -> exactRemoteGoods(result.items(), channel.supplierGoodsId()));
-        if (supplier != null && remote.isPresent()) {
-            GoodsIntegrationItem snapshot = remoteGoodsIntegration(supplier, remote.get());
-            return new GoodsIntegrationItem(
-                "channel-" + channel.id(),
-                snapshot.supplierId(),
-                snapshot.supplierName(),
-                snapshot.platformCode(),
-                snapshot.supplierGoodsId(),
-                snapshot.supplierGoodsName(),
-                snapshot.supplierPrice(),
-                snapshot.upstreamStatus(),
-                snapshot.upstreamStock(),
-                snapshot.upstreamTitle(),
-                snapshot.lastSyncAt(),
-                "ENABLED".equals(channel.status()) && snapshot.enabled()
-            );
-        }
-        return new GoodsIntegrationItem(
-            "channel-" + channel.id(),
-            channel.supplierId(),
-            supplierName,
-            platformCode,
-            defaultText(channel.supplierGoodsId(), ""),
-            defaultText(channel.supplierGoodsId(), ""),
-            BigDecimal.ZERO,
-            defaultText(channel.status(), "ENABLED"),
-            0,
-            defaultText(channel.supplierGoodsId(), ""),
-            channel.createdAt() == null ? "" : channel.createdAt().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
-            "ENABLED".equals(channel.status())
-        );
-    }
 
     private Optional<RemoteGoodsItem> exactRemoteGoods(List<RemoteGoodsItem> items, String supplierGoodsId) {
         String normalizedId = defaultText(supplierGoodsId, "").trim();
@@ -9722,7 +6587,7 @@ public class InMemoryShopRepository {
             return Optional.empty();
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("goodsid", kasushouGoodsId(supplierGoodsId));
+        body.put("goodsid", SupplierGoodsId.of(supplierGoodsId));
         JsonNode root = kakayunPostJson(supplier, "/dockapiv3/goods/details", body, "goods detail sync");
         ensureKakayunOk(root, "goods detail sync");
         JsonNode data = root.path("data");
@@ -9792,68 +6657,7 @@ public class InMemoryShopRepository {
             + ":" + defaultText(item.supplierGoodsId(), "");
     }
 
-    private List<String> normalizeTextList(List<String> values) {
-        if (values == null || values.isEmpty()) {
-            return List.of();
-        }
-        return values.stream()
-            .map(value -> value == null ? "" : value.trim())
-            .filter(StringUtils::hasText)
-            .distinct()
-            .toList();
-    }
 
-    private List<String> normalizeGoodsTags(List<String> values) {
-        return normalizeTextList(values).stream()
-            .filter(value -> !LEGACY_SYSTEM_GOODS_TAGS.contains(value.toLowerCase(Locale.ROOT)))
-            .toList();
-    }
-
-    private AdminStaffItem adminStaffFromPayload(Map<String, Object> payload) {
-        OffsetDateTime now = OffsetDateTime.now();
-        return new AdminStaffItem(
-            longValue(payload.get("id"), null),
-            normalize(defaultText(payload.get("account"), "")),
-            defaultText(payload.get("nickname"), "员工账号"),
-            normalizeAdminStaffStatus(payload.get("status")),
-            normalizeAdminPermissions(stringList(payload.get("permissions"))),
-            Optional.ofNullable(parseOffsetDateTime(defaultText(payload.get("createdAt"), ""))).orElse(now),
-            Optional.ofNullable(parseOffsetDateTime(defaultText(payload.get("updatedAt"), ""))).orElse(now)
-        );
-    }
-
-    private void validateAdminStaffAccount(String account, Long excludeId) {
-        if (Objects.equals(account, adminUsername)) {
-            throw new IllegalArgumentException("员工账号不能与超级管理员账号重复");
-        }
-        boolean exists = adminStaff.values().stream()
-            .filter(item -> !Objects.equals(item.id(), excludeId))
-            .anyMatch(item -> Objects.equals(normalize(item.account()), account));
-        if (exists) {
-            throw new IllegalArgumentException("员工账号已存在");
-        }
-    }
-
-    private void validateSuperAdminAccount(String account) {
-        boolean exists = adminStaff.values().stream()
-            .anyMatch(item -> Objects.equals(normalize(item.account()), account));
-        if (exists) {
-            throw new IllegalArgumentException("超级管理员账号不能与员工账号重复");
-        }
-    }
-
-    private String normalizeAdminStaffStatus(Object value) {
-        String status = normalize(defaultText(value, "ENABLED"));
-        return "disabled".equals(status) ? "DISABLED" : "ENABLED";
-    }
-
-    private List<String> normalizeAdminPermissions(List<String> values) {
-        Set<String> allowed = new LinkedHashSet<>(ALL_ADMIN_PERMISSIONS);
-        List<String> permissions = normalizeTextList(values).stream()
-            .filter(allowed::contains)
-            .toList();
-        return permissions.isEmpty() ? List.of("dashboard:read") : permissions;
-    }
 
     private List<String> stringList(Object value) {
         if (value instanceof List<?> list) {
@@ -9869,322 +6673,55 @@ public class InMemoryShopRepository {
         return List.of();
     }
 
-    private String normalizeRuleType(String value) {
-        String normalized = normalize(value).toUpperCase(Locale.ROOT);
-        if ("CATEGORY".equals(normalized) || "PLATFORM".equals(normalized)) {
-            return normalized;
-        }
-        return "";
+
+
+
+
+
+
+
+
+    private void validateGoodsGroupAccess(UserItem user, GoodsItem item) {
+        userService.validateGoodsGroupAccess(user, item);
     }
 
-    private String normalizePermission(String value) {
-        String normalized = normalize(value).toUpperCase(Locale.ROOT);
-        if ("ALLOW".equals(normalized) || "DENY".equals(normalized)) {
-            return normalized;
-        }
-        return "NONE";
-    }
 
-    private List<GroupRuleItem> rulesForGroup(Long groupId) {
-        Optional<List<GroupRuleItem>> persistent = persistentGroupRules();
-        if (persistent.isPresent()) {
-            return enrichRuleNames(persistent.get()).stream()
-                .filter(rule -> Objects.equals(rule.groupId(), groupId))
-                .sorted(Comparator.comparing(GroupRuleItem::ruleType)
-                    .thenComparing(rule -> defaultText(rule.targetName(), rule.targetCode())))
-                .toList();
-        }
-        return groupRules.values().stream()
-            .filter(rule -> Objects.equals(rule.groupId(), groupId))
-            .sorted(Comparator.comparing(GroupRuleItem::ruleType)
-                .thenComparing(rule -> defaultText(rule.targetName(), rule.targetCode())))
-            .toList();
-    }
-
-    private List<GroupRuleItem> enrichRuleNames(List<GroupRuleItem> rules) {
-        if (rules == null || rules.isEmpty()) {
-            return List.of();
-        }
-        return rules.stream()
-            .map(rule -> {
-                if ("CATEGORY".equals(rule.ruleType())) {
-                    CategoryItem category = rule.targetId() == null ? null : findCategorySnapshot(rule.targetId()).orElse(null);
-                    return new GroupRuleItem(
-                        rule.groupId(),
-                        rule.ruleType(),
-                        rule.targetId(),
-                        rule.targetCode(),
-                        category == null ? rule.targetName() : category.name(),
-                        rule.permission()
-                    );
-                }
-                return new GroupRuleItem(
-                    rule.groupId(),
-                    rule.ruleType(),
-                    rule.targetId(),
-                    rule.targetCode(),
-                    StringUtils.hasText(rule.targetName()) ? rule.targetName() : platformName(rule.targetCode()),
-                    rule.permission()
-                );
-            })
-            .toList();
-    }
-
-    private GroupRuleItem createRule(Long groupId, String ruleType, GroupRulePatch patch, String permission) {
-        if ("CATEGORY".equals(ruleType)) {
-            Long targetId = patch.targetId();
-            CategoryItem category = targetId == null ? null : findCategorySnapshot(targetId).orElse(null);
-            if (category == null) {
-                throw new IllegalArgumentException("category rule target not found");
-            }
-            return new GroupRuleItem(groupId, ruleType, targetId, null, category.name(), permission);
-        }
-
-        String targetCode = normalize(patch.targetCode());
-        if (!List.of("h5", "pc", "miniapp").contains(targetCode)) {
-            throw new IllegalArgumentException("platform rule target not found");
-        }
-        return new GroupRuleItem(groupId, ruleType, null, targetCode, platformName(targetCode), permission);
-    }
-
-    private String ruleKey(GroupRuleItem rule) {
-        String target = "CATEGORY".equals(rule.ruleType()) ? String.valueOf(rule.targetId()) : rule.targetCode();
-        return rule.groupId() + ":" + rule.ruleType() + ":" + target;
-    }
-
-    private boolean allowedByGroupRules(GoodsItem item, List<GroupRuleItem> rules) {
-        if (rules.isEmpty()) {
-            return true;
-        }
-        boolean denied = rules.stream()
-            .filter(rule -> "DENY".equals(rule.permission()))
-            .anyMatch(rule -> ruleMatches(rule, item));
-        if (denied) {
-            return false;
-        }
-
-        List<GroupRuleItem> allowRules = rules.stream()
-            .filter(rule -> "ALLOW".equals(rule.permission()))
-            .toList();
-        return allowRules.isEmpty() || allowRules.stream().anyMatch(rule -> ruleMatches(rule, item));
-    }
-
-    private boolean ruleMatches(GroupRuleItem rule, GoodsItem item) {
-        if ("CATEGORY".equals(rule.ruleType())) {
-            return rule.targetId() != null && categoryTreeIds(rule.targetId()).contains(item.categoryId());
-        }
-        if ("PLATFORM".equals(rule.ruleType())) {
-            String targetCode = normalize(rule.targetCode());
-            return StringUtils.hasText(targetCode) && item.availablePlatforms().stream()
-                .map(this::normalize)
-                .anyMatch(targetCode::equals);
-        }
-        return false;
-    }
 
     private void validateOrderPermission(UserItem user) {
-        UserGroupItem group = findUserGroupSnapshot(user.groupId() == null ? 1L : user.groupId()).orElse(null);
-        if (group == null) {
-            return;
-        }
-        if (!group.orderEnabled()) {
-            throw new IllegalStateException("当前会员组暂未开通下单权限，请联系平台客服处理。");
-        }
-        if (group.realNameRequiredForOrder() && !"VERIFIED".equals(user.verificationStatus())) {
-            throw new IllegalStateException("当前会员组需要完成实名认证后才能下单，请先完成实名信息认证。");
-        }
+        userService.validateOrderPermission(user);
     }
+
 
     private void validatePriceLimitPermission(UserItem user, GoodsItem item) {
-        UserGroupItem group = findUserGroupSnapshot(user.groupId() == null ? 1L : user.groupId()).orElse(null);
-        if (!priceLimitAllowed(item, group)) {
-            throw new IllegalStateException(priceLimitNotice(group == null ? "" : group.priceLimitNotice()));
-        }
+        userService.validatePriceLimitPermission(user, item);
     }
 
-    private boolean priceLimitAllowed(GoodsItem item, UserGroupItem group) {
-        if (item == null || !StringUtils.hasText(defaultText(item.priceLimitText(), ""))) {
-            return true;
-        }
-        return group == null || group.priceLimitEnabled();
-    }
 
-    private String priceLimitNotice(String value) {
-        String notice = defaultText(value, "").trim();
-        return StringUtils.hasText(notice) ? notice : DEFAULT_PRICE_LIMIT_NOTICE;
-    }
+
 
     private UserItem withGroupName(UserItem user) {
-        return new UserItem(
-            user.id(),
-            user.avatar(),
-            user.mobile(),
-            user.email(),
-            user.nickname(),
-            user.groupId(),
-            groupName(user.groupId()),
-            user.balance(),
-            user.deposit(),
-            user.status(),
-            user.createdAt(),
-            user.lastLoginAt(),
-            user.realNameType(),
-            user.realName(),
-            user.subjectName(),
-            user.certificateNo(),
-            user.verificationStatus()
-        );
+        return userService.withGroupName(user);
     }
+
+
+    private UserItem withUserBalance(UserItem user, BigDecimal balance) {
+        return userService.withUserBalance(user, balance);
+    }
+
 
     private UserItem withUserLastLoginAt(UserItem user, OffsetDateTime lastLoginAt) {
-        return new UserItem(
-            user.id(),
-            user.avatar(),
-            user.mobile(),
-            user.email(),
-            user.nickname(),
-            user.groupId(),
-            groupName(user.groupId()),
-            user.balance(),
-            user.deposit(),
-            user.status(),
-            user.createdAt(),
-            lastLoginAt,
-            user.realNameType(),
-            user.realName(),
-            user.subjectName(),
-            user.certificateNo(),
-            user.verificationStatus()
-        );
+        return userService.withUserLastLoginAt(user, lastLoginAt);
     }
 
-    private UserItem createUserFromAccount(String account) {
-        validateRegistration(account);
-        Long id = allocateIncrementingId(userId, maxUserId());
-        boolean email = account.contains("@");
-        Long groupId = validDefaultUserGroupId(systemSetting.defaultUserGroupId());
-        UserItem user = new UserItem(
-            id,
-            "",
-            email ? "" : account,
-            email ? account : "",
-            email ? account.substring(0, account.indexOf("@")) : account,
-            groupId,
-            groupName(groupId),
-            BigDecimal.ZERO,
-            BigDecimal.ZERO,
-            "NORMAL",
-            OffsetDateTime.now(),
-            null,
-            "NONE",
-            "",
-            "",
-            "",
-            "UNVERIFIED"
-        );
-        users.put(id, user);
-        persistUserSnapshot(user);
-        return user;
-    }
 
-    private AuthSession<UserItem> registerUser(UserAuthRequest request, String terminal, String account) {
-        if (allUserSnapshots().stream().anyMatch(item -> Objects.equals(normalize(item.mobile()), account) || Objects.equals(normalize(item.email()), account))) {
-            throw new IllegalStateException("账号已存在，请直接登录");
-        }
-        validateRegistration(account);
-        if (isRegistrationSmsCodeRequired()) {
-            verifyLoginSmsCode(verificationKey("USER_LOGIN", terminal, account), request == null ? "" : request.code());
-        }
-        String password = defaultText(request == null ? "" : request.password(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        if (StringUtils.hasText(password)) {
-            validateNewPassword(password, confirmPassword);
-        }
-        UserItem user = createUserFromAccount(account);
-        if (StringUtils.hasText(password)) {
-            userPasswordHashes.put(user.id(), ADMIN_PASSWORD_ENCODER.encode(password));
-            persistRuntimeSetting("user.password." + user.id(), userPasswordHashes.get(user.id()));
-        }
-        UserItem next = withUserLastLoginAt(user, OffsetDateTime.now());
-        users.put(next.id(), next);
-        persistUserSnapshot(next);
-        String token = issueUserToken(next.id());
-        appendOperation("USER_REGISTER", "USER", String.valueOf(next.id()), terminal + ":" + account);
-        return new AuthSession<>(token, withGroupName(next));
-    }
-
-    private AuthSession<UserItem> resetUserPassword(UserAuthRequest request, String terminal, String account) {
-        UserItem user = allUserSnapshots().stream()
-            .filter(item -> Objects.equals(normalize(item.mobile()), account) || Objects.equals(normalize(item.email()), account))
-            .findFirst()
-            .orElseThrow(() -> new IllegalArgumentException("账号不存在"));
-        verifyLoginSmsCode(verificationKey("USER_LOGIN", terminal, account), request == null ? "" : request.code());
-        String password = defaultText(request == null ? "" : request.password(), "");
-        String confirmPassword = defaultText(request == null ? "" : request.confirmPassword(), "");
-        validateNewPassword(password, confirmPassword);
-        String nextHash = ADMIN_PASSWORD_ENCODER.encode(password);
-        userPasswordHashes.put(user.id(), nextHash);
-        persistRuntimeSetting("user.password." + user.id(), nextHash);
-        invalidateUserTokens(user.id());
-        UserItem next = withUserLastLoginAt(user, OffsetDateTime.now());
-        users.put(next.id(), next);
-        persistUserSnapshot(next);
-        String token = issueUserToken(next.id());
-        appendOperation("USER_PASSWORD_RESET", "USER", String.valueOf(next.id()), terminal + ":" + account);
-        return new AuthSession<>(token, withGroupName(next));
-    }
-
-    private String issueUserToken(Long userId) {
-        String token = "h5_" + UUID.randomUUID();
-        userTokens.put(token, userId);
-        userTokenExpiresAt.put(token, OffsetDateTime.now().plus(USER_TOKEN_TTL));
-        if (securityStateStore != null) {
-            securityStateStore.storeUserToken(token, userId, USER_TOKEN_TTL);
-        }
-        return token;
-    }
-
-    private void invalidateUserTokens(Long userId) {
-        userTokens.entrySet().removeIf(entry -> Objects.equals(entry.getValue(), userId));
-        userTokenExpiresAt.keySet().removeIf(token -> !userTokens.containsKey(token));
-        if (securityStateStore != null) {
-            securityStateStore.invalidateUserTokens(userId);
-        }
-    }
-
-    private void validateNewPassword(String password, String confirmPassword) {
-        if (!StringUtils.hasText(password) || password.length() < 6) {
-            throw new IllegalArgumentException("密码至少需要 6 位");
-        }
-        if (!Objects.equals(password, confirmPassword)) {
-            throw new IllegalArgumentException("两次输入的密码不一致");
-        }
-    }
-
-    private String cleanBearerToken(String token) {
-        if (!StringUtils.hasText(token)) {
-            return "";
-        }
-        String trimmed = token.trim();
-        return trimmed.regionMatches(true, 0, "Bearer ", 0, 7) ? trimmed.substring(7).trim() : trimmed;
+    private UserItem createUserFromAccount(String account, String username) {
+        return userService.createUserFromAccount(account, username);
     }
 
     private String groupName(Long groupId) {
-        UserGroupItem group = findUserGroupSnapshot(groupId).orElse(null);
-        return group == null ? "未分组" : group.name();
+        return userService.groupName(groupId);
     }
 
-    private String platformName(String code) {
-        return switch (normalize(code)) {
-            case "douyin" -> "抖音";
-            case "taobao" -> "淘宝";
-            case "pdd" -> "拼多多";
-            case "xianyu" -> "咸鱼";
-            case "xiaohongshu" -> "小红书";
-            case "private" -> "私域";
-            default -> code;
-        };
-    }
 
     private String normalizeRegistrationType(String value) {
         String normalized = normalize(value).toUpperCase(Locale.ROOT);
@@ -10194,228 +6731,78 @@ public class InMemoryShopRepository {
         return "MOBILE";
     }
 
+
     private Long validDefaultUserGroupId(Long groupId) {
-        Long nextGroupId = groupId == null ? 1L : groupId;
-        if (findUserGroupSnapshot(nextGroupId).isPresent()) {
-            return nextGroupId;
-        }
-        return listUserGroups().stream()
-            .filter(UserGroupItem::defaultGroup)
-            .map(UserGroupItem::id)
-            .findFirst()
-            .or(() -> listUserGroups().stream()
-                .filter(group -> "ENABLED".equalsIgnoreCase(defaultText(group.status(), "")))
-                .map(UserGroupItem::id)
-                .findFirst())
-            .orElse(1L);
+        return userService.validDefaultUserGroupId(groupId);
     }
+
 
     private void validateRegistration(String account) {
-        if (!systemSetting.registrationEnabled()) {
-            throw new IllegalStateException("当前系统暂未开放新用户注册");
-        }
-
-        String registrationType = normalizeRegistrationType(systemSetting.registrationType());
-        if ("MOBILE".equals(registrationType) && !account.matches("^1[3-9]\\d{9}$")) {
-            throw new IllegalArgumentException("当前仅支持手机号注册");
-        }
-        if ("EMAIL".equals(registrationType) && !account.matches("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$")) {
-            throw new IllegalArgumentException("当前仅支持邮箱注册");
-        }
+        userService.validateRegistration(account);
     }
 
-    private boolean isRegistrationSmsCodeRequired() {
-        return "MOBILE".equals(normalizeRegistrationType(systemSetting.registrationType()));
-    }
 
-    private String normalizeRechargeFieldCode(String value) {
-        return normalize(value)
-            .replaceAll("[^a-z0-9_]", "_")
-            .replaceAll("_+", "_")
-            .replaceAll("^_+|_+$", "");
-    }
 
-    private boolean isValidRechargeFieldCode(String value) {
-        return value != null && value.matches("^[a-z][a-z0-9_]*$");
-    }
 
-    private List<String> validateEnabledRechargeFieldCodes(List<String> codes) {
-        List<String> normalizedCodes = normalizeTextList(codes).stream()
-            .map(this::normalizeRechargeFieldCode)
-            .filter(StringUtils::hasText)
-            .distinct()
-            .toList();
-        if (normalizedCodes.isEmpty()) {
-            return List.of();
-        }
-        Set<String> enabledCodes = listRechargeFields(true).stream()
-            .map(RechargeFieldItem::code)
-            .collect(java.util.stream.Collectors.toSet());
-        List<String> invalidCodes = normalizedCodes.stream()
-            .filter(code -> !enabledCodes.contains(code))
-            .toList();
-        if (!invalidCodes.isEmpty()) {
-            throw new IllegalArgumentException("充值字段不存在或已停用: " + String.join(", ", invalidCodes));
-        }
-        return normalizedCodes;
-    }
 
-    private List<String> normalizedBenefitDurations(List<String> durations, String title) {
-        List<String> normalized = normalizeTextList(durations);
-        if (!normalized.isEmpty()) {
-            return normalized;
-        }
-        return inferredBenefitDurations(title);
-    }
 
-    private Boolean normalizedPriceLimited(Boolean explicitValue, String... titles) {
-        if (explicitValue != null) {
-            return explicitValue;
-        }
-        for (String title : titles) {
-            if (titleContainsPriceLimited(title)) {
-                return true;
-            }
-        }
-        return false;
-    }
 
-    private String normalizedPriceLimitText(String explicitValue, boolean allowInfer, String... titles) {
-        if (explicitValue != null) {
-            return defaultText(explicitValue, "").trim();
-        }
-        return allowInfer ? inferredPriceLimitText(titles) : "";
-    }
 
-    private String inferredPriceLimitText(String... titles) {
-        for (String title : titles) {
-            String value = inferPriceLimitFromTitle(title);
-            if (StringUtils.hasText(value)) {
-                return value;
-            }
-        }
-        return "";
-    }
 
-    private String inferPriceLimitFromTitle(String title) {
-        String cleanTitle = defaultText(title, "").trim();
-        if (!StringUtils.hasText(cleanTitle)) {
-            return "";
-        }
-        Matcher matcher = PRICE_LIMIT_PATTERN.matcher(cleanTitle);
-        if (matcher.find()) {
-            return matcher.group(1).replaceAll("\\s+", "");
-        }
-        return titleContainsPriceLimited(cleanTitle) ? "限价" : "";
-    }
 
-    private boolean titleContainsPriceLimited(String title) {
-        String normalizedTitle = normalize(defaultText(title, ""));
-        return StringUtils.hasText(normalizedTitle)
-            && (normalizedTitle.contains("限价")
-                || normalizedTitle.contains("限 价")
-                || normalizedTitle.contains("限制售价")
-                || normalizedTitle.contains("限定价格")
-                || normalizedTitle.contains("控价"));
-    }
 
-    private List<String> inferredBenefitDurations(String title) {
-        String normalizedTitle = normalize(defaultText(title, ""));
-        if (!StringUtils.hasText(normalizedTitle)) {
-            return List.of();
-        }
-        if (normalizedTitle.contains("15天") || normalizedTitle.contains("十五天") || normalizedTitle.contains("半月") || normalizedTitle.contains("半个月")) {
-            return List.of("半月");
-        }
-        if (normalizedTitle.contains("12个月") || normalizedTitle.contains("十二个月") || normalizedTitle.contains("年卡") || normalizedTitle.contains("一年")) {
-            return List.of("一年");
-        }
-        if (normalizedTitle.contains("半年") || normalizedTitle.contains("6个月") || normalizedTitle.contains("六个月")) {
-            return List.of("半年");
-        }
-        if (normalizedTitle.contains("3个月") || normalizedTitle.contains("三个月") || normalizedTitle.contains("季卡")) {
-            return List.of("季卡");
-        }
-        if (normalizedTitle.contains("1个月") || normalizedTitle.contains("一个月") || normalizedTitle.contains("月卡")) {
-            return List.of("月卡");
-        }
-        if (normalizedTitle.contains("7天") || normalizedTitle.contains("七天") || normalizedTitle.contains("周卡") || normalizedTitle.contains("一周")) {
-            return List.of("周卡");
-        }
-        if (normalizedTitle.contains("3天") || normalizedTitle.contains("三天")) {
-            return List.of("三天");
-        }
-        if (normalizedTitle.contains("1天") || normalizedTitle.contains("一天") || normalizedTitle.contains("日卡")) {
-            return List.of("一天");
-        }
-        return List.of();
-    }
 
-    private String normalizeRechargeFieldInputType(String value) {
-        String normalized = normalize(value);
-        if (List.of("text", "number", "mobile", "email", "textarea", "qq", "jianying_id", "douyin_id").contains(normalized)) {
-            return normalized;
-        }
-        return "text";
-    }
 
-    private BigDecimal adjustFundValue(BigDecimal current, BigDecimal amount, String direction, String label) {
-        BigDecimal next = "decrease".equals(direction) ? current.subtract(amount) : current.add(amount);
-        if (next.compareTo(BigDecimal.ZERO) < 0) {
-            throw new IllegalStateException(label + "不能扣减为负数");
-        }
-        return next;
-    }
 
-    private MemberApiCredentialItem createDefaultMemberCredential(Long userId) {
-        MemberApiCredentialItem item = new MemberApiCredentialItem(
-            memberCredentials.values().stream().map(MemberApiCredentialItem::id).max(Long::compareTo).orElse(0L) + 1,
-            userId,
-            memberAppKey(userId),
-            memberAppSecret(),
-            "DISABLED",
-            List.of(),
-            1000,
-            OffsetDateTime.now(),
-            null
-        );
-        memberCredentials.put(item.appKey(), item);
-        persistMemberCredential(item);
-        return item;
-    }
 
-    private String memberAppKey(Long userId) {
-        return "member_" + userId;
-    }
 
-    private String memberAppSecret() {
-        return UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
-    }
 
-    private boolean isMemberApiIpAllowed(MemberApiCredentialItem credential, String clientIp) {
-        List<String> whitelist = normalizeTextList(credential.ipWhitelist());
-        if (whitelist.isEmpty()) {
-            return true;
-        }
-        String normalizedIp = defaultText(clientIp, "").trim();
-        return whitelist.stream().anyMatch(item -> Objects.equals(item, normalizedIp));
-    }
 
-    private void validateRechargeAccount(GoodsItem item, String rechargeAccount) {
+    private void validateRechargeFields(GoodsItem item, CreateOrderRequest request) {
         if (!Boolean.TRUE.equals(item.requireRechargeAccount())) {
             return;
         }
-        String account = defaultText(rechargeAccount, "").trim();
-        if (!StringUtils.hasText(account)) {
-            throw new IllegalArgumentException("请先填写充值账号");
-        }
-
         List<RechargeFieldItem> selectedFields = normalizeTextList(item.accountTypes()).stream()
             .map(this::rechargeFieldByCode)
             .filter(Optional::isPresent)
             .map(Optional::get)
             .filter(RechargeFieldItem::enabled)
             .toList();
+        Map<String, String> submittedFields = normalizedRechargeFields(request == null ? null : request.rechargeFields());
+        if (!submittedFields.isEmpty()) {
+            if (submittedFields.values().stream().noneMatch(StringUtils::hasText)) {
+                throw new IllegalArgumentException("请先填写充值账号");
+            }
+            Set<String> allowedCodes = selectedFields.stream().map(RechargeFieldItem::code).collect(java.util.stream.Collectors.toSet());
+            if (!allowedCodes.containsAll(submittedFields.keySet())) {
+                throw new IllegalArgumentException("充值字段与商品配置不匹配");
+            }
+            boolean hasAnyRequired = selectedFields.stream().anyMatch(f -> Boolean.TRUE.equals(f.required()));
+            boolean anyRequiredFilled = selectedFields.stream()
+                .filter(f -> Boolean.TRUE.equals(f.required()))
+                .anyMatch(f -> StringUtils.hasText(submittedFields.getOrDefault(f.code(), "")));
+            if (hasAnyRequired && !anyRequiredFilled) {
+                String labels = selectedFields.stream()
+                    .filter(f -> Boolean.TRUE.equals(f.required()))
+                    .map(RechargeFieldItem::label)
+                    .distinct()
+                    .reduce((a, b) -> a + " / " + b)
+                    .orElse("充值账号");
+                throw new IllegalArgumentException("请填写充值账号（" + labels + " 任填一项）");
+            }
+            for (RechargeFieldItem field : selectedFields) {
+                String value = submittedFields.getOrDefault(field.code(), "");
+                if (StringUtils.hasText(value) && !rechargeAccountMatches(field.inputType(), value)) {
+                    throw new IllegalArgumentException("请输入正确的" + field.label());
+                }
+            }
+            return;
+        }
+
+        String account = defaultText(request == null ? null : request.rechargeAccount(), "").trim();
+        if (!StringUtils.hasText(account)) {
+            throw new IllegalArgumentException("请先填写充值账号");
+        }
         if (selectedFields.isEmpty()) {
             return;
         }
@@ -10427,21 +6814,31 @@ public class InMemoryShopRepository {
         }
     }
 
-    private Optional<RechargeFieldItem> rechargeFieldByCode(String code) {
-        String normalizedCode = normalizeRechargeFieldCode(code);
-        Optional<RechargeFieldItem> memory = rechargeFields.values().stream()
-            .filter(item -> Objects.equals(item.code(), normalizedCode))
-            .findFirst();
-        if (memory.isPresent()) {
-            return memory;
+    private Map<String, String> normalizedRechargeFields(Map<String, String> fields) {
+        if (fields == null || fields.isEmpty()) {
+            return Map.of();
         }
-        Optional<RechargeFieldItem> persistent = persistentRechargeFields().stream()
-            .flatMap(List::stream)
-            .filter(item -> Objects.equals(item.code(), normalizedCode))
-            .findFirst();
-        persistent.ifPresent(item -> rechargeFields.put(item.id(), item));
-        return persistent;
+        Map<String, String> normalized = new LinkedHashMap<>();
+        fields.forEach((code, value) -> {
+            String normalizedCode = normalizeRechargeFieldCode(code);
+            if (StringUtils.hasText(normalizedCode)) {
+                normalized.put(normalizedCode, defaultText(value, "").trim());
+            }
+        });
+        return Map.copyOf(normalized);
     }
+
+    private String legacyRechargeAccount(CreateOrderRequest request) {
+        String legacyValue = defaultText(request == null ? null : request.rechargeAccount(), "").trim();
+        if (StringUtils.hasText(legacyValue)) {
+            return legacyValue;
+        }
+        return normalizedRechargeFields(request == null ? null : request.rechargeFields()).values().stream()
+            .filter(StringUtils::hasText)
+            .findFirst()
+            .orElse("");
+    }
+
 
     private boolean rechargeAccountMatches(String inputType, String value) {
         String normalizedType = normalizeRechargeFieldInputType(inputType);
@@ -10456,194 +6853,7 @@ public class InMemoryShopRepository {
         };
     }
 
-    private boolean isUserSmsLoginRequired(String terminal) {
-        if (!smsLoginSetting.enabled()) {
-            return false;
-        }
-        return switch (normalizeTerminal(terminal)) {
-            case "web" -> smsLoginSetting.webLoginEnabled();
-            case "api" -> false;
-            default -> smsLoginSetting.h5LoginEnabled();
-        };
-    }
-
-    private String sendLoginSmsCode(String terminal, String mobile, String purpose) {
-        String key = verificationKey(purpose, terminal, mobile);
-        SmsVerificationCode existing = findSmsVerificationCode(key);
-        OffsetDateTime now = OffsetDateTime.now();
-        if (existing != null && existing.sentAt() != null && existing.sentAt().plusSeconds(smsLoginSetting.cooldownSeconds()).isAfter(now)) {
-            throw new IllegalStateException("验证码发送太频繁，请稍后再试");
-        }
-        String code = nextSmsCode(smsLoginSetting.codeLength());
-        String content = "您的喜易云登录验证码为：" + code + "，" + (smsLoginSetting.ttlSeconds() / 60) + "分钟内有效。";
-        String status = "SENT";
-        String error = "";
-        try {
-            sendSmsByProvider(mobile, code, content);
-        } catch (RuntimeException ex) {
-            status = "FAILED";
-            error = ex.getMessage();
-        }
-        Long id = smsLogId.getAndIncrement();
-        SmsLogItem log = new SmsLogItem(id, "LOGIN", mobile, purpose + ":" + normalizeTerminal(terminal), content, status, error, now);
-        smsLogs.put(id, log);
-        persistSmsLog(log);
-        if (!"SENT".equals(status)) {
-            throw new IllegalStateException("短信发送失败：" + error);
-        }
-        OffsetDateTime expiresAt = now.plusSeconds(smsLoginSetting.ttlSeconds());
-        SmsVerificationCode next = new SmsVerificationCode(key, code, expiresAt, now, 0, false);
-        smsVerificationCodes.put(key, next);
-        if (securityStateStore != null) {
-            securityStateStore.storeSmsCode(key, code, expiresAt, now);
-        }
-        return "验证码已发送";
-    }
-
-    private void verifyLoginSmsCode(String key, String code) {
-        Optional<RedisSecurityStateStore.SmsCodeSnapshot> redisSnapshot = securityStateStore == null
-            ? Optional.empty()
-            : securityStateStore.loadSmsCode(key);
-        if (redisSnapshot.isPresent() && redisSnapshot.get().found()) {
-            verifyRedisLoginSmsCode(redisSnapshot.get(), code);
-            return;
-        }
-        SmsVerificationCode current = smsVerificationCodes.get(key);
-        OffsetDateTime now = OffsetDateTime.now();
-        if (current == null || current.used() || current.expiresAt() == null || !current.expiresAt().isAfter(now)) {
-            smsVerificationCodes.remove(key);
-            if (securityStateStore != null) {
-                securityStateStore.deleteSmsCode(key);
-            }
-            throw new IllegalArgumentException("验证码已过期，请重新获取");
-        }
-        int attempts = current.attempts() + 1;
-        if (attempts > smsLoginSetting.maxAttempts()) {
-            smsVerificationCodes.remove(key);
-            if (securityStateStore != null) {
-                securityStateStore.deleteSmsCode(key);
-            }
-            throw new IllegalArgumentException("验证码错误次数过多，请重新获取");
-        }
-        if (!Objects.equals(current.code(), defaultText(code, "").trim())) {
-            SmsVerificationCode next = new SmsVerificationCode(key, current.code(), current.expiresAt(), current.sentAt(), attempts, false);
-            smsVerificationCodes.put(key, next);
-            throw new IllegalArgumentException("验证码不正确");
-        }
-        SmsVerificationCode next = new SmsVerificationCode(key, current.code(), current.expiresAt(), current.sentAt(), attempts, true);
-        smsVerificationCodes.put(key, next);
-    }
-
-    private SmsVerificationCode findSmsVerificationCode(String key) {
-        Optional<RedisSecurityStateStore.SmsCodeSnapshot> redisSnapshot = securityStateStore == null
-            ? Optional.empty()
-            : securityStateStore.loadSmsCode(key);
-        if (redisSnapshot.isPresent() && redisSnapshot.get().found()) {
-            RedisSecurityStateStore.SmsCodeSnapshot snapshot = redisSnapshot.get();
-            return new SmsVerificationCode(key, "", snapshot.expiresAt(), snapshot.sentAt(), snapshot.attempts(), snapshot.used());
-        }
-        return smsVerificationCodes.get(key);
-    }
-
-    private void verifyRedisLoginSmsCode(RedisSecurityStateStore.SmsCodeSnapshot current, String code) {
-        OffsetDateTime now = OffsetDateTime.now();
-        if (current.used() || current.expiresAt() == null || !current.expiresAt().isAfter(now)) {
-            securityStateStore.deleteSmsCode(current.key());
-            smsVerificationCodes.remove(current.key());
-            throw new IllegalArgumentException("验证码已过期，请重新获取");
-        }
-        int attempts = current.attempts() + 1;
-        if (attempts > smsLoginSetting.maxAttempts()) {
-            securityStateStore.deleteSmsCode(current.key());
-            smsVerificationCodes.remove(current.key());
-            throw new IllegalArgumentException("验证码错误次数过多，请重新获取");
-        }
-        if (!securityStateStore.matchesSmsCode(current, code)) {
-            RedisSecurityStateStore.SmsCodeSnapshot next = current.withAttempts(attempts);
-            securityStateStore.storeSmsCode(next);
-            SmsVerificationCode local = smsVerificationCodes.get(current.key());
-            if (local != null) {
-                smsVerificationCodes.put(current.key(), new SmsVerificationCode(
-                    local.key(), local.code(), local.expiresAt(), local.sentAt(), attempts, false
-                ));
-            }
-            throw new IllegalArgumentException("验证码不正确");
-        }
-        securityStateStore.storeSmsCode(current.markUsed(attempts));
-        SmsVerificationCode local = smsVerificationCodes.get(current.key());
-        if (local != null) {
-            smsVerificationCodes.put(current.key(), new SmsVerificationCode(
-                local.key(), local.code(), local.expiresAt(), local.sentAt(), attempts, true
-            ));
-        }
-    }
-
-    private void verifySliderToken(String token) {
-        String cleanToken = defaultText(token, "").trim();
-        if (StringUtils.hasText(cleanToken) && securityStateStore != null) {
-            Optional<Boolean> redisConsumed = securityStateStore.consumeSliderToken(cleanToken);
-            if (redisConsumed.orElse(false)) {
-                sliderTokens.remove(cleanToken);
-                return;
-            }
-        }
-        OffsetDateTime expiresAt = sliderTokens.remove(cleanToken);
-        if (!StringUtils.hasText(cleanToken) || expiresAt == null || !expiresAt.isAfter(OffsetDateTime.now())) {
-            throw new IllegalArgumentException("滑块验证已失效，请重新验证");
-        }
-    }
-
-    private void verifyHumanCaptchaIfRequired(String terminal, String ticket, String randstr, String clientIp) {
-        String cleanTerminal = normalizeTerminal(terminal);
-        if (!isCaptchaRequired(cleanTerminal)) {
-            return;
-        }
-        if (!StringUtils.hasText(ticket) || !StringUtils.hasText(randstr)) {
-            throw new IllegalArgumentException("请先完成人机验证");
-        }
-        switch (normalizeCaptchaProvider(captchaSetting.provider())) {
-            case "GENERIC" -> verifyGenericCaptcha(ticket, randstr, clientIp);
-            case "TURNSTILE" -> verifyTurnstileCaptcha(ticket, clientIp);
-            default -> verifyTencentCaptcha(ticket, randstr, clientIp);
-        }
-    }
-
-    private boolean isCaptchaRequired(String terminal) {
-        if (!captchaSetting.enabled()) {
-            return false;
-        }
-        return switch (normalizeTerminal(terminal)) {
-            case "admin" -> captchaSetting.adminLoginEnabled();
-            case "web" -> captchaSetting.webLoginEnabled();
-            default -> captchaSetting.h5LoginEnabled();
-        };
-    }
-
-    private String verificationKey(String purpose, String terminal, String target) {
-        return normalize(purpose) + ":" + normalize(terminal) + ":" + normalize(target);
-    }
-
-    private String nextSmsCode(int length) {
-        int safeLength = clampInt(length, 4, 8);
-        int bound = (int) Math.pow(10, safeLength);
-        int floor = (int) Math.pow(10, safeLength - 1);
-        return String.valueOf(floor + SECURE_RANDOM.nextInt(bound - floor));
-    }
-
-    private boolean isMobile(String value) {
-        return defaultText(value, "").matches("^1[3-9]\\d{9}$");
-    }
-
-    private void sendSmsByProvider(String mobile, String code, String content) {
-        switch (normalizeSmsProvider(smsLoginSetting.provider())) {
-            case "GENERIC" -> sendGenericSms(mobile, code, content);
-            case "ALIYUN" -> sendAliyunSms(mobile, code);
-            default -> sendTencentSms(mobile, code);
-        }
-    }
-
-    private void sendGenericSms(String mobile, String code, String content) {
-        Map<String, String> config = smsLoginSetting.genericConfig();
+    private void sendGenericSms(Map<String, String> config, String mobile, String code, String content) {
         String url = defaultText(config.get("url"), "");
         if (!StringUtils.hasText(url)) {
             throw new IllegalStateException("通用短信接口 URL 未配置");
@@ -10665,8 +6875,7 @@ public class InMemoryShopRepository {
         }
     }
 
-    private void sendTencentSms(String mobile, String code) {
-        Map<String, String> config = smsLoginSetting.tencentConfig();
+    private void sendTencentSms(Map<String, String> config, String mobile, String code) {
         String secretId = defaultText(config.get("secret_id"), "");
         String secretKey = defaultText(config.get("secret_key"), "");
         String sdkAppId = defaultText(config.get("sdk_app_id"), "");
@@ -10696,8 +6905,7 @@ public class InMemoryShopRepository {
         }
     }
 
-    private void verifyTencentCaptcha(String ticket, String randstr, String clientIp) {
-        Map<String, String> config = captchaSetting.tencentConfig();
+    private void verifyTencentCaptcha(Map<String, String> config, String ticket, String randstr, String clientIp) {
         String secretId = defaultText(config.get("secret_id"), "");
         String secretKey = defaultText(config.get("secret_key"), "");
         String captchaAppId = defaultText(config.get("captcha_app_id"), "");
@@ -10721,8 +6929,7 @@ public class InMemoryShopRepository {
         }
     }
 
-    private void verifyTurnstileCaptcha(String token, String clientIp) {
-        Map<String, String> config = captchaSetting.turnstileConfig();
+    private void verifyTurnstileCaptcha(Map<String, String> config, String token, String clientIp) {
         String secretKey = defaultText(config.get("secret_key"), "");
         if (!StringUtils.hasText(secretKey)) {
             throw new IllegalStateException("Cloudflare Turnstile 配置不完整");
@@ -10823,8 +7030,7 @@ public class InMemoryShopRepository {
         return sendHttp(request, "tencent captcha");
     }
 
-    private void verifyGenericCaptcha(String ticket, String randstr, String clientIp) {
-        Map<String, String> config = captchaSetting.genericConfig();
+    private void verifyGenericCaptcha(Map<String, String> config, String ticket, String randstr, String clientIp) {
         String url = defaultText(config.get("url"), "");
         if (!StringUtils.hasText(url)) {
             throw new IllegalStateException("通用人机验证接口 URL 未配置");
@@ -10853,8 +7059,7 @@ public class InMemoryShopRepository {
         return "通用 HTTP 校验配置项完整。";
     }
 
-    private void sendAliyunSms(String mobile, String code) {
-        Map<String, String> config = smsLoginSetting.aliyunConfig();
+    private void sendAliyunSms(Map<String, String> config, String mobile, String code) {
         String accessKeyId = defaultText(config.get("access_key_id"), "");
         String accessKeySecret = defaultText(config.get("access_key_secret"), "");
         String signName = defaultText(config.get("sign_name"), "");
@@ -10949,6 +7154,73 @@ public class InMemoryShopRepository {
             }
         });
         return result;
+    }
+
+    private void putEncryptedConfig(Map<String, Object> payload, String key, Map<String, String> config) {
+        Map<String, String> normalized = normalizeSmsConfig(config);
+        Map<String, String> publicValues = new LinkedHashMap<>();
+        Map<String, Map<String, String>> encryptedValues = new LinkedHashMap<>();
+        normalized.forEach((configKey, value) -> {
+            if (isSensitiveConfigKey(configKey) && StringUtils.hasText(value)) {
+                if (configPersistenceStore == null) {
+                    throw new IllegalStateException("secret persistence is unavailable");
+                }
+                encryptedValues.put(configKey, configService.encryptSecretForSetting(value));
+            } else {
+                publicValues.put(configKey, value);
+            }
+        });
+        payload.put(key, Map.copyOf(publicValues));
+        if (!encryptedValues.isEmpty()) {
+            payload.put(key + "Secrets", Map.copyOf(encryptedValues));
+        }
+    }
+
+    private Map<String, String> settingConfig(Map<String, Object> payload, String key) {
+        Map<String, String> values = new LinkedHashMap<>(stringMap(payload.get(key)));
+        Object rawSecrets = payload.get(key + "Secrets");
+        if (rawSecrets instanceof Map<?, ?> encryptedValues) {
+            encryptedValues.forEach((rawKey, rawValue) -> {
+                String configKey = normalizePaymentConfigKey(String.valueOf(rawKey));
+                if (!StringUtils.hasText(configKey) || !(rawValue instanceof Map<?, ?> encrypted)) {
+                    return;
+                }
+                String ciphertext = defaultText(encrypted.get("ciphertext"), "");
+                String nonce = defaultText(encrypted.get("nonce"), "");
+                if (!StringUtils.hasText(ciphertext) || !StringUtils.hasText(nonce) || configPersistenceStore == null) {
+                    throw new IllegalStateException("encrypted setting is incomplete: " + key + "." + configKey);
+                }
+                values.put(configKey, configService.decryptSecretFromSetting(ciphertext, nonce));
+            });
+        }
+        return normalizeSmsConfig(values);
+    }
+
+    /**
+     * 该配置键是否属敏感项（决定加密入库还是明文入库）。
+     *
+     * <p><b>新增任何密钥类配置时必须确认这里能匹配上，否则会明文落库。</b>
+     * 已发生过一次：Altcha 的 HMAC 密钥最初命名为 {@code hmac_key}，
+     * 不含 secret / password / token 等任何既有关键词，于是被当作公开配置
+     * 明文写进 {@code config_public} 列。该密钥是签发 PoW 挑战的唯一凭据，
+     * 泄露即等于人机验证可被批量绕过。
+     *
+     * <p>{@code public_key} 结尾的键必须排除：支付宝公钥等本就是公开值，
+     * 加密它们只会让验签路径多一次无谓解密。
+     */
+    private boolean isSensitiveConfigKey(String key) {
+        String normalized = normalizePaymentConfigKey(key);
+        if (normalized.endsWith("public_key")) {
+            return false;
+        }
+        return normalized.contains("secret")
+            || normalized.contains("private_key")
+            || normalized.contains("password")
+            || normalized.contains("token")
+            || normalized.contains("api_key")
+            || normalized.matches("api_.+_key")
+            || normalized.contains("access_key")
+            || normalized.contains("hmac");
     }
 
     private String tencentAuthorization(String secretId, String secretKey, String service, String method, String host, String payload, long timestamp) {
@@ -11066,32 +7338,7 @@ public class InMemoryShopRepository {
         return fallback;
     }
 
-    private void seedCategories() {
-        categories.put(1L, new CategoryItem(1L, "会员权益", 0L, 10, true));
-        categories.put(11L, new CategoryItem(11L, "视频平台", 1L, 11, true));
-        categories.put(111L, new CategoryItem(111L, "月卡专区", 11L, 12, true));
-        categories.put(1111L, new CategoryItem(1111L, "自动发卡", 111L, 13, true));
-        categories.put(11111L, new CategoryItem(11111L, "会员周卡", 1111L, 14, true));
-        categories.put(2L, new CategoryItem(2L, "游戏直充", 0L, 20, true));
-        categories.put(22L, new CategoryItem(22L, "手游充值", 2L, 21, true));
-        categories.put(222L, new CategoryItem(222L, "点券直充", 22L, 22, true));
-        categories.put(2222L, new CategoryItem(2222L, "API 秒充", 222L, 23, true));
-        categories.put(22222L, new CategoryItem(22222L, "热门大区", 2222L, 24, true));
-        categories.put(3L, new CategoryItem(3L, "人工代办", 0L, 30, true));
-        categories.put(33L, new CategoryItem(33L, "海外账号", 3L, 31, true));
-        categories.put(333L, new CategoryItem(333L, "人工处理", 33L, 32, true));
-    }
 
-    private void seedRechargeFields() {
-        OffsetDateTime now = OffsetDateTime.now();
-        rechargeFields.put(1L, new RechargeFieldItem(1L, "mobile", "手机号", "请输入充值手机号", "用于手机号直充、会员绑定等商品", "mobile", true, 10, true, now, now));
-        rechargeFields.put(2L, new RechargeFieldItem(2L, "qq", "QQ号", "请输入 QQ 号", "用于 QQ 会员、黄钻等权益商品", "qq", true, 20, true, now, now));
-        rechargeFields.put(3L, new RechargeFieldItem(3L, "wechat", "微信号", "请输入微信号", "用于微信生态权益或人工核验", "text", false, 30, true, now, now));
-        rechargeFields.put(4L, new RechargeFieldItem(4L, "game_uid", "游戏 UID", "请输入游戏 UID", "用于游戏点券、区服角色类商品", "text", true, 40, true, now, now));
-        rechargeFields.put(5L, new RechargeFieldItem(5L, "email", "邮箱", "请输入邮箱", "用于邮箱登录或海外账号类商品", "email", false, 50, true, now, now));
-        rechargeFields.put(6L, new RechargeFieldItem(6L, "jianying_id", "剪映ID", "请输入剪映 ID", "用于剪映相关权益或模板服务", "jianying_id", true, 60, true, now, now));
-        rechargeFields.put(7L, new RechargeFieldItem(7L, "douyin_id", "抖音ID", "请输入抖音 ID", "用于抖音账号权益或投流服务", "douyin_id", true, 70, true, now, now));
-    }
 
     private void seedPaymentChannels(boolean persist) {
         if (!paymentChannels.isEmpty()) {
@@ -11128,90 +7375,19 @@ public class InMemoryShopRepository {
         }
     }
 
-    private void seedUserGroups() {
-        userGroups.put(1L, new UserGroupItem(1L, "默认会员", "注册后自动归入的基础用户组", true, 0, "ENABLED", true, false, true, DEFAULT_PRICE_LIMIT_NOTICE, List.of()));
-        userGroups.put(2L, new UserGroupItem(2L, "渠道 VIP", "仅开放私域，屏蔽人工代充类目", false, 0, "ENABLED", true, true, true, DEFAULT_PRICE_LIMIT_NOTICE, List.of()));
-        userGroups.put(3L, new UserGroupItem(3L, "受限会员", "风控观察组，限制游戏直充和淘宝平台购买", false, 0, "ENABLED", false, false, false, DEFAULT_PRICE_LIMIT_NOTICE, List.of()));
 
-        groupRules.put("2:CATEGORY:333", new GroupRuleItem(2L, "CATEGORY", 333L, null, "人工处理", "DENY"));
-        groupRules.put("2:PLATFORM:private", new GroupRuleItem(2L, "PLATFORM", null, "private", "私域", "ALLOW"));
-        groupRules.put("3:CATEGORY:2", new GroupRuleItem(3L, "CATEGORY", 2L, null, "游戏直充", "DENY"));
-        groupRules.put("3:PLATFORM:taobao", new GroupRuleItem(3L, "PLATFORM", null, "taobao", "淘宝", "DENY"));
+    private void seedUserGroups() {
+        userService.seedUserGroups();
     }
+
 
     private void seedUsers() {
-        OffsetDateTime now = OffsetDateTime.now();
-        users.put(90001L, new UserItem(
-            90001L,
-            "",
-            "13800000001",
-            "alpha@example.com",
-            "Alpha 买家",
-            1L,
-            groupName(1L),
-            BigDecimal.valueOf(128.66),
-            BigDecimal.valueOf(300.00),
-            "NORMAL",
-            now.minusDays(8),
-            now.minusHours(6),
-            "PERSONAL",
-            "张明",
-            "",
-            "110101********1234",
-            "VERIFIED"
-        ));
-        users.put(90002L, new UserItem(
-            90002L,
-            "",
-            "13800000002",
-            "vip@example.com",
-            "渠道 VIP",
-            2L,
-            groupName(2L),
-            BigDecimal.valueOf(888.00),
-            BigDecimal.valueOf(1200.00),
-            "NORMAL",
-            now.minusDays(3),
-            now.minusHours(2),
-            "SUBJECT",
-            "李华",
-            "星河渠道服务部",
-            "913101********5678",
-            "VERIFIED"
-        ));
-        users.put(90003L, new UserItem(
-            90003L,
-            "",
-            "13800000003",
-            "risk@example.com",
-            "受限会员",
-            3L,
-            groupName(3L),
-            BigDecimal.valueOf(12.30),
-            BigDecimal.valueOf(50.00),
-            "FROZEN",
-            now.minusDays(1),
-            null,
-            "NONE",
-            "",
-            "",
-            "",
-            "UNVERIFIED"
-        ));
+        userService.seedUsers();
     }
 
+
     private void seedMemberCredentials() {
-        memberCredentials.put("demo_app_key", new MemberApiCredentialItem(
-            1L,
-            90002L,
-            "demo_app_key",
-            "demo_app_secret",
-            "ENABLED",
-            List.of(),
-            1000,
-            OffsetDateTime.now(),
-            null
-        ));
+        userService.seedMemberCredentials();
     }
 
     private void seedSuppliers() {
@@ -11254,174 +7430,9 @@ public class InMemoryShopRepository {
         ));
     }
 
-    private void seedGoodsChannels() {
-        goodsChannels.put(30001L, new GoodsChannelItem(
-            30001L,
-            10002L,
-            20001L,
-            "星河直充",
-            "STAR-GAME-60",
-            10,
-            30,
-            "ENABLED",
-            OffsetDateTime.now()
-        ));
-        goodsChannels.put(30002L, new GoodsChannelItem(
-            30002L,
-            10002L,
-            20002L,
-            "云桥货源",
-            "BRIDGE-GAME-60",
-            20,
-            45,
-            "ENABLED",
-            OffsetDateTime.now()
-        ));
-    }
 
-    private int categoryLevel(Long parentId) {
-        return categoryLevel(parentId, null);
-    }
 
-    private int categoryLevel(Long parentId, Map<Long, CategoryItem> categorySnapshot) {
-        if (parentId == null || parentId == 0L) {
-            return 0;
-        }
-        CategoryItem parent = categorySnapshot == null
-            ? findCategorySnapshot(parentId).orElse(null)
-            : categorySnapshot.get(parentId);
-        if (parent == null) {
-            return 0;
-        }
-        return categoryLevel(parent.parentId(), categorySnapshot) + 1;
-    }
 
-    private void seedGoods() {
-        OffsetDateTime now = OffsetDateTime.now();
-        goods.put(10001L, new GoodsItem(
-            10001L,
-            11111L,
-            "会员周卡",
-            "视频会员周卡",
-            "视频会员周卡",
-            "自动发卡，模拟支付后立即展示卡密",
-            "适合前端联调自动发货链路的 CARD 商品。",
-            List.of("周卡"),
-            "影视会员",
-            "演示品牌",
-            false,
-            "",
-            "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=800&q=80",
-            List.of("https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80"),
-            List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "下单完成后自动出卡，订单详情页可查看卡密与使用说明。")),
-            List.of(new GoodsIntegrationItem("link-10001-1", null, "", "douyin", "DY-VIP-WEEK", "抖音视频会员周卡", BigDecimal.valueOf(5.80), "正常", 120, "视频会员周卡", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true)),
-            false,
-            true,
-            GoodsType.CARD,
-            "VIDEO",
-            BigDecimal.valueOf(6.90),
-            BigDecimal.valueOf(12.00),
-            5,
-            false,
-            List.of(),
-            "retail-default",
-            "FIXED",
-            BigDecimal.ONE,
-            BigDecimal.ZERO,
-            0,
-            128,
-            "ON_SALE",
-            List.of("auto-delivery", "card"),
-            now,
-            now,
-            List.of("h5", "web", "api", "private"),
-            List.of("pdd"),
-            null
-        ));
-        goods.put(10002L, new GoodsItem(
-            10002L,
-            22222L,
-            "热门大区",
-            "游戏点券 60 枚",
-            "游戏点券 60 枚",
-            "直充商品，创建后进入采购中",
-            "用于验证 DIRECT 商品的下单、采购中状态和充值账号字段。",
-            List.of("一天", "三天"),
-            "游戏充值",
-            "演示品牌",
-            false,
-            "",
-            "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=800&q=80",
-            List.of("https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80"),
-            List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "直充商品会按渠道优先级自动采购，失败后自动切换备用渠道。")),
-            List.of(
-                new GoodsIntegrationItem("link-10002-1", null, "", "taobao", "TB-GAME-60", "淘宝游戏点券 60 枚", BigDecimal.valueOf(5.20), "正常", 999, "游戏点券 60 枚", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true),
-                new GoodsIntegrationItem("link-10002-2", null, "", "pdd", "PDD-GAME-60", "拼多多点券 60 枚", BigDecimal.valueOf(5.10), "正常", 860, "游戏点券 60 枚", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true)
-            ),
-            true,
-            true,
-            GoodsType.DIRECT,
-            "GAME",
-            BigDecimal.valueOf(5.80),
-            BigDecimal.valueOf(6.00),
-            1,
-            true,
-            List.of("mobile", "game_uid"),
-            "member-standard",
-            "DYNAMIC",
-            BigDecimal.valueOf(1.08),
-            BigDecimal.valueOf(0.20),
-            999,
-            245,
-            "ON_SALE",
-            List.of("direct", "recharge"),
-            now,
-            now,
-            List.of("h5", "web", "api"),
-            List.of(),
-            null
-        ));
-        goods.put(10003L, new GoodsItem(
-            10003L,
-            333L,
-            "人工处理",
-            "资料人工代办服务",
-            "资料人工代办服务",
-            "人工处理商品，创建后等待客服处理",
-            "用于验证 MANUAL 商品的待人工状态。",
-            List.of("月卡"),
-            "人工服务",
-            "演示品牌",
-            false,
-            "",
-            "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=800&q=80",
-            List.of("https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80"),
-            List.of(new GoodsDetailBlock("image", "https://images.unsplash.com/photo-1551836022-d5d88e9218df?auto=format&fit=crop&w=1200&q=80", ""), new GoodsDetailBlock("text", "", "代充订单由后台人工确认完成，适合需要客服处理的服务商品。")),
-            List.of(new GoodsIntegrationItem("link-10003-1", null, "", "private", "PR-MANUAL-001", "私域人工代办", BigDecimal.valueOf(16.00), "正常", 50, "资料人工代办服务", now.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), true)),
-            false,
-            false,
-            GoodsType.MANUAL,
-            "SERVICE",
-            BigDecimal.valueOf(19.90),
-            BigDecimal.valueOf(29.90),
-            1,
-            true,
-            List.of("mobile", "wechat"),
-            "manual-service",
-            "FIXED",
-            BigDecimal.ONE,
-            BigDecimal.ZERO,
-            50,
-            32,
-            "ON_SALE",
-            List.of("manual", "service"),
-            now,
-            now,
-            List.of("h5", "web", "private"),
-            List.of("douyin"),
-            null
-        ));
-    }
 
     private void seedOrders() {
         OffsetDateTime now = OffsetDateTime.now();

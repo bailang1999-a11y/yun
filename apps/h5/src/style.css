@@ -1,4 +1,7 @@
 :root {
+  --h5-max-width: 768px;
+  --h5-edge-gutter: 12px;
+  --h5-tabbar-height: 62px;
   font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   color: #f8fbff;
   background: #05070d;
@@ -14,6 +17,10 @@
 body {
   margin: 0;
   min-width: 320px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
+  overflow-x: clip;
   background:
     radial-gradient(circle at 18% 12%, rgba(0, 255, 195, 0.2), transparent 28%),
     radial-gradient(circle at 84% 18%, rgba(88, 166, 255, 0.24), transparent 32%),
@@ -26,6 +33,11 @@ button,
 input,
 textarea {
   font: inherit;
+}
+
+:focus-visible {
+  outline: 3px solid rgba(0, 255, 195, 0.78) !important;
+  outline-offset: 3px;
 }
 
 .sr-only {
@@ -42,13 +54,16 @@ textarea {
 
 #app {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .page {
+  width: 100%;
   min-height: 100vh;
-  max-width: 430px;
+  min-height: 100dvh;
+  max-width: var(--h5-max-width);
   margin: 0 auto;
-  padding-bottom: 86px;
+  padding-bottom: calc(var(--h5-tabbar-height) + 32px + env(safe-area-inset-bottom, 0px));
   background:
     linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.028) 1px, transparent 1px);
@@ -57,7 +72,11 @@ textarea {
 }
 
 .page-pad {
-  padding: 12px;
+  padding: var(--h5-edge-gutter);
+}
+
+.page.page-pad {
+  padding-bottom: calc(var(--h5-tabbar-height) + 32px + env(safe-area-inset-bottom, 0px));
 }
 
 .section-title {
@@ -123,5 +142,16 @@ textarea {
   100% {
     transform: scale(1.45);
     opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
   }
 }

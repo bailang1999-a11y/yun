@@ -6,10 +6,11 @@ import UserRealNameCell from '../components/UserRealNameCell.vue'
 import UserVerificationTag from '../components/UserVerificationTag.vue'
 import {
   adjustUserFunds,
+  createUser,
   createUserGroup,
   fetchUserMemberApiCredential,
   fetchUserGroups,
-  fetchUsers,
+  fetchUsersPage,
   saveUserMemberApiCredential,
   updateGroupRules,
   updateUserGroupOrderPermission,
@@ -40,6 +41,15 @@ const groups = ref<UserGroup[]>([])
 const users = ref<UserAccount[]>([])
 const selectedGroupId = ref<string>('')
 const loading = ref(false)
+const createUserDialogVisible = ref(false)
+const createUserSaving = ref(false)
+const createUserForm = reactive({
+  account: '',
+  nickname: '',
+  password: '',
+  confirmPassword: ''
+})
+
 const groupDialogVisible = ref(false)
 const fundDialogVisible = ref(false)
 const apiDialogVisible = ref(false)
@@ -49,8 +59,14 @@ const orderPermissionSaving = ref(false)
 const fundSaving = ref(false)
 const apiLoading = ref(false)
 const apiSaving = ref(false)
+const callbackUrlError = ref('')
 const credentialSaving = ref(false)
 const selectedUser = ref<UserAccount>()
+const userPagination = reactive({
+  page: 1,
+  pageSize: 10,
+  total: 0
+})
 const apiCredential = ref<MemberApiCredential>()
 const platformRules = reactive<Record<string, RulePermission>>({})
 const groupForm = reactive<UserGroupCreatePayload>({
@@ -73,6 +89,7 @@ const apiForm = reactive({
   enabled: false,
   appKey: '',
   appSecret: '',
+  callbackUrl: '',
   resetSecret: false,
   ipWhitelistText: '',
   dailyLimit: 1000
@@ -95,10 +112,11 @@ async function loadAll() {
   try {
     const [nextGroups, nextUsers] = await Promise.all([
       fetchUserGroups(),
-      fetchUsers()
+      fetchUsersPage({ page: userPagination.page, pageSize: userPagination.pageSize })
     ])
     groups.value = nextGroups
-    users.value = nextUsers
+    users.value = nextUsers.items
+    userPagination.total = nextUsers.total
     selectedGroupId.value ||= String(nextGroups[0]?.id || '')
     hydrateRules()
   } catch {
@@ -106,6 +124,11 @@ async function loadAll() {
   } finally {
     loading.value = false
   }
+}
+
+function handleUserPageChange(page: number) {
+  userPagination.page = page
+  void loadAll()
 }
 
 function hydrateRules() {
@@ -260,12 +283,14 @@ async function openApiDialog(row: UserAccount) {
   selectedUser.value = row
   apiDialogVisible.value = true
   apiLoading.value = true
+  callbackUrlError.value = ''
   try {
     const credential = await fetchUserMemberApiCredential(row.id)
     apiCredential.value = credential
     apiForm.enabled = credential.status === 'ENABLED'
     apiForm.appKey = credential.appKey
     apiForm.appSecret = credential.appSecret
+    apiForm.callbackUrl = credential.callbackUrl
     apiForm.resetSecret = false
     apiForm.ipWhitelistText = credential.ipWhitelist.join('\n')
     apiForm.dailyLimit = credential.dailyLimit || 1000
@@ -282,12 +307,18 @@ async function submitApiConfig(resetSecret = false) {
     ElMessage.warning('请填写用户 Key')
     return
   }
+  if (!isHttpUrl(apiForm.callbackUrl)) {
+    callbackUrlError.value = '请输入有效的 http 或 https 地址'
+    return
+  }
+  callbackUrlError.value = ''
   apiSaving.value = true
   try {
     const credential = await saveUserMemberApiCredential(selectedUser.value.id, {
       enabled: apiForm.enabled,
       appKey: apiForm.appKey.trim(),
       appSecret: apiForm.appSecret.trim(),
+      callbackUrl: apiForm.callbackUrl.trim(),
       resetSecret,
       ipWhitelist: splitLines(apiForm.ipWhitelistText),
       dailyLimit: Number(apiForm.dailyLimit) || 1000
@@ -296,6 +327,7 @@ async function submitApiConfig(resetSecret = false) {
     apiForm.enabled = credential.status === 'ENABLED'
     apiForm.appKey = credential.appKey
     apiForm.appSecret = credential.appSecret
+    apiForm.callbackUrl = credential.callbackUrl
     apiForm.ipWhitelistText = credential.ipWhitelist.join('\n')
     apiForm.dailyLimit = credential.dailyLimit
     ElMessage.success(resetSecret ? '用户 Secret 已重置' : '会员 API 配置已保存')
@@ -313,6 +345,16 @@ function splitLines(value: string) {
     .filter(Boolean)
 }
 
+function isHttpUrl(value: string) {
+  if (!value.trim()) return true
+  try {
+    const url = new URL(value.trim())
+    return Boolean(url.hostname) && (url.protocol === 'http:' || url.protocol === 'https:')
+  } catch {
+    return false
+  }
+}
+
 async function copyText(value: string, label: string) {
   if (!value) return
   try {
@@ -320,6 +362,44 @@ async function copyText(value: string, label: string) {
     ElMessage.success(`${label}已复制`)
   } catch {
     ElMessage.error('复制失败')
+  }
+}
+
+async function submitCreateUser() {
+  if (!createUserForm.account.trim()) {
+    ElMessage.warning('请填写用户账号（手机号或邮箱）')
+    return
+  }
+  if (createUserForm.password || createUserForm.confirmPassword) {
+    if (createUserForm.password.length < 6) {
+      ElMessage.warning('密码至少需要 6 位')
+      return
+    }
+    if (createUserForm.password !== createUserForm.confirmPassword) {
+      ElMessage.warning('两次输入的密码不一致')
+      return
+    }
+  }
+  createUserSaving.value = true
+  try {
+    const next = await createUser({
+      account: createUserForm.account.trim(),
+      nickname: createUserForm.nickname.trim(),
+      password: createUserForm.password,
+      confirmPassword: createUserForm.confirmPassword
+    })
+    users.value.unshift(next)
+    userPagination.total += 1
+    createUserDialogVisible.value = false
+    createUserForm.account = ''
+    createUserForm.nickname = ''
+    createUserForm.password = ''
+    createUserForm.confirmPassword = ''
+    ElMessage.success('用户已创建')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '创建用户失败')
+  } finally {
+    createUserSaving.value = false
   }
 }
 
@@ -484,6 +564,7 @@ function maskedCertificate(value?: string) {
           <h2>用户列表</h2>
           <span>将用户分配到对应用户组</span>
         </div>
+        <el-button type="primary" :icon="Plus" @click="createUserDialogVisible = true">新建用户</el-button>
       </div>
 
       <el-table v-loading="loading" :data="users" height="420" style="width: 100%">
@@ -541,8 +622,42 @@ function maskedCertificate(value?: string) {
           </template>
         </el-table-column>
       </el-table>
+      <div class="table-pagination">
+        <el-pagination
+          background
+          layout="prev, pager, next, total"
+          :current-page="userPagination.page"
+          :page-size="userPagination.pageSize"
+          :total="userPagination.total"
+          @current-change="handleUserPageChange"
+        />
+      </div>
     </article>
   </section>
+
+  <el-dialog v-model="createUserDialogVisible" title="新建用户" width="520px" class="xiyiyun-glass-dialog users-dialog">
+    <el-form :model="createUserForm" label-position="top">
+      <el-form-item label="登录账号">
+        <el-input v-model="createUserForm.account" placeholder="手机号或邮箱" />
+      </el-form-item>
+      <el-form-item label="用户昵称">
+        <el-input v-model="createUserForm.nickname" placeholder="留空则自动取账号前缀" />
+      </el-form-item>
+      <div class="credential-password-grid">
+        <el-form-item label="初始密码">
+          <el-input v-model="createUserForm.password" show-password placeholder="留空则不设置密码" />
+        </el-form-item>
+        <el-form-item label="确认密码">
+          <el-input v-model="createUserForm.confirmPassword" show-password placeholder="再次输入密码" />
+        </el-form-item>
+      </div>
+      <p class="dialog-hint">账号支持手机号或邮箱。创建后可在用户列表中分配用户组、调整资金。</p>
+    </el-form>
+    <template #footer>
+      <el-button @click="createUserDialogVisible = false">取消</el-button>
+      <el-button type="primary" :icon="Plus" :loading="createUserSaving" @click="submitCreateUser">创建用户</el-button>
+    </template>
+  </el-dialog>
 
   <el-dialog v-model="groupDialogVisible" title="新增会员分组" width="520px" class="xiyiyun-glass-dialog users-dialog">
     <el-form :model="groupForm" label-position="top">
@@ -674,6 +789,14 @@ function maskedCertificate(value?: string) {
           </template>
         </el-input>
       </el-form-item>
+      <el-form-item label="订单状态回调地址" :error="callbackUrlError">
+        <el-input
+          v-model="apiForm.callbackUrl"
+          placeholder="可选，例如 https://example.com/api/order/callback"
+          @input="callbackUrlError = ''"
+        />
+        <p class="dialog-hint">留空不接收通知；回调请求使用当前用户 Secret 验签。</p>
+      </el-form-item>
       <el-form-item label="白名单 IP">
         <el-input
           v-model="apiForm.ipWhitelistText"
@@ -778,6 +901,12 @@ h3 {
 
 .users-panel {
   grid-column: 1 / -1;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 12px;
 }
 
 .rule-section + .rule-section {

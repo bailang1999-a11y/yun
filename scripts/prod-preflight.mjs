@@ -44,6 +44,7 @@ if (value('XIYIYUN_PAYMENT_CALLBACK_SECRET') === value('XIYIYUN_CARD_ENCRYPTION_
 }
 
 validateCorsOrigins()
+validatePort('API_PORT')
 validatePort('WEB_PORT')
 validatePort('H5_PORT')
 validatePort('ADMIN_PORT')
@@ -191,7 +192,7 @@ function validatePort(key) {
 
 function validateDistinctPorts() {
   const ports = new Map()
-  for (const key of ['WEB_PORT', 'H5_PORT', 'ADMIN_PORT']) {
+  for (const key of ['API_PORT', 'WEB_PORT', 'H5_PORT', 'ADMIN_PORT']) {
     const current = value(key)
     if (!current || !/^\d+$/.test(current)) {
       continue

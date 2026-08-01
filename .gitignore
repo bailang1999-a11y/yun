@@ -7,9 +7,14 @@ artifacts/
 .env.*
 !.env.example
 !.env.feiniu.example
+.server.local.env
 target/
 .next/
 *.log
 backend/uploads/
+# 数据库备份：含真实用户数据与口令哈希，禁止入库
+.backups/
 .idea/
 .vscode/
+商品主图/
+图标 2_副本/

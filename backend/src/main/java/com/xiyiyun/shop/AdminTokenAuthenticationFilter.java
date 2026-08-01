@@ -2,7 +2,7 @@ package com.xiyiyun.shop;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiyiyun.shop.mvp.AdminProfile;
-import com.xiyiyun.shop.mvp.InMemoryShopRepository;
+import com.xiyiyun.shop.mvp.TokenAuthPort;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -21,14 +21,15 @@ public class AdminTokenAuthenticationFilter extends OncePerRequestFilter {
     private static final String ADMIN_LOGIN_PATH = "/api/admin/auth/login";
     private static final String ADMIN_SLIDER_PATH = "/api/admin/auth/slider";
     private static final String ADMIN_CAPTCHA_CONFIG_PATH = "/api/admin/auth/captcha-config";
+    private static final String ADMIN_ALTCHA_CHALLENGE_PATH = "/api/admin/auth/altcha-challenge";
     private static final String ADMIN_SMS_SEND_PATH = "/api/admin/auth/sms/send";
 
-    private final InMemoryShopRepository repository;
+    private final TokenAuthPort repository;
     private final ObjectMapper objectMapper;
     private final AdminPermissionPolicy permissionPolicy;
 
     public AdminTokenAuthenticationFilter(
-        InMemoryShopRepository repository,
+        TokenAuthPort repository,
         ObjectMapper objectMapper,
         AdminPermissionPolicy permissionPolicy
     ) {
@@ -76,6 +77,7 @@ public class AdminTokenAuthenticationFilter extends OncePerRequestFilter {
             && !ADMIN_LOGIN_PATH.equals(path)
             && !ADMIN_SLIDER_PATH.equals(path)
             && !ADMIN_CAPTCHA_CONFIG_PATH.equals(path)
+            && !ADMIN_ALTCHA_CHALLENGE_PATH.equals(path)
             && !ADMIN_SMS_SEND_PATH.equals(path);
     }
 

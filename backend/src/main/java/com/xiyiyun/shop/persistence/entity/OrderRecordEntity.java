@@ -12,6 +12,7 @@ public class OrderRecordEntity {
     private Long id;
     private String orderNo;
     private Long userId;
+    private String buyerAccount;
     private Long sourcePlatformId;
     private String sourcePlatformCode;
     private Long goodsId;
@@ -28,15 +29,27 @@ public class OrderRecordEntity {
     private String deliveryStatus;
     private String deliveryMessage;
     private String deliveryItemsJson;
+    private String deliveryCardIdsJson;
     private String channelAttemptsJson;
     private String rechargeAccount;
+    private String rechargeFieldsJson;
     private String buyerRemark;
     private String adminRemark;
     private String requestId;
+    /** 批次3(A4)：上游订单号，超时未知场景下用于对账与幂等补单（列与 uk_orders_upstream 由批次1建好）。 */
+    private String upstreamOrderNo;
     private OffsetDateTime paidAt;
     private OffsetDateTime deliveredAt;
     private OffsetDateTime closedAt;
     private OffsetDateTime createdAt;
+
+    public String getUpstreamOrderNo() {
+        return upstreamOrderNo;
+    }
+
+    public void setUpstreamOrderNo(String upstreamOrderNo) {
+        this.upstreamOrderNo = upstreamOrderNo;
+    }
 
     public Long getId() {
         return id;
@@ -60,6 +73,14 @@ public class OrderRecordEntity {
 
     public void setUserId(Long userId) {
         this.userId = userId;
+    }
+
+    public String getBuyerAccount() {
+        return buyerAccount;
+    }
+
+    public void setBuyerAccount(String buyerAccount) {
+        this.buyerAccount = buyerAccount;
     }
 
     public Long getSourcePlatformId() {
@@ -190,6 +211,14 @@ public class OrderRecordEntity {
         this.deliveryItemsJson = deliveryItemsJson;
     }
 
+    public String getDeliveryCardIdsJson() {
+        return deliveryCardIdsJson;
+    }
+
+    public void setDeliveryCardIdsJson(String deliveryCardIdsJson) {
+        this.deliveryCardIdsJson = deliveryCardIdsJson;
+    }
+
     public String getChannelAttemptsJson() {
         return channelAttemptsJson;
     }
@@ -204,6 +233,14 @@ public class OrderRecordEntity {
 
     public void setRechargeAccount(String rechargeAccount) {
         this.rechargeAccount = rechargeAccount;
+    }
+
+    public String getRechargeFieldsJson() {
+        return rechargeFieldsJson;
+    }
+
+    public void setRechargeFieldsJson(String rechargeFieldsJson) {
+        this.rechargeFieldsJson = rechargeFieldsJson;
     }
 
     public String getBuyerRemark() {

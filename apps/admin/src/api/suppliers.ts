@@ -14,6 +14,7 @@ import type {
 
 const SOURCE_CONNECT_SYNC_TIMEOUT_MS = 90_000
 const SOURCE_CONNECT_CLONE_TIMEOUT_MS = 180_000
+const SUPPLIER_REMOTE_OPERATION_TIMEOUT_MS = 90_000
 
 export async function fetchSuppliers() {
   const { data } = await apiClient.get<unknown>('/api/admin/suppliers')
@@ -47,13 +48,21 @@ export async function setSupplierEnabled(supplierId: Supplier['id'], enabled: bo
 }
 
 export async function refreshSupplierBalance(supplierId: Supplier['id']) {
-  const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}/balance`)
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/suppliers/${supplierId}/balance`,
+    undefined,
+    { timeout: SUPPLIER_REMOTE_OPERATION_TIMEOUT_MS }
+  )
 
   return normalizeSupplier(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
 export async function testSupplierConnection(supplierId: Supplier['id']) {
-  const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}/test`)
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/suppliers/${supplierId}/test`,
+    undefined,
+    { timeout: SUPPLIER_REMOTE_OPERATION_TIMEOUT_MS }
+  )
 
   return normalizeSupplier(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
@@ -62,7 +71,11 @@ export async function syncSupplierGoods(
   supplierId: Supplier['id'],
   payload: RemoteGoodsSyncPayload = { page: 1, limit: 20, cateId: 0, keyword: '' }
 ) {
-  const { data } = await apiClient.post<unknown>(`/api/admin/suppliers/${supplierId}/sync-goods`, payload)
+  const { data } = await apiClient.post<unknown>(
+    `/api/admin/suppliers/${supplierId}/sync-goods`,
+    payload,
+    { timeout: SOURCE_CONNECT_SYNC_TIMEOUT_MS }
+  )
 
   return normalizeRemoteGoodsSyncResult(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }

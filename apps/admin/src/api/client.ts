@@ -53,6 +53,14 @@ export function getAdminApiErrorMessage(error: unknown) {
   return '请求失败，请稍后重试。'
 }
 
+export function isAdminAuthenticationError(error: unknown) {
+  if (axios.isAxiosError(error)) {
+    return error.response?.status === 401 || error.response?.status === 403
+  }
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /unauthorized|forbidden|登录(?:已)?失效|请(?:先)?登录/i.test(message)
+}
+
 function apiErrorMessage(data?: ApiErrorEnvelope, fallback = '') {
   if (!data || typeof data !== 'object') return fallback
   const message = data.message || data.msg || data.error

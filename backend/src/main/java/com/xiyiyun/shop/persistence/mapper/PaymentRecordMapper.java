@@ -50,6 +50,30 @@ public interface PaymentRecordMapper extends BaseMapper<PaymentRecordEntity> {
         """)
     List<PaymentRecordEntity> selectSnapshots();
 
+    /**
+     * 批次8C：支付流水<b>分页</b>快照。
+     *
+     * <p>原路径是 {@code selectSnapshots()} 全表捞出、再在控制层 {@code subList} 切页。
+     * payment_records 每行带 {@code channel_payload}（渠道原始报文，通常是完整的支付网关响应 JSON），
+     * 行本身就重；而这张表随每一次支付尝试增长，没有上界。
+     * 管理后台打开「支付流水」第一页，等于把历史全部渠道报文读进堆。
+     *
+     * <p>排序键 {@code (created_at DESC, id DESC)} 与 {@code selectSnapshots} 完全一致：
+     * id 兜底保证同秒写入的流水在翻页时顺序稳定，否则同一行可能在相邻两页重复出现、或整个漏掉。
+     */
+    @Select("""
+        SELECT id, payment_no, order_id, order_no, user_id, channel, out_trade_no,
+               amount, status, channel_payload, paid_at, created_at
+        FROM payment_records
+        ORDER BY created_at DESC, id DESC
+        LIMIT #{limit} OFFSET #{offset}
+        """)
+    List<PaymentRecordEntity> selectSnapshotPage(@Param("limit") int limit, @Param("offset") long offset);
+
+    /** 批次8C：与 {@link #selectSnapshotPage} 同表、同 WHERE（此表无筛选条件），供分页返回 total。 */
+    @Select("SELECT COUNT(*) FROM payment_records")
+    long countSnapshots();
+
     @Delete("DELETE FROM payment_records WHERE order_no = #{orderNo}")
     int hardDeleteByOrderNo(@Param("orderNo") String orderNo);
 }

@@ -25,6 +25,10 @@
           <span>{{ mode === 'forgot' ? '确认新密码' : '确认密码' }}</span>
           <input v-model.trim="confirmPassword" type="password" autocomplete="new-password" placeholder="请再次输入密码" />
         </label>
+        <label v-if="mode === 'register'">
+          <span>用户名（选填）</span>
+          <input v-model.trim="username" type="text" autocomplete="username" maxlength="12" placeholder="2-12位，仅小写字母、数字、-、_" />
+        </label>
         <label v-if="showCodeField">
           <span>短信验证码</span>
           <div class="code-entry">
@@ -37,6 +41,21 @@
         <div v-if="isTurnstileCaptcha" class="turnstile-check" :class="{ done: captchaDone }">
           <div ref="turnstileBoxRef" class="turnstile-box"></div>
           <span>{{ captchaDone ? '人机验证完成' : '请完成人机验证' }}</span>
+        </div>
+        <div v-else-if="isAltchaCaptcha" class="altcha-check" :class="{ done: captchaDone }">
+          <altcha-widget
+            v-if="altchaChallengeJson"
+            :challenge="altchaChallengeJson"
+            auto="onload"
+            configuration='{"hideFooter":true}'
+            @statechange="(e: CustomEvent) => {
+              if (e.detail?.state === 'verified') {
+                captchaTicket = e.detail.payload || ''
+                captchaDone = true
+              }
+            }"
+          />
+          <span>{{ captchaDone ? '人机验证完成 ✓' : '验证中...' }}</span>
         </div>
         <button
           v-else
@@ -61,7 +80,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WebShell from '../components/WebShell.vue'
 import { getApiErrorMessage } from '../api/client'
-import { fetchSiteSettings, fetchWebCaptchaChallenge, sendWebLoginSms } from '../api/web'
+import { fetchSiteSettings, fetchWebAltchaChallenge, fetchWebCaptchaChallenge, sendWebLoginSms } from '../api/web'
 import { useSessionStore } from '../stores/session'
 import type { CaptchaChallenge, SiteSettings } from '../types/web'
 
@@ -72,6 +91,7 @@ const account = ref('')
 const code = ref('')
 const password = ref('')
 const confirmPassword = ref('')
+const username = ref('')
 const mode = ref<'login' | 'register' | 'forgot'>('login')
 const loading = ref(false)
 const codeSending = ref(false)
@@ -138,6 +158,8 @@ const showCodeField = computed(() =>
 )
 
 const isTurnstileCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'TURNSTILE')
+const isAltchaCaptcha = computed(() => captchaChallenge.value.enabled && captchaChallenge.value.provider === 'ALTCHA')
+const altchaChallengeJson = ref('')
 
 async function submit() {
   const cleanAccount = account.value.trim()
@@ -151,6 +173,10 @@ async function submit() {
   }
   if (captchaChallenge.value.enabled && !captchaDone.value) {
     error.value = '请先完成人机验证'
+    return
+  }
+  if (mode.value === 'register' && username.value.trim() && !/^[a-z0-9_-]{1,12}$/.test(username.value.trim())) {
+    error.value = '用户名只能包含小写字母、数字、下划线和连字符，且不超过 12 个字符'
     return
   }
   if (mode.value === 'register' && password.value && password.value !== confirmPassword.value) {
@@ -180,7 +206,8 @@ async function submit() {
       terminal: 'web',
       captchaTicket: captchaTicket.value,
       captchaRandstr: captchaRandstr.value,
-      mode: mode.value
+      mode: mode.value,
+      username: mode.value === 'register' ? (username.value.trim() || undefined) : undefined
     })
     await router.replace(String(route.query.redirect || '/'))
   } catch (err) {
@@ -199,6 +226,7 @@ function switchMode(next: 'login' | 'register' | 'forgot') {
   mode.value = next
   error.value = ''
   codeMessage.value = ''
+  username.value = ''
   resetCaptcha()
 }
 
@@ -208,6 +236,11 @@ async function completeCaptcha() {
       captchaDone.value = true
       error.value = ''
       return true
+    }
+    if (captchaChallenge.value.provider === 'ALTCHA') {
+      if (captchaDone.value) return true
+      error.value = '请等待人机验证完成'
+      return false
     }
     if (!captchaChallenge.value.appId) {
       error.value = '人机验证未配置完整'
@@ -236,6 +269,7 @@ function resetCaptcha() {
   captchaTicket.value = ''
   captchaRandstr.value = ''
   if (isTurnstileCaptcha.value) void renderTurnstileWidget()
+  if (isAltchaCaptcha.value) void fetchWebAltchaChallenge().then(j => { altchaChallengeJson.value = j })
 }
 
 async function loadCaptchaChallenge() {
@@ -243,6 +277,7 @@ async function loadCaptchaChallenge() {
     captchaChallenge.value = await fetchWebCaptchaChallenge()
     if (!captchaChallenge.value.enabled) captchaDone.value = true
     else if (captchaChallenge.value.provider === 'TURNSTILE') void renderTurnstileWidget()
+    else if (captchaChallenge.value.provider === 'ALTCHA') altchaChallengeJson.value = await fetchWebAltchaChallenge()
   } catch {
     captchaChallenge.value = { enabled: false, provider: 'TENCENT', appId: '' }
     captchaDone.value = true

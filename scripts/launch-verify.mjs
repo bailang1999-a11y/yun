@@ -10,6 +10,8 @@ const checks = [
   ['frontend builds', ['npm', 'run', 'typecheck']],
   ['backend tests', ['npm', 'run', 'test:backend']],
   ['production dependency audit', ['npm', 'audit', '--omit=dev', '--audit-level=high']],
+  ['admin image dependency audit', ['npm', '--prefix', 'apps/admin', 'audit', '--omit=dev', '--audit-level=high', '--workspaces=false']],
+  ['h5 image dependency audit', ['npm', '--prefix', 'apps/h5', 'audit', '--omit=dev', '--audit-level=high', '--workspaces=false']],
   ['production env preflight', ['npm', 'run', 'prod:preflight', '--', '--env-file', resolvedEnvFile]]
 ]
 

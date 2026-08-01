@@ -5,7 +5,7 @@ const sameOriginBaseUrl = import.meta.env.PROD ? '' : 'http://localhost:8080'
 
 export const apiClient = axios.create({
   baseURL: configuredBaseUrl && configuredBaseUrl !== '/api' ? configuredBaseUrl : sameOriginBaseUrl,
-  timeout: 8000
+  timeout: 20000
 })
 
 apiClient.interceptors.request.use((config) => {
@@ -28,4 +28,18 @@ export function getApiErrorMessage(error: unknown) {
   }
   if (error instanceof Error && error.message) return error.message
   return '请求失败，请稍后重试。'
+}
+
+export function isAmbiguousRequestError(error: unknown) {
+  if (!(error instanceof AxiosError)) return false
+  return !error.response || ['ECONNABORTED', 'ETIMEDOUT', 'ERR_NETWORK'].includes(error.code || '')
+}
+
+export function isNotFoundError(error: unknown) {
+  if (error instanceof AxiosError) {
+    if (error.response?.status === 404) return true
+    if (error.response?.status) return false
+  }
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /order not found|订单不存在/i.test(message)
 }

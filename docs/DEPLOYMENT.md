@@ -28,6 +28,18 @@ docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --bui
 ```bash
 docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
   sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/002_config_persistence.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/003_category_icons.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/004_security_and_order_consistency.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/005_cards_kind_and_callback_logs.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/006_money_integrity.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/007_config_tables_extraction.sql
+docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/008_user_username.sql
 docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --build
 ```
 
@@ -85,6 +97,8 @@ docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --bui
 卡密加密密钥由 `.env` 注入：
 
 - `XIYIYUN_CARD_ENCRYPTION_SECRET`
+
+该密钥同时保护卡密、API 凭据和待发送订单回调的敏感快照。已存在数据时不得直接替换；轮换前必须完成旧数据重加密或保留旧密钥读取能力，否则历史卡密、凭据和待发回调将无法解密。
 
 后端 CORS 白名单由 `.env` 注入：
 

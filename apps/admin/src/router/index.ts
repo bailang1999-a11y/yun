@@ -11,6 +11,7 @@ const RechargeFieldsView = () => import('../views/RechargeFieldsView.vue')
 const CategoriesView = () => import('../views/CategoriesView.vue')
 const SuppliersView = () => import('../views/SuppliersView.vue')
 const SourceConnectView = () => import('../views/SourceConnectView.vue')
+const OutboundProtocolsView = () => import('../views/OutboundProtocolsView.vue')
 const UpstreamMonitorView = () => import('../views/UpstreamMonitorView.vue')
 const PaymentChannelsView = () => import('../views/PaymentChannelsView.vue')
 const OrdersView = () => import('../views/OrdersView.vue')
@@ -40,6 +41,7 @@ const router = createRouter({
         { path: 'categories', name: 'categories', component: CategoriesView, meta: { title: '分类管理' } },
         { path: 'suppliers', name: 'suppliers', component: SuppliersView, meta: { title: '供应商管理' } },
         { path: 'source-connect', name: 'source-connect', component: SourceConnectView, meta: { title: '货源对接' } },
+        { path: 'outbound-protocols', name: 'outbound-protocols', component: OutboundProtocolsView, meta: { title: '对外供货协议' } },
         { path: 'upstream-monitor', name: 'upstream-monitor', component: UpstreamMonitorView, meta: { title: '上游监控看板' } },
         { path: 'payment-channels', name: 'payment-channels', component: PaymentChannelsView, meta: { title: '支付通道管理' } },
         { path: 'users', name: 'users', component: UsersView, meta: { title: '用户与权限' } },
@@ -55,8 +57,23 @@ const router = createRouter({
   ]
 })
 
+router.onError((error) => {
+  const message = String(error?.message || error || '')
+  const failedToLoadChunk = /Failed to fetch dynamically imported module|Importing a module script failed|Loading chunk|ChunkLoadError/i.test(message)
+  if (!failedToLoadChunk) return
+
+  const reloadKey = 'xiyiyun_admin_chunk_reload'
+  if (sessionStorage.getItem(reloadKey) === '1') {
+    sessionStorage.removeItem(reloadKey)
+    return
+  }
+  sessionStorage.setItem(reloadKey, '1')
+  window.location.reload()
+})
+
 router.beforeEach((to) => {
   if (to.meta.public) return true
+  sessionStorage.removeItem('xiyiyun_admin_chunk_reload')
   if (!localStorage.getItem('xiyiyun_admin_token')) {
     return { name: 'login' }
   }

@@ -1,0 +1,44 @@
+server:
+  port: 0
+
+spring:
+  datasource:
+    # 只允许指向 xiyiyun_test。AbstractIntegrationTest 会在运行时再校验一次实际连上的库名，
+    # 连到别的库（尤其是 xiyiyun）直接失败，不做静默兼容。
+    # 参数与 docker-compose.yml 中 backend 服务的 SPRING_DATASOURCE_URL 保持一致。
+    url: jdbc:mysql://mysql:3306/xiyiyun_test?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    username: xiyiyun
+    password: xiyiyun_pwd
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # 并发用例要 50 线程同时打库，连接池必须够大，否则「并发」会退化成排队
+      maximum-pool-size: 64
+      minimum-idle: 4
+      connection-timeout: 20000
+      pool-name: it-pool
+  data:
+    redis:
+      host: redis
+      port: 6379
+      timeout: 2s
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+
+xiyiyun:
+  payment:
+    callback-secret: xiyiyun_it_payment_secret
+  card:
+    # 卡密 fixture 的密文由测试用同一个 CardCipherService 生成，必须与这里一致
+    encryption-secret: xiyiyun_it_card_secret
+  delivery:
+    auto-refund-on-card-empty: false
+  order:
+    payment-timeout-minutes: 15
+
+logging:
+  level:
+    root: WARN
+    com.xiyiyun.shop: INFO
+    org.springframework.test.context: WARN

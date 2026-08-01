@@ -42,7 +42,7 @@ router.beforeEach(async (to) => {
   if (session.token && !session.profileLoading) {
     await session.ensureProfile({ force: true })
   }
-  if (to.name !== 'login' && !session.isLoggedIn) {
+  if (to.meta.requiresAuth && !session.isLoggedIn) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (to.name === 'login' && session.isLoggedIn) {

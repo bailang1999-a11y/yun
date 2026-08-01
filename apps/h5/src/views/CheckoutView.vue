@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Check, CreditCard, LoaderCircle, QrCode } from 'lucide-vue-next'
 import { getApiErrorMessage } from '../api/client'
-import { cancelH5Order, fetchH5GoodsDetail, fetchH5Order, fetchH5PaymentChannels, payH5Order } from '../api/h5'
+import { cancelH5Order, fetchH5GoodsDetail, fetchH5Order, fetchH5PaymentChannels, payH5Order, payH5OrderViaGateway } from '../api/h5'
 import AppTabbar from '../components/AppTabbar.vue'
 import { useCatalogStore } from '../stores/catalog'
 import type { GoodsCard, H5Order, PaymentChannel } from '../types/h5'
@@ -35,6 +35,10 @@ const expiresAt = computed(() => {
 const remainingMs = computed(() => Math.max(expiresAt.value - now.value, 0))
 const expired = computed(() => Boolean(order.value?.status === 'UNPAID' && expiresAt.value && remainingMs.value <= 0))
 const canPay = computed(() => Boolean(order.value?.status === 'UNPAID' && !expired.value && paymentChannels.value.length))
+// 外部支付网关（支付宝）：付款在支付宝完成，本端只负责跳转过去。
+const isGatewayChannel = computed(() =>
+  paymentChannels.value.find((item) => item.code === payMethod.value)?.type === 'ALIPAY'
+)
 const countdownText = computed(() => {
   const totalSeconds = Math.ceil(remainingMs.value / 1000)
   const minutes = Math.floor(totalSeconds / 60)
@@ -107,6 +111,16 @@ async function payNow() {
   errorMessage.value = ''
 
   try {
+    // 支付宝：跳去支付宝付款，订单由异步通知落账，不能直接跳结果页。
+    if (isGatewayChannel.value) {
+      const { payUrl } = await payH5OrderViaGateway(order.value.orderNo, payMethod.value)
+      if (!payUrl) {
+        errorMessage.value = '支付宝下单失败，请稍后重试'
+        return
+      }
+      window.location.href = payUrl
+      return
+    }
     const paidOrder = await payH5Order(order.value.orderNo, payMethod.value)
     order.value = paidOrder
     await router.push({ path: `/result/${paidOrder.orderNo}`, query: { method: methodLabel.value } })

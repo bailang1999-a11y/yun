@@ -37,6 +37,13 @@ public class CardCipherService {
         return new String(plaintext, StandardCharsets.UTF_8);
     }
 
+    public String decrypt(byte[] ciphertext, byte[] nonce, String keyVersion) {
+        if (!KEY_VERSION.equals(keyVersion)) {
+            throw new IllegalArgumentException("unsupported encryption key version");
+        }
+        return decrypt(ciphertext, nonce);
+    }
+
     public String hash(String content) {
         return sha256Hex(content);
     }

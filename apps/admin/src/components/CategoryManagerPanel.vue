@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   BadgeIcon,
@@ -49,6 +49,8 @@ const editorVisible = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
 const editingCategoryId = ref<Category['id']>()
 const iconFileInput = ref<HTMLInputElement>()
+const contextMenuRef = ref<HTMLElement>()
+let contextMenuTrigger: HTMLElement | undefined
 const contextMenu = reactive({
   visible: false,
   x: 0,
@@ -131,12 +133,12 @@ watch(
 
 onMounted(() => {
   loadCategories()
-  window.addEventListener('click', closeContextMenu)
+  window.addEventListener('click', handleWindowClick)
   window.addEventListener('keydown', handleKeydown)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('click', closeContextMenu)
+  window.removeEventListener('click', handleWindowClick)
   window.removeEventListener('keydown', handleKeydown)
 })
 
@@ -331,18 +333,58 @@ function openEdit(row: Category) {
 }
 
 function openContextMenu(event: MouseEvent, row: Category) {
+  contextMenuTrigger = event.currentTarget as HTMLElement
   contextMenu.visible = true
   contextMenu.x = event.clientX
   contextMenu.y = event.clientY
   contextMenu.row = row
+  void focusContextMenu()
 }
 
-function closeContextMenu() {
+function openKeyboardContextMenu(event: KeyboardEvent, row: Category) {
+  const trigger = event.currentTarget as HTMLElement
+  const rect = trigger.getBoundingClientRect()
+  contextMenuTrigger = trigger
+  contextMenu.visible = true
+  contextMenu.x = Math.min(rect.right - 8, window.innerWidth - 180)
+  contextMenu.y = Math.min(rect.bottom + 4, window.innerHeight - 150)
+  contextMenu.row = row
+  void focusContextMenu()
+}
+
+async function focusContextMenu() {
+  await nextTick()
+  contextMenuRef.value?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+}
+
+function closeContextMenu(restoreFocus = false) {
   contextMenu.visible = false
+  if (restoreFocus) contextMenuTrigger?.focus({ preventScroll: true })
+}
+
+function handleWindowClick() {
+  closeContextMenu()
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') closeContextMenu()
+  if (event.key === 'Escape' && contextMenu.visible) {
+    event.preventDefault()
+    closeContextMenu(true)
+  }
+}
+
+function handleContextMenuKeydown(event: KeyboardEvent) {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const buttons = Array.from(contextMenuRef.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') || [])
+  if (!buttons.length) return
+  const currentIndex = Math.max(0, buttons.indexOf(document.activeElement as HTMLButtonElement))
+  const nextIndex = event.key === 'Home'
+    ? 0
+    : event.key === 'End'
+      ? buttons.length - 1
+      : (currentIndex + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length
+  buttons[nextIndex]?.focus()
 }
 
 function errorMessage(error: unknown, fallback: string) {
@@ -394,7 +436,13 @@ async function submitCategory() {
     resetForm()
     await loadCategories()
   } catch (error) {
-    ElMessage.error(errorMessage(error, editorMode.value === 'edit' ? '分类更新失败' : '分类创建失败'))
+    const message = errorMessage(error, editorMode.value === 'edit' ? '分类更新失败' : '分类创建失败')
+    if (/超时|timeout|ECONNABORTED/i.test(message)) {
+      ElMessage.warning('分类保存等待超时，已自动刷新分类树确认结果')
+      await loadCategories()
+    } else {
+      ElMessage.error(message)
+    }
   } finally {
     saving.value = false
   }
@@ -468,6 +516,10 @@ async function removeCategory(row: Category) {
               }"
               @click="level.level === 1 ? selectRoot(item) : selectChild(item)"
               @contextmenu.prevent="openContextMenu($event, item)"
+              @keydown.shift.f10.prevent="openKeyboardContextMenu($event, item)"
+              @keydown.f2.prevent="openEdit(item)"
+              aria-haspopup="menu"
+              aria-keyshortcuts="Shift+F10 F2"
             >
               <span class="icon-bubble" :class="{ 'has-image': categoryIconUrl(item) }">
                 <img v-if="categoryIconUrl(item)" :src="categoryIconUrl(item)" :alt="`${item.name}图标`" />
@@ -494,20 +546,24 @@ async function removeCategory(row: Category) {
 
     <Teleport to="body">
       <div
+        ref="contextMenuRef"
         v-if="contextMenu.visible && contextMenu.row"
         class="category-context-menu"
         :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+        role="menu"
+        :aria-label="`${contextMenu.row.name}分类操作`"
         @click.stop
+        @keydown="handleContextMenuKeydown"
       >
-        <button type="button" @click="editContextRow">
+        <button type="button" role="menuitem" @click="editContextRow">
           <Edit3 :size="16" />
           <span>编辑</span>
         </button>
-        <button type="button" @click="createChildForContextRow">
+        <button type="button" role="menuitem" @click="createChildForContextRow">
           <FolderPlus :size="16" />
           <span>添加子分类</span>
         </button>
-        <button type="button" class="danger" :disabled="deleting" @click="removeContextRow">
+        <button type="button" role="menuitem" class="danger" :disabled="deleting" @click="removeContextRow">
           <Trash2 :size="16" />
           <span>删除</span>
         </button>

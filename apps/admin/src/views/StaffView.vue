@@ -132,7 +132,7 @@ async function removeStaff(row: AdminStaff) {
       type: 'warning',
       confirmButtonText: '删除',
       cancelButtonText: '取消',
-      customClass: 'xiyiyun-glass-dialog'
+      customClass: 'xiyiyun-glass-message-box'
     })
     await deleteAdminStaff(row.id)
     staff.value = staff.value.filter((item) => String(item.id) !== String(row.id))
