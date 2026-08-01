@@ -17,6 +17,7 @@ import com.xiyiyun.shop.persistence.mapper.OrderRecordMapper;
 import com.xiyiyun.shop.persistence.mapper.PaymentCallbackLogMapper;
 import com.xiyiyun.shop.persistence.mapper.PaymentRecordMapper;
 import com.xiyiyun.shop.persistence.mapper.RefundRecordMapper;
+import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -81,7 +82,12 @@ public class PersistentOrderStore {
 
     @Transactional
     public OrderRecordEntity saveOrderSnapshot(OrderItem order) {
-        OrderRecordEntity entity = persistenceMapper.toOrderRecord(order);
+        return saveOrderSnapshot(order, null);
+    }
+
+    @Transactional
+    public OrderRecordEntity saveOrderSnapshot(OrderItem order, BigDecimal externalMaxAmount) {
+        OrderRecordEntity entity = persistenceMapper.toOrderRecord(order, externalMaxAmount);
         orderRecordMapper.upsertByOrderNo(entity);
         bindUpstreamOrderNoIfPresent(entity);
         entity.setId(orderRecordMapper.findIdByOrderNo(entity.getOrderNo()));
@@ -96,6 +102,11 @@ public class PersistentOrderStore {
             memberCallbackTaskStore.registerTerminalOrder(order);
         }
         return entity;
+    }
+
+    @Transactional
+    public boolean saveExternalMaxAmount(String orderNo, Long userId, BigDecimal externalMaxAmount) {
+        return orderRecordMapper.saveExternalMaxAmount(orderNo, userId, externalMaxAmount) == 1;
     }
 
     /**

@@ -5,6 +5,7 @@ import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -263,6 +264,81 @@ class AgisoSupplierControllerTest {
     }
 
     @Test
+    void validMaxAmountIsPassedIntoAtomicOrderCreation() {
+        OutboundProtocolService orderService = spy(service);
+        AgisoSupplierController priceController = controller(orderService, 25L);
+        String externalOrderNo = "max-amount-" + UUID.randomUUID();
+
+        Map<String, Object> response = priceController.createRecharge(
+            signed(orderPayload(directGoodsId, "999999.1234", CALLBACK_URL, externalOrderNo)),
+            request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response).containsEntry("code", 200);
+        verify(orderService).createOrder(
+            any(OutboundApiPrincipal.class),
+            eq(directGoodsId),
+            eq(1),
+            any(),
+            any(),
+            eq(externalOrderNo),
+            anyMap(),
+            any(),
+            eq(new BigDecimal("999999.1234"))
+        );
+    }
+
+    @Test
+    void blankMaxAmountCreatesTheOrderWithNoExternalPrice() {
+        OutboundProtocolService orderService = spy(service);
+        AgisoSupplierController priceController = controller(orderService, 25L);
+        String externalOrderNo = "blank-max-" + UUID.randomUUID();
+
+        Map<String, Object> response = priceController.createRecharge(
+            signed(orderPayload(directGoodsId, "", CALLBACK_URL, externalOrderNo)),
+            request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response).containsEntry("code", 200);
+        verify(orderService).createOrder(
+            any(OutboundApiPrincipal.class),
+            eq(directGoodsId),
+            eq(1),
+            any(),
+            any(),
+            eq(externalOrderNo),
+            anyMap(),
+            any(),
+            eq((BigDecimal) null)
+        );
+    }
+
+    @Test
+    void maxAmountOutsideDatabasePrecisionIsRejectedBeforeOrderCreation() {
+        OutboundProtocolService orderService = spy(service);
+        AgisoSupplierController priceController = controller(orderService, 25L);
+
+        Map<String, Object> response = priceController.createRecharge(
+            signed(orderPayload(directGoodsId, "1E+100", CALLBACK_URL, "oversized-max-" + UUID.randomUUID())),
+            request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response).containsEntry("code", 500)
+            .containsEntry("message", "maxAmount is invalid");
+        verify(orderService, never()).createOrder(
+            any(OutboundApiPrincipal.class),
+            any(),
+            any(),
+            any(),
+            any(),
+            any(),
+            anyMap(),
+            any(),
+            any()
+        );
+    }
+
+    @Test
     void returnsThe91KamiProductMissingContractForAnUnknownProduct() {
         Map<String, Object> response = controller.createRecharge(
             signed(Map.of(
@@ -420,7 +496,7 @@ class AgisoSupplierControllerTest {
             .containsEntry("message", "async product requires callbackUrl");
         verify(orderService, never()).createOrder(
             any(OutboundApiPrincipal.class), any(Long.class), any(Integer.class), any(String.class),
-            any(String.class), any(String.class), anyMap(), any(String.class)
+            any(String.class), any(String.class), anyMap(), any(String.class), nullable(BigDecimal.class)
         );
         verifyNoInteractions(callbackService);
     }
@@ -509,7 +585,7 @@ class AgisoSupplierControllerTest {
         OutboundProtocolService orderService = spy(service);
         doReturn(created).when(orderService).createOrder(
             any(OutboundApiPrincipal.class), any(Long.class), any(Integer.class), any(String.class),
-            any(String.class), any(String.class), anyMap(), any(String.class)
+            any(String.class), any(String.class), anyMap(), any(String.class), nullable(BigDecimal.class)
         );
         doReturn(refreshed).when(orderService).findOrder(
             any(OutboundApiPrincipal.class), eq(created.orderNo()), eq("")

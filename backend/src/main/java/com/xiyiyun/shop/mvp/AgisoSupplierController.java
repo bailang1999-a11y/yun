@@ -204,7 +204,7 @@ public class AgisoSupplierController {
             }
             int quantity = intValue(payload, "buyNum", 1);
             BigDecimal expectedCost = money(goods.price()).multiply(BigDecimal.valueOf(quantity));
-            validateMaxAmount(payload, expectedCost);
+            BigDecimal externalMaxAmount = validateMaxAmount(payload, expectedCost);
 
             Map<String, Object> attach = parseJsonMap(text(payload, "attach"));
             String rechargeAccount = firstValue(attach, "account", "rechargeAccount", "recharge_account");
@@ -231,7 +231,8 @@ public class AgisoSupplierController {
                     "阿奇索标准货源订单",
                     externalOrderNo,
                     rechargeFields,
-                    clientIp(request)
+                    clientIp(request),
+                    externalMaxAmount
                 );
             } catch (RuntimeException ex) {
                 if (async) {
@@ -402,15 +403,23 @@ public class AgisoSupplierController {
         }
     }
 
-    private void validateMaxAmount(Map<String, Object> payload, BigDecimal expectedCost) {
+    private BigDecimal validateMaxAmount(Map<String, Object> payload, BigDecimal expectedCost) {
         String supplied = text(payload, "maxAmount");
         if (!StringUtils.hasText(supplied)) {
-            return;
+            return null;
         }
         try {
-            if (new BigDecimal(supplied).compareTo(expectedCost) < 0) {
+            BigDecimal maxAmount = new BigDecimal(supplied);
+            BigDecimal normalized = maxAmount.stripTrailingZeros();
+            int scale = Math.max(normalized.scale(), 0);
+            int integerDigits = normalized.precision() - normalized.scale();
+            if (scale > 4 || integerDigits > 14) {
+                throw new IllegalArgumentException("maxAmount is invalid");
+            }
+            if (maxAmount.compareTo(expectedCost) < 0) {
                 throw new AgisoMaxAmountException();
             }
+            return maxAmount;
         } catch (NumberFormatException ex) {
             throw new IllegalArgumentException("maxAmount is invalid");
         }

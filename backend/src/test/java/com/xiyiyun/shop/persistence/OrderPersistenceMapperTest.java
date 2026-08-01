@@ -46,13 +46,14 @@ class OrderPersistenceMapperTest {
             null
         );
 
-        OrderRecordEntity entity = mapper.toOrderRecord(order);
+        OrderRecordEntity entity = mapper.toOrderRecord(order, new BigDecimal("99.9900"));
 
         assertThat(entity.getOrderNo()).isEqualTo("ORD-1");
         assertThat(entity.getUserId()).isEqualTo(9L);
         assertThat(entity.getSourcePlatformCode()).isEqualTo("H5");
         assertThat(entity.getGoodsType()).isEqualTo("CARD");
         assertThat(entity.getTotalAmount()).isEqualByComparingTo("25.00");
+        assertThat(entity.getExternalMaxAmount()).isEqualByComparingTo("99.9900");
         assertThat(entity.getDeliveryStatus()).isEqualTo("PROCESSING");
         assertThat(entity.getDeliveryItemsJson()).as("card secrets must not be persisted in order JSON").isNull();
         assertThat(entity.getPaidAt()).isEqualTo(now.plusMinutes(1));

@@ -2,6 +2,7 @@ package com.xiyiyun.shop.persistence.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.xiyiyun.shop.persistence.entity.OrderRecordEntity;
+import java.math.BigDecimal;
 import java.util.List;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
@@ -232,13 +233,13 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
     @Update("""
         INSERT INTO orders (
             order_no, user_id, buyer_account, source_platform_id, source_platform_code, goods_id,
-            goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount, pay_amount,
+            goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount, pay_amount, external_max_amount,
             cost_amount, status, delivery_status, delivery_message, delivery_items_json, delivery_card_ids_json,
             channel_attempts_json, recharge_account, recharge_fields_json, buyer_remark, admin_remark,
             request_id, paid_at, delivered_at, closed_at, created_at
         ) VALUES (
             #{entity.orderNo}, #{entity.userId}, #{entity.buyerAccount}, #{entity.sourcePlatformId}, #{entity.sourcePlatformCode}, #{entity.goodsId},
-            #{entity.goodsName}, #{entity.goodsType}, #{entity.orderIp}, #{entity.orderIpLocation}, #{entity.quantity}, #{entity.unitPrice}, #{entity.totalAmount}, #{entity.payAmount},
+            #{entity.goodsName}, #{entity.goodsType}, #{entity.orderIp}, #{entity.orderIpLocation}, #{entity.quantity}, #{entity.unitPrice}, #{entity.totalAmount}, #{entity.payAmount}, #{entity.externalMaxAmount},
             #{entity.costAmount}, #{entity.status}, #{entity.deliveryStatus}, #{entity.deliveryMessage}, #{entity.deliveryItemsJson}, #{entity.deliveryCardIdsJson},
             #{entity.channelAttemptsJson}, #{entity.rechargeAccount}, #{entity.rechargeFieldsJson}, #{entity.buyerRemark}, #{entity.adminRemark},
             #{entity.requestId}, #{entity.paidAt}, #{entity.deliveredAt}, #{entity.closedAt}, #{entity.createdAt}
@@ -254,6 +255,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
             unit_price = VALUES(unit_price),
             total_amount = VALUES(total_amount),
             pay_amount = VALUES(pay_amount),
+            external_max_amount = COALESCE(external_max_amount, VALUES(external_max_amount)),
             cost_amount = VALUES(cost_amount),
             status = VALUES(status),
             delivery_status = VALUES(delivery_status),
@@ -299,6 +301,19 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
 
     @Select("SELECT upstream_order_no FROM orders WHERE order_no = #{orderNo} AND deleted_at IS NULL LIMIT 1")
     String selectUpstreamOrderNo(@Param("orderNo") String orderNo);
+
+    @Update("""
+        UPDATE orders
+        SET external_max_amount = COALESCE(external_max_amount, #{externalMaxAmount})
+        WHERE order_no = #{orderNo}
+          AND user_id = #{userId}
+          AND deleted_at IS NULL
+        """)
+    int saveExternalMaxAmount(
+        @Param("orderNo") String orderNo,
+        @Param("userId") Long userId,
+        @Param("externalMaxAmount") BigDecimal externalMaxAmount
+    );
 
     @Update("UPDATE orders SET delivery_card_ids_json = #{deliveryCardIdsJson} WHERE order_no = #{orderNo} AND deleted_at IS NULL")
     int updateDeliveryCardIds(

@@ -2543,7 +2543,16 @@ public class InMemoryShopRepository implements TokenAuthPort {
     }
 
     public OrderItem createMemberOrder(CreateOrderRequest request, Long userId, String orderIp) {
-        OrderItem order = createOrder(request, userId, orderIp, "api");
+        return createMemberOrder(request, userId, orderIp, null);
+    }
+
+    OrderItem createMemberOrder(
+        CreateOrderRequest request,
+        Long userId,
+        String orderIp,
+        BigDecimal externalMaxAmount
+    ) {
+        OrderItem order = createOrder(request, userId, orderIp, "api", externalMaxAmount);
         if (!OrderStateMachine.canStartMockPayment(order.status())) {
             return order;
         }
@@ -3120,10 +3129,20 @@ public class InMemoryShopRepository implements TokenAuthPort {
     }
 
     public OrderItem createOrder(CreateOrderRequest request, Long userId, String orderIp, String defaultTerminal) {
+        return createOrder(request, userId, orderIp, defaultTerminal, null);
+    }
+
+    private OrderItem createOrder(
+        CreateOrderRequest request,
+        Long userId,
+        String orderIp,
+        String defaultTerminal,
+        BigDecimal externalMaxAmount
+    ) {
         long startedAt = System.nanoTime();
         try {
             if (persistentOrderCreationEnabled()) {
-                return createPersistentOrder(request, userId, orderIp, defaultTerminal);
+                return createPersistentOrder(request, userId, orderIp, defaultTerminal, externalMaxAmount);
             }
             synchronized (orderLock) {
                 OrderCreationContext context = orderCreationContext(request, userId, defaultTerminal);
@@ -3137,7 +3156,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
                 try {
                     OrderItem order = buildUnpaidOrder(context, stockedItem, request, orderIp);
                     orders.put(order.orderNo(), order);
-                    persistOrderSnapshot(order);
+                    persistOrderSnapshot(order, externalMaxAmount);
                     publishOrder(order);
                     stockReserved = false;
                     return order;
@@ -3165,11 +3184,15 @@ public class InMemoryShopRepository implements TokenAuthPort {
         CreateOrderRequest request,
         Long userId,
         String orderIp,
-        String defaultTerminal
+        String defaultTerminal,
+        BigDecimal externalMaxAmount
     ) {
         OrderCreationContext context = orderCreationContext(request, userId, defaultTerminal);
         OrderItem idempotentOrder = idempotentOrder(context, request);
         if (idempotentOrder != null) {
+            orderCreationStore.saveExternalMaxAmount(
+                idempotentOrder.orderNo(), userId, externalMaxAmount
+            );
             return idempotentOrder;
         }
 
@@ -3181,7 +3204,8 @@ public class InMemoryShopRepository implements TokenAuthPort {
         OrderItem candidate = buildUnpaidOrder(context, stockedItem, request, orderIp);
         OrderCreationStore.CreateResult result = orderCreationStore.create(
             candidate,
-            stockedItem.type() != GoodsType.CARD
+            stockedItem.type() != GoodsType.CARD,
+            externalMaxAmount
         );
         OrderItem order = result.order();
         if (!sameOrderRequest(order, request, context.sourcePlatform(), context.quantity())) {
@@ -5599,11 +5623,15 @@ public class InMemoryShopRepository implements TokenAuthPort {
     }
 
     private void persistOrderSnapshot(OrderItem order) {
+        persistOrderSnapshot(order, null);
+    }
+
+    private void persistOrderSnapshot(OrderItem order, BigDecimal externalMaxAmount) {
         if (persistentOrderStore == null || order == null) {
             return;
         }
         try {
-            persistentOrderStore.saveOrderSnapshot(order);
+            persistentOrderStore.saveOrderSnapshot(order, externalMaxAmount);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "ORDER", order.orderNo(), persistenceErrorMessage(ex));
             throw ex;

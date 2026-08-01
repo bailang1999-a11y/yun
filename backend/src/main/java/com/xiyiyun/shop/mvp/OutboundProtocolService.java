@@ -152,6 +152,23 @@ public class OutboundProtocolService {
         Map<String, String> rechargeFields,
         String clientIp
     ) {
+        return createOrder(
+            principal, goodsId, quantity, rechargeAccount, buyerRemark,
+            requestId, rechargeFields, clientIp, null
+        );
+    }
+
+    OrderItem createOrder(
+        OutboundApiPrincipal principal,
+        Long goodsId,
+        Integer quantity,
+        String rechargeAccount,
+        String buyerRemark,
+        String requestId,
+        Map<String, String> rechargeFields,
+        String clientIp,
+        BigDecimal externalMaxAmount
+    ) {
         GoodsItem goods = repository.findGoods(goodsId).orElseThrow(() -> new IllegalArgumentException("goods not found"));
         if (!goods(principal, goods.categoryId(), "").stream().anyMatch(item -> Objects.equals(item.id(), goodsId))) {
             throw new IllegalArgumentException("goods unavailable");
@@ -164,7 +181,7 @@ public class OutboundProtocolService {
             requestId,
             "api",
             rechargeFields == null ? Map.of() : rechargeFields
-        ), principal.user().id(), clientIp);
+        ), principal.user().id(), clientIp, externalMaxAmount);
     }
 
     OrderItem findOrder(OutboundApiPrincipal principal, String orderNo, String requestId) {

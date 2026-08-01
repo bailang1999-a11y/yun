@@ -24,6 +24,7 @@ public class OrderRecordEntity {
     private BigDecimal unitPrice;
     private BigDecimal totalAmount;
     private BigDecimal payAmount;
+    private BigDecimal externalMaxAmount;
     private BigDecimal costAmount;
     private String status;
     private String deliveryStatus;
@@ -169,6 +170,14 @@ public class OrderRecordEntity {
 
     public void setPayAmount(BigDecimal payAmount) {
         this.payAmount = payAmount;
+    }
+
+    public BigDecimal getExternalMaxAmount() {
+        return externalMaxAmount;
+    }
+
+    public void setExternalMaxAmount(BigDecimal externalMaxAmount) {
+        this.externalMaxAmount = externalMaxAmount;
     }
 
     public BigDecimal getCostAmount() {

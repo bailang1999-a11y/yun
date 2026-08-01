@@ -77,6 +77,15 @@ class PersistentOrderStoreTest {
     }
 
     @Test
+    void saveExternalMaxAmountReportsWhetherTheScopedWriteSucceeded() {
+        when(orderRecordMapper.saveExternalMaxAmount("ORD-1", 90001L, new BigDecimal("12.3400")))
+            .thenReturn(1);
+
+        assertThat(store.saveExternalMaxAmount("ORD-1", 90001L, new BigDecimal("12.3400"))).isTrue();
+        verify(orderRecordMapper).saveExternalMaxAmount("ORD-1", 90001L, new BigDecimal("12.3400"));
+    }
+
+    @Test
     void listOrdersMapsPersistedSnapshots() {
         when(orderRecordMapper.selectActiveSnapshots()).thenReturn(List.of(orderRecord("ORD-1")));
         when(paymentRecordMapper.findLatestByOrderNo("ORD-1")).thenReturn(paymentRecord("PAY-1", "balance"));

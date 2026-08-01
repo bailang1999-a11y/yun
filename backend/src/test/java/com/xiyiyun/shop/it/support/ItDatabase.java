@@ -52,7 +52,8 @@ public final class ItDatabase {
         "db/migrations/010_agiso_price_subscriptions.sql",
         "db/migrations/011_member_api_callback_url.sql",
         "db/migrations/012_member_order_callback_tasks.sql",
-        "db/migrations/013_order_buyer_account.sql");
+        "db/migrations/013_order_buyer_account.sql",
+        "db/migrations/014_order_external_max_amount.sql");
 
     private ItDatabase() {
     }

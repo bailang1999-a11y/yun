@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS orders (
   unit_price DECIMAL(18,4) NOT NULL,
   total_amount DECIMAL(18,4) NOT NULL,
   pay_amount DECIMAL(18,4) NOT NULL,
+  external_max_amount DECIMAL(18,4) NULL,
   cost_amount DECIMAL(18,4) NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'CREATED',
   delivery_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',

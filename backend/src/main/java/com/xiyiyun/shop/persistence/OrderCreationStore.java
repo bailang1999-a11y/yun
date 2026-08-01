@@ -4,6 +4,7 @@ import com.xiyiyun.shop.mvp.OrderItem;
 import com.xiyiyun.shop.persistence.entity.OrderRecordEntity;
 import com.xiyiyun.shop.persistence.mapper.OrderRecordMapper;
 import com.xiyiyun.shop.persistence.mapper.UserBalanceTransactionMapper;
+import java.math.BigDecimal;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,12 +26,18 @@ public class OrderCreationStore {
 
     @Transactional
     public CreateResult create(OrderItem order, boolean reserveStock) {
-        OrderRecordEntity entity = persistenceMapper.toOrderRecord(order);
+        return create(order, reserveStock, null);
+    }
+
+    @Transactional
+    public CreateResult create(OrderItem order, boolean reserveStock, BigDecimal externalMaxAmount) {
+        OrderRecordEntity entity = persistenceMapper.toOrderRecord(order, externalMaxAmount);
         try {
             orderRecordMapper.insert(entity);
         } catch (DuplicateKeyException ex) {
             OrderRecordEntity existing = findByRequestId(order.userId(), order.requestId());
             if (existing != null) {
+                saveExternalMaxAmount(existing.getOrderNo(), order.userId(), externalMaxAmount);
                 return new CreateResult(persistenceMapper.toOrderItem(existing), false);
             }
             throw ex;
@@ -40,6 +47,14 @@ public class OrderCreationStore {
             throw new IllegalStateException("goods stock is insufficient");
         }
         return new CreateResult(order, true);
+    }
+
+    @Transactional
+    public void saveExternalMaxAmount(String orderNo, Long userId, BigDecimal externalMaxAmount) {
+        if (externalMaxAmount != null
+            && orderRecordMapper.saveExternalMaxAmount(orderNo, userId, externalMaxAmount) != 1) {
+            throw new IllegalStateException("order external maxAmount was not saved");
+        }
     }
 
     private OrderRecordEntity findByRequestId(Long userId, String requestId) {
