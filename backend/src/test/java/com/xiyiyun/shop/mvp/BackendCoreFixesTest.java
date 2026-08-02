@@ -169,7 +169,7 @@ class BackendCoreFixesTest {
             "h5"
         )).hasMessage("充值字段与商品配置不匹配");
 
-        OrderItem order = repository.createOrder(
+        assertThatThrownBy(() -> repository.createOrder(
             new CreateOrderRequest(
                 10002L,
                 1,
@@ -182,9 +182,77 @@ class BackendCoreFixesTest {
             90001L,
             "",
             "h5"
+        )).hasMessage("充值账号字段冲突");
+    }
+
+    @Test
+    void duplicateRechargeAliasesAreCanonicalizedByValueFormat() {
+        InMemoryShopRepository repository = newRepository();
+
+        OrderItem gameAccount = repository.createOrder(
+            new CreateOrderRequest(
+                10002L, 1, "", "", "duplicate-game-account", "h5",
+                Map.of("mobile", "player-123", "game_uid", "player-123")
+            ),
+            90001L,
+            "",
+            "h5"
+        );
+        OrderItem genericGameAccount = repository.createOrder(
+            new CreateOrderRequest(10002L, 1, "player-456", "", "generic-game-account", "h5"),
+            90001L,
+            "",
+            "h5"
+        );
+        OrderItem misplacedGameAccount = repository.createOrder(
+            new CreateOrderRequest(
+                10002L, 1, "", "", "misplaced-game-account", "h5", Map.of("mobile", "player-789")
+            ),
+            90001L,
+            "",
+            "h5"
+        );
+        OrderItem mobileAccount = repository.createOrder(
+            new CreateOrderRequest(
+                10002L, 1, "", "", "duplicate-mobile-account", "h5",
+                Map.of("mobile", "13800000001", "game_uid", "13800000001")
+            ),
+            90001L,
+            "",
+            "h5"
         );
 
-        assertThat(order.rechargeAccount()).isIn("13800000001", "player-123");
+        assertThat(gameAccount.rechargeAccount()).isEqualTo("player-123");
+        assertThat(gameAccount.rechargeFields()).containsExactlyEntriesOf(Map.of("game_uid", "player-123"));
+        assertThat(genericGameAccount.rechargeFields()).containsExactlyEntriesOf(Map.of("game_uid", "player-456"));
+        assertThat(misplacedGameAccount.rechargeFields()).containsExactlyEntriesOf(Map.of("game_uid", "player-789"));
+        assertThat(mobileAccount.rechargeFields()).containsExactlyEntriesOf(Map.of("mobile", "13800000001"));
+    }
+
+    @Test
+    void idempotentRetryComparesTheCanonicalRechargeAccountInsteadOfTheLegacyFieldMap() {
+        InMemoryShopRepository repository = newRepository();
+        CreateOrderRequest original = new CreateOrderRequest(
+            10002L, 1, "", "", "legacy-field-shape", "h5", Map.of("game_uid", "player-123")
+        );
+        OrderItem created = repository.createOrder(original, 90001L, "", "h5");
+        orders(repository).put(created.orderNo(), new OrderItem(
+            created.orderNo(), created.userId(), created.buyerAccount(), created.goodsId(), created.goodsName(),
+            created.goodsType(), created.platform(), created.orderIp(), created.orderIpLocation(), created.quantity(),
+            created.unitPrice(), created.payAmount(), created.status(), created.rechargeAccount(), Map.of(),
+            created.buyerRemark(), created.requestId(), created.paymentNo(), created.payMethod(),
+            created.deliveryItems(), created.channelAttempts(), created.deliveryMessage(), created.createdAt(),
+            created.paidAt(), created.deliveredAt(), created.upstreamOrderNo()
+        ));
+
+        OrderItem retried = repository.createOrder(
+            new CreateOrderRequest(10002L, 1, "player-123", "", "legacy-field-shape", "h5"),
+            90001L,
+            "",
+            "h5"
+        );
+
+        assertThat(retried.orderNo()).isEqualTo(created.orderNo());
     }
 
     /**

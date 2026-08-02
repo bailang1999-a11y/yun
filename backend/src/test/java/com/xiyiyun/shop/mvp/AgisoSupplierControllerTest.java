@@ -132,6 +132,12 @@ class AgisoSupplierControllerTest {
         assertThat(directTemplate.get("code")).isEqualTo(200);
         assertThat(data(directTemplate).get("apiType")).isEqualTo(2);
         assertThat(data(directTemplate).get("productType")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> attach = (List<Map<String, Object>>) data(directTemplate).get("attach");
+        assertThat(attach).singleElement().satisfies(field -> {
+            assertThat(field).containsEntry("name", "account").containsEntry("inputCheck", 1);
+            assertThat(field.get("title")).asString().contains("任填一项");
+        });
     }
 
     @Test
@@ -416,6 +422,57 @@ class AgisoSupplierControllerTest {
         );
 
         assertThat(response.get("code")).as(response.toString()).isEqualTo(200);
+    }
+
+    @Test
+    void acceptsLegacyDuplicatedRechargeFieldsAndClassifiesTheSharedValue() {
+        Map<String, Object> payload = orderPayload(
+            directGoodsId, "999999", CALLBACK_URL, "legacy-fields-" + UUID.randomUUID()
+        );
+        payload.put("attach", json(Map.of("mobile", "player-123", "game_uid", "player-123")));
+
+        Map<String, Object> response = controller.createRecharge(
+            signed(payload), request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response.get("code")).as(response.toString()).isEqualTo(200);
+        OrderItem created = repository.findOrder(String.valueOf(data(response).get("outTradeNo")))
+            .orElseThrow();
+        assertThat(created.rechargeAccount()).isEqualTo("player-123");
+        assertThat(created.rechargeFields()).containsExactlyEntriesOf(Map.of("game_uid", "player-123"));
+    }
+
+    @Test
+    void acceptsAndClassifiesTheGenericAlternativeRechargeAccount() {
+        Map<String, Object> payload = orderPayload(
+            directGoodsId, "999999", CALLBACK_URL, "generic-fields-" + UUID.randomUUID()
+        );
+        payload.put("attach", json(Map.of("account", "player-456")));
+
+        Map<String, Object> response = controller.createRecharge(
+            signed(payload), request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response.get("code")).as(response.toString()).isEqualTo(200);
+        OrderItem created = repository.findOrder(String.valueOf(data(response).get("outTradeNo")))
+            .orElseThrow();
+        assertThat(created.rechargeFields()).containsExactlyEntriesOf(Map.of("game_uid", "player-456"));
+    }
+
+    @Test
+    void failedOrderAuditIncludesTheExternalOrderContext() {
+        String externalOrderNo = "invalid-account-" + UUID.randomUUID();
+        Map<String, Object> payload = orderPayload(directGoodsId, "0", CALLBACK_URL, externalOrderNo);
+
+        Map<String, Object> response = controller.createRecharge(
+            signed(payload), request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response.get("code")).isEqualTo(1220);
+        assertThat(repository.listOpenApiLogs()).anySatisfy(log -> assertThat(log.message())
+            .contains("productNo=" + directGoodsId)
+            .contains("orderNo=" + externalOrderNo)
+            .contains("reason="));
     }
 
     @Test

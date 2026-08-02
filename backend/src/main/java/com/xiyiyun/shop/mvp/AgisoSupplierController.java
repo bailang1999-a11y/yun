@@ -14,7 +14,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
@@ -211,7 +210,7 @@ public class AgisoSupplierController {
             if (!StringUtils.hasText(rechargeAccount)) {
                 rechargeAccount = firstValue(payload, "account", "rechargeAccount", "recharge_account");
             }
-            Map<String, String> rechargeFields = rechargeFields(goods, attach, rechargeAccount);
+            Map<String, String> rechargeFields = rechargeFields(goods, attach);
             String externalOrderNo = requiredText(payload, "orderNo");
             String callbackUrl = text(payload, "callbackUrl");
             boolean async = apiType(goods) == API_TYPE_ASYNC;
@@ -309,7 +308,7 @@ public class AgisoSupplierController {
             return response;
         } catch (RuntimeException ex) {
             if (principal != null) {
-                service.reject(principal, appKey, path, ex.getMessage());
+                service.reject(principal, appKey, path, failureAuditMessage(payload, ex));
             }
             return errorCode(ex);
         }
@@ -353,6 +352,16 @@ public class AgisoSupplierController {
                 0L, "account", "充值账号", "请输入充值账号", "", "text", true, 0, true, null, null
             ));
         }
+        if (configured.size() > 1) {
+            String labels = configured.stream()
+                .map(RechargeFieldItem::label)
+                .distinct()
+                .reduce((left, right) -> left + " / " + right)
+                .orElse("充值账号");
+            configured = List.of(new RechargeFieldItem(
+                0L, "account", labels + "（任填一项）", "请输入" + labels, "", "text", true, 0, true, null, null
+            ));
+        }
         List<Map<String, Object>> fields = new ArrayList<>();
         for (RechargeFieldItem field : configured) {
             Map<String, Object> value = new LinkedHashMap<>();
@@ -370,7 +379,7 @@ public class AgisoSupplierController {
         return List.copyOf(fields);
     }
 
-    private Map<String, String> rechargeFields(GoodsItem goods, Map<String, Object> attach, String account) {
+    private Map<String, String> rechargeFields(GoodsItem goods, Map<String, Object> attach) {
         Set<String> allowed = goods.accountTypes() == null ? Set.of() : Set.copyOf(goods.accountTypes());
         Map<String, String> fields = new LinkedHashMap<>();
         attach.forEach((key, value) -> {
@@ -378,10 +387,13 @@ public class AgisoSupplierController {
                 fields.put(key, String.valueOf(value));
             }
         });
-        if (fields.isEmpty() && StringUtils.hasText(account) && !allowed.isEmpty()) {
-            fields.put(allowed.iterator().next(), account);
-        }
         return Map.copyOf(fields);
+    }
+
+    private String failureAuditMessage(Map<String, Object> payload, RuntimeException ex) {
+        return "productNo=" + text(payload, "productNo")
+            + ", orderNo=" + text(payload, "orderNo")
+            + ", reason=" + clean(ex.getMessage());
     }
 
     private void notifyCancel(
@@ -533,12 +545,7 @@ public class AgisoSupplierController {
             String value = text(values, key);
             if (StringUtils.hasText(value)) return value;
         }
-        return values.values().stream()
-            .filter(Objects::nonNull)
-            .map(String::valueOf)
-            .filter(StringUtils::hasText)
-            .findFirst()
-            .orElse("");
+        return "";
     }
 
     private static String requiredText(Map<String, Object> values, String key) {

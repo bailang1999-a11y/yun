@@ -248,7 +248,7 @@ class OutboundProtocolControllerTest {
             body.put("attach", Map.of(
                 "recharge_account", account,
                 "mobile", account,
-                "game_uid", "game-user-10001"
+                "game_uid", account
             ));
         }
         String timestamp = String.valueOf(System.currentTimeMillis());

@@ -3146,15 +3146,16 @@ public class InMemoryShopRepository implements TokenAuthPort {
             }
             synchronized (orderLock) {
                 OrderCreationContext context = orderCreationContext(request, userId, defaultTerminal);
-                OrderItem idempotentOrder = idempotentOrder(context, request);
+                CreateOrderRequest normalizedRequest = normalizeRechargeRequest(context.item(), request);
+                OrderItem idempotentOrder = idempotentOrder(context, normalizedRequest);
                 if (idempotentOrder != null) {
                     return idempotentOrder;
                 }
-                GoodsItem stockedItem = validateAndRefreshOrderGoods(context, request);
+                GoodsItem stockedItem = validateAndRefreshOrderGoods(context, normalizedRequest);
                 // 纯内存测试路径仍靠 JVM 锁保护；生产路径由 OrderCreationStore 的数据库事务保护。
                 boolean stockReserved = reserveGoodsStock(stockedItem, context.quantity());
                 try {
-                    OrderItem order = buildUnpaidOrder(context, stockedItem, request, orderIp);
+                    OrderItem order = buildUnpaidOrder(context, stockedItem, normalizedRequest, orderIp);
                     orders.put(order.orderNo(), order);
                     persistOrderSnapshot(order, externalMaxAmount);
                     publishOrder(order);
@@ -3188,7 +3189,8 @@ public class InMemoryShopRepository implements TokenAuthPort {
         BigDecimal externalMaxAmount
     ) {
         OrderCreationContext context = orderCreationContext(request, userId, defaultTerminal);
-        OrderItem idempotentOrder = idempotentOrder(context, request);
+        CreateOrderRequest normalizedRequest = normalizeRechargeRequest(context.item(), request);
+        OrderItem idempotentOrder = idempotentOrder(context, normalizedRequest);
         if (idempotentOrder != null) {
             orderCreationStore.saveExternalMaxAmount(
                 idempotentOrder.orderNo(), userId, externalMaxAmount
@@ -3196,19 +3198,19 @@ public class InMemoryShopRepository implements TokenAuthPort {
             return idempotentOrder;
         }
 
-        GoodsItem stockedItem = validateAndRefreshOrderGoods(context, request);
+        GoodsItem stockedItem = validateAndRefreshOrderGoods(context, normalizedRequest);
         if (stockedItem.type() == GoodsType.CARD
             && (stockedItem.stock() == null || stockedItem.stock() < context.quantity())) {
             throw new IllegalStateException("goods stock is insufficient");
         }
-        OrderItem candidate = buildUnpaidOrder(context, stockedItem, request, orderIp);
+        OrderItem candidate = buildUnpaidOrder(context, stockedItem, normalizedRequest, orderIp);
         OrderCreationStore.CreateResult result = orderCreationStore.create(
             candidate,
             stockedItem.type() != GoodsType.CARD,
             externalMaxAmount
         );
         OrderItem order = result.order();
-        if (!sameOrderRequest(order, request, context.sourcePlatform(), context.quantity())) {
+        if (!sameOrderRequest(order, normalizedRequest, context.sourcePlatform(), context.quantity())) {
             throw new IllegalStateException("requestId already used with different order parameters");
         }
 
@@ -5407,10 +5409,20 @@ public class InMemoryShopRepository implements TokenAuthPort {
     private boolean sameOrderRequest(OrderItem order, CreateOrderRequest request, String sourcePlatform, int quantity) {
         return Objects.equals(order.goodsId(), request.goodsId())
             && Objects.equals(order.quantity(), quantity)
-            && Objects.equals(normalizedOrderText(order.rechargeAccount()), normalizedOrderText(legacyRechargeAccount(request)))
-            && Objects.equals(order.rechargeFields(), normalizedRechargeFields(request.rechargeFields()))
+            && Objects.equals(storedRechargeAccount(order), normalizedOrderText(legacyRechargeAccount(request)))
             && Objects.equals(normalizedOrderText(order.buyerRemark()), normalizedOrderText(request.buyerRemark()))
             && Objects.equals(normalizeSalePlatform(order.platform()), normalizeSalePlatform(sourcePlatform));
+    }
+
+    private String storedRechargeAccount(OrderItem order) {
+        String account = normalizedOrderText(order.rechargeAccount());
+        if (StringUtils.hasText(account)) {
+            return account;
+        }
+        return normalizedRechargeFields(order.rechargeFields()).values().stream()
+            .filter(StringUtils::hasText)
+            .findFirst()
+            .orElse("");
     }
 
     private String normalizedOrderText(String value) {
@@ -6793,12 +6805,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
         if (!Boolean.TRUE.equals(item.requireRechargeAccount())) {
             return;
         }
-        List<RechargeFieldItem> selectedFields = normalizeTextList(item.accountTypes()).stream()
-            .map(this::rechargeFieldByCode)
-            .filter(Optional::isPresent)
-            .map(Optional::get)
-            .filter(RechargeFieldItem::enabled)
-            .toList();
+        List<RechargeFieldItem> selectedFields = selectedRechargeFields(item);
         Map<String, String> submittedFields = normalizedRechargeFields(request == null ? null : request.rechargeFields());
         if (!submittedFields.isEmpty()) {
             if (submittedFields.values().stream().noneMatch(StringUtils::hasText)) {
@@ -6843,6 +6850,88 @@ public class InMemoryShopRepository implements TokenAuthPort {
             String labels = selectedFields.stream().map(RechargeFieldItem::label).distinct().reduce((left, right) -> left + " / " + right).orElse("充值账号");
             throw new IllegalArgumentException("请输入正确的" + labels);
         }
+    }
+
+    private CreateOrderRequest normalizeRechargeRequest(GoodsItem item, CreateOrderRequest request) {
+        if (request == null || !Boolean.TRUE.equals(item.requireRechargeAccount())) {
+            return request;
+        }
+        List<RechargeFieldItem> selectedFields = selectedRechargeFields(item);
+        Map<String, String> submittedFields = normalizedRechargeFields(request.rechargeFields());
+        Set<String> allowedCodes = selectedFields.stream()
+            .map(RechargeFieldItem::code)
+            .collect(java.util.stream.Collectors.toSet());
+        if (!allowedCodes.containsAll(submittedFields.keySet())) {
+            throw new IllegalArgumentException("充值字段与商品配置不匹配");
+        }
+
+        String genericAccount = normalizedOrderText(request.rechargeAccount());
+        List<String> values = java.util.stream.Stream.concat(
+                submittedFields.values().stream().filter(StringUtils::hasText),
+                StringUtils.hasText(genericAccount) ? java.util.stream.Stream.of(genericAccount) : java.util.stream.Stream.empty()
+            )
+            .distinct()
+            .toList();
+        if (values.isEmpty()) {
+            return rechargeRequest(request, "", Map.of());
+        }
+        if (selectedFields.isEmpty()) {
+            if (values.size() > 1) {
+                throw new IllegalArgumentException("充值账号字段冲突");
+            }
+            return rechargeRequest(request, values.getFirst(), Map.of());
+        }
+
+        Map<String, RechargeFieldItem> canonicalFields = new LinkedHashMap<>();
+        for (String value : values) {
+            RechargeFieldItem canonical = selectedFields.stream()
+                .filter(field -> value.equals(submittedFields.get(field.code())))
+                .filter(field -> rechargeAccountMatches(field.inputType(), value))
+                .findFirst()
+                .orElseGet(() -> selectedFields.stream()
+                    .filter(field -> rechargeAccountMatches(field.inputType(), value))
+                    .findFirst()
+                    .orElse(null));
+            if (canonical == null) {
+                RechargeFieldItem submitted = selectedFields.stream()
+                    .filter(field -> value.equals(submittedFields.get(field.code())))
+                    .findFirst()
+                    .orElse(null);
+                String label = submitted == null
+                    ? selectedFields.stream().map(RechargeFieldItem::label).distinct()
+                        .reduce((left, right) -> left + " / " + right).orElse("充值账号")
+                    : submitted.label();
+                throw new IllegalArgumentException("请输入正确的" + label);
+            }
+            canonicalFields.put(value, canonical);
+        }
+        if (canonicalFields.size() > 1) {
+            throw new IllegalArgumentException("充值账号字段冲突");
+        }
+
+        String account = values.getFirst();
+        RechargeFieldItem field = canonicalFields.get(account);
+        return rechargeRequest(request, account, Map.of(field.code(), account));
+    }
+
+    private List<RechargeFieldItem> selectedRechargeFields(GoodsItem item) {
+        return normalizeTextList(item.accountTypes()).stream()
+            .map(this::rechargeFieldByCode)
+            .filter(Optional::isPresent)
+            .map(Optional::get)
+            .filter(RechargeFieldItem::enabled)
+            .toList();
+    }
+
+    private CreateOrderRequest rechargeRequest(
+        CreateOrderRequest request,
+        String rechargeAccount,
+        Map<String, String> rechargeFields
+    ) {
+        return new CreateOrderRequest(
+            request.goodsId(), request.quantity(), rechargeAccount, request.buyerRemark(), request.requestId(),
+            request.terminal(), rechargeFields
+        );
     }
 
     private Map<String, String> normalizedRechargeFields(Map<String, String> fields) {
