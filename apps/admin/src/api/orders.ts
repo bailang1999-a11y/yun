@@ -1,7 +1,7 @@
 import { apiClient } from './client'
 import { cleanParams, numberValue, text } from './normalize'
 import { type ApiEnvelope, type PageResult, unwrapPage, unwrapValue } from './response'
-import type { GoodsChannel, Order, OrderQuery, OrderRefreshResult } from '../types/operations'
+import type { GoodsChannel, Order, OrderQuery, OrderRefreshResult, OrderSummary } from '../types/operations'
 
 const ORDER_UPSTREAM_OPERATION_TIMEOUT_MS = 90_000
 export type OrderPageQuery = OrderQuery & { page?: number; pageSize?: number }
@@ -28,6 +28,21 @@ export async function exportOrdersExcel(query: OrderQuery = {}) {
   })
 
   return response.data
+}
+
+export async function fetchOrdersSummary(query: OrderQuery = {}): Promise<OrderSummary> {
+  const { data } = await apiClient.get<unknown>('/api/admin/orders/summary', {
+    params: cleanParams(query)
+  })
+  const value = unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>)
+  return {
+    total: numberValue(value.total),
+    externalAmount: numberValue(value.externalAmount),
+    missingExternalAmountCount: numberValue(value.missingExternalAmountCount),
+    activeCount: numberValue(value.activeCount),
+    deliveredCount: numberValue(value.deliveredCount),
+    failedCount: numberValue(value.failedCount)
+  }
 }
 
 export async function fetchOrderDetail(orderNo: string) {

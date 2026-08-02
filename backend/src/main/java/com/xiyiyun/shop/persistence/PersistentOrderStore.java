@@ -2,6 +2,7 @@ package com.xiyiyun.shop.persistence;
 
 import com.xiyiyun.shop.GoodsType;
 import com.xiyiyun.shop.mvp.OrderItem;
+import com.xiyiyun.shop.mvp.OrderSummaryItem;
 import com.xiyiyun.shop.mvp.PageSlice;
 import com.xiyiyun.shop.mvp.PaymentCallbackLogItem;
 import com.xiyiyun.shop.mvp.PaymentItem;
@@ -360,6 +361,28 @@ public class PersistentOrderStore {
     }
 
     @Transactional(readOnly = true)
+    public OrderSummaryItem summarizeOrders(
+        String search,
+        String status,
+        String goodsType,
+        OffsetDateTime createdFrom,
+        Long userId
+    ) {
+        OrderSummaryProjection summary = orderRecordMapper.selectSummary(
+            likeKeyword(search), filterValue(status), filterValue(goodsType), createdFrom, userId
+        );
+        if (summary == null) return OrderSummaryItem.empty();
+        return new OrderSummaryItem(
+            count(summary.getTotal()),
+            summary.getExternalAmount(),
+            count(summary.getMissingExternalAmountCount()),
+            count(summary.getActiveCount()),
+            count(summary.getDeliveredCount()),
+            count(summary.getFailedCount())
+        );
+    }
+
+    @Transactional(readOnly = true)
     public Optional<OrderItem> findOrderByRequestId(Long userId, String requestId) {
         if (userId == null || requestId == null || requestId.isBlank()) {
             return Optional.empty();
@@ -372,6 +395,10 @@ public class PersistentOrderStore {
     private String filterValue(String raw) {
         String normalized = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
         return normalized.isEmpty() ? null : normalized;
+    }
+
+    private long count(Long value) {
+        return value == null ? 0L : value;
     }
 
     /**

@@ -596,6 +596,18 @@ public class AdminMvpController {
         );
     }
 
+    @GetMapping("/orders/summary")
+    public ApiResponse<OrderSummaryItem> orderSummary(
+        @RequestParam(required = false) String search,
+        @RequestParam(required = false) String status,
+        @RequestParam(required = false) String goodsType,
+        @RequestParam(required = false) String createdFrom
+    ) {
+        return ApiResponse.ok(repository.summarizeOrders(
+            search, status, goodsType, parseOrderCreatedFrom(createdFrom), null
+        ));
+    }
+
     @GetMapping("/orders/export")
     public void exportOrders(
         @RequestParam(required = false) String search,

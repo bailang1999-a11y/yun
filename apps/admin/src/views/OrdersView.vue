@@ -17,9 +17,9 @@ import {
   Truck,
   XCircle
 } from 'lucide-vue-next'
-import { deleteOrder, exportOrdersExcel, fetchOrdersPage, markOrderFailed, markOrderSuccess, refreshUnfinishedOrders } from '../api/orders'
+import { deleteOrder, exportOrdersExcel, fetchOrdersPage, fetchOrdersSummary, markOrderFailed, markOrderSuccess, refreshUnfinishedOrders } from '../api/orders'
 import { subscribeOrderEvents } from '../api/realtime'
-import type { Order } from '../types/operations'
+import type { Order, OrderSummary } from '../types/operations'
 import OrderBuyerCell from '../components/OrderBuyerCell.vue'
 import OrderDurationText from '../components/OrderDurationText.vue'
 import OrderGoodsCell from '../components/OrderGoodsCell.vue'
@@ -36,6 +36,14 @@ import {
 } from '../utils/formatters'
 
 const orders = ref<Order[]>([])
+const summary = ref<OrderSummary>({
+  total: 0,
+  externalAmount: 0,
+  missingExternalAmountCount: 0,
+  activeCount: 0,
+  deliveredCount: 0,
+  failedCount: 0
+})
 const loading = ref(false)
 const syncing = ref(false)
 const upstreamRefreshing = ref(false)
@@ -56,12 +64,13 @@ let durationTimer: number | undefined
 let tableResizeFrame: number | undefined
 let tableResizeObserver: ResizeObserver | undefined
 let pageSizeReloadPending = false
+let ordersReloadPending = false
 let unsubscribeRealtime: (() => void) | undefined
 const filters = reactive({
   search: '',
   status: '',
   goodsType: '',
-  timeRange: 'all'
+  timeRange: 'today'
 })
 
 const statusOptions = orderStatusOptions
@@ -107,6 +116,7 @@ function orderRowClassName({ row }: { row: Order }) {
 function handleDetailUpdated(updatedOrder: Order) {
   orderDetailCache.set(updatedOrder.orderNo, updatedOrder)
   orders.value = orders.value.map((item) => (item.orderNo === updatedOrder.orderNo ? updatedOrder : item))
+  void loadOrders({ silent: true })
 }
 
 async function copyLocalOrderNo(value: string) {
@@ -119,24 +129,27 @@ async function copyLocalOrderNo(value: string) {
 }
 
 const orderSummary = computed(() => {
-  const pricedOrders = orders.value.filter((order) => hasExternalAmount(order.externalMaxAmount))
-  const totalAmount = pricedOrders.reduce((sum, order) => sum + Number(order.externalMaxAmount), 0)
-  const missingAmountCount = orders.value.length - pricedOrders.length
-  const activeCount = orders.value.filter((order) => ['UNPAID', 'PROCURING', 'WAITING_MANUAL'].includes(order.status)).length
-  const failedCount = orders.value.filter((order) => ['FAILED', 'REFUNDED', 'CANCELLED'].includes(order.status)).length
-  const deliveredCount = orders.value.filter((order) => order.status === 'DELIVERED').length
+  const scopeLabel = timeRangeOptions.find((item) => item.value === filters.timeRange)?.label || '当前时间'
 
   return [
-    { label: '当前结果', value: `${orders.value.length}`, hint: '笔订单', icon: ClipboardList, tone: 'total' },
+    { label: '订单总数', value: `${summary.value.total}`, hint: `${scopeLabel} · 完整统计`, icon: ClipboardList, tone: 'total' },
     {
       label: '订单金额',
-      value: formatMoney(totalAmount),
-      hint: missingAmountCount ? `当前筛选汇总 · ${missingAmountCount} 笔未提供` : '当前筛选汇总',
+      value: formatMoney(summary.value.externalAmount),
+      hint: summary.value.missingExternalAmountCount
+        ? `${scopeLabel} · ${summary.value.missingExternalAmountCount} 笔未提供`
+        : `${scopeLabel} · 完整统计`,
       icon: CircleDollarSign,
       tone: 'money'
     },
-    { label: '处理中', value: `${activeCount}`, hint: '待支付 / 采购 / 人工', icon: Activity, tone: 'active' },
-    { label: '已发货', value: `${deliveredCount}`, hint: failedCount ? `${failedCount} 笔异常或关闭` : '暂无异常', icon: PackageCheck, tone: 'done' }
+    { label: '处理中', value: `${summary.value.activeCount}`, hint: '待支付 / 采购 / 人工', icon: Activity, tone: 'active' },
+    {
+      label: '已发货',
+      value: `${summary.value.deliveredCount}`,
+      hint: summary.value.failedCount ? `${summary.value.failedCount} 笔异常或关闭` : '暂无异常',
+      icon: PackageCheck,
+      tone: 'done'
+    }
   ]
 })
 
@@ -209,7 +222,10 @@ function schedulePageSizeSync() {
 }
 
 async function loadOrders(options: { silent?: boolean } = {}) {
-  if (loading.value || syncing.value || upstreamRefreshing.value) return
+  if (loading.value || syncing.value || upstreamRefreshing.value) {
+    ordersReloadPending = true
+    return
+  }
   if (options.silent) {
     syncing.value = true
   } else {
@@ -217,8 +233,13 @@ async function loadOrders(options: { silent?: boolean } = {}) {
   }
 
   try {
-    const result = await fetchOrdersPage({ ...orderQuery(), page: pagination.page, pageSize: pagination.pageSize })
+    const query = orderQuery()
+    const [result, nextSummary] = await Promise.all([
+      fetchOrdersPage({ ...query, page: pagination.page, pageSize: pagination.pageSize }),
+      fetchOrdersSummary(query)
+    ])
     orders.value = result.items
+    summary.value = nextSummary
     pagination.total = result.total
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   } catch {
@@ -226,8 +247,9 @@ async function loadOrders(options: { silent?: boolean } = {}) {
   } finally {
     loading.value = false
     syncing.value = false
-    if (pageSizeReloadPending) {
+    if (pageSizeReloadPending || ordersReloadPending) {
       pageSizeReloadPending = false
+      ordersReloadPending = false
       void loadOrders()
     }
   }
@@ -238,8 +260,13 @@ async function refreshOrdersWithUpstream() {
   upstreamRefreshing.value = true
   try {
     const result = await refreshUnfinishedOrders()
-    const page = await fetchOrdersPage({ ...orderQuery(), page: pagination.page, pageSize: pagination.pageSize })
+    const query = orderQuery()
+    const [page, nextSummary] = await Promise.all([
+      fetchOrdersPage({ ...query, page: pagination.page, pageSize: pagination.pageSize }),
+      fetchOrdersSummary(query)
+    ])
     orders.value = page.items
+    summary.value = nextSummary
     pagination.total = page.total
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     if (result.total === 0) {
@@ -254,8 +281,9 @@ async function refreshOrdersWithUpstream() {
     ElMessage.error(message)
   } finally {
     upstreamRefreshing.value = false
-    if (pageSizeReloadPending) {
+    if (pageSizeReloadPending || ordersReloadPending) {
       pageSizeReloadPending = false
+      ordersReloadPending = false
       void loadOrders()
     }
   }
@@ -285,7 +313,7 @@ function resetFilters() {
   filters.search = ''
   filters.status = ''
   filters.goodsType = ''
-  filters.timeRange = 'all'
+  filters.timeRange = 'today'
   pagination.page = 1
   void loadOrders()
 }
@@ -329,11 +357,13 @@ async function handleManualCommand(command: unknown, row: Order) {
       const next = await markOrderSuccess(row.orderNo)
       orders.value = orders.value.map((item) => (item.orderNo === row.orderNo ? next : item))
       ElMessage.success('订单已标记成功')
+      void loadOrders({ silent: true })
     }
     if (action === 'failed') {
       const next = await markOrderFailed(row.orderNo)
       orders.value = orders.value.map((item) => (item.orderNo === row.orderNo ? next : item))
       ElMessage.success('订单已标记失败')
+      void loadOrders({ silent: true })
     }
     if (action === 'delete') {
       await deleteOrder(row.orderNo)
@@ -342,6 +372,7 @@ async function handleManualCommand(command: unknown, row: Order) {
       if (expandedOrderNo.value === row.orderNo) expandedOrderNo.value = ''
       pagination.total = Math.max(0, pagination.total - 1)
       ElMessage.success('订单已删除')
+      void loadOrders({ silent: true })
     }
   } catch (error) {
     const message = error instanceof Error && error.message ? error.message : '手动处理失败'

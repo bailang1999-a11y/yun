@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.xiyiyun.shop.it.support.ItFixtures;
 import com.xiyiyun.shop.mvp.OrderItem;
+import com.xiyiyun.shop.mvp.OrderSummaryItem;
 import com.xiyiyun.shop.mvp.PageSlice;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -140,6 +141,59 @@ class OrderPaginationPushdownIT extends AbstractIntegrationTest {
         assertThat(orderNos(recent)).containsExactly("IT8CT03", "IT8CT02");
         assertThat(delivered.total()).isEqualTo(1L);
         assertThat(orderNos(delivered)).containsExactly("IT8CT02");
+    }
+
+    @Test
+    @DisplayName("汇总使用完整筛选结果，并正确计算金额、缺失金额与状态分组")
+    void summaryMustAggregateAllMatchingRowsWithInclusiveTimeBoundary() {
+        seedBaseData();
+        long manualGoodsId = 8102L;
+        fixtures.insertGoods(manualGoodsId, "IT汇总代充商品", "MANUAL", 999, PRICE, null);
+        OffsetDateTime boundary = OffsetDateTime.now().minusHours(24).withNano(0);
+        fixtures.insertOrder("IT8CSUM-OLD", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "DELIVERED", 1, PRICE);
+        fixtures.insertOrder("IT8CSUM-DONE", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "DELIVERED", 1, PRICE);
+        fixtures.insertOrder("IT8CSUM-ACTIVE", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "PROCURING", 1, PRICE);
+        fixtures.insertOrder("IT8CSUM-FAILED", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "FAILED", 1, PRICE);
+        fixtures.insertOrder("IT8CSUM-MANUAL", ItFixtures.USER_ID, manualGoodsId, "MANUAL", "WAITING_MANUAL", 1, PRICE);
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, external_max_amount = ? WHERE order_no = ?",
+            boundary.minusSeconds(1), new BigDecimal("9.00"), "IT8CSUM-OLD"
+        );
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, external_max_amount = ? WHERE order_no = ?",
+            boundary, new BigDecimal("10.50"), "IT8CSUM-DONE"
+        );
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, external_max_amount = NULL WHERE order_no = ?",
+            boundary.plusSeconds(1), "IT8CSUM-ACTIVE"
+        );
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, external_max_amount = ? WHERE order_no = ?",
+            boundary.plusSeconds(2), new BigDecimal("3.25"), "IT8CSUM-FAILED"
+        );
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, external_max_amount = NULL WHERE order_no = ?",
+            boundary.plusSeconds(3), "IT8CSUM-MANUAL"
+        );
+
+        OrderSummaryItem summary = repository.summarizeOrders(null, null, null, boundary, null);
+
+        assertThat(summary.total()).isEqualTo(4);
+        assertThat(summary.externalAmount()).isEqualByComparingTo("13.75");
+        assertThat(summary.missingExternalAmountCount()).isEqualTo(2);
+        assertThat(summary.activeCount()).isEqualTo(2);
+        assertThat(summary.deliveredCount()).isEqualTo(1);
+        assertThat(summary.failedCount()).isEqualTo(1);
+
+        OrderSummaryItem filtered = repository.summarizeOrders(
+            "SUM-DONE", "delivered", "direct", boundary, null
+        );
+        assertThat(filtered.total()).isEqualTo(1);
+        assertThat(filtered.externalAmount()).isEqualByComparingTo("10.50");
+        assertThat(filtered.missingExternalAmountCount()).isZero();
+        assertThat(filtered.activeCount()).isZero();
+        assertThat(filtered.deliveredCount()).isEqualTo(1);
+        assertThat(filtered.failedCount()).isZero();
     }
 
     @Test

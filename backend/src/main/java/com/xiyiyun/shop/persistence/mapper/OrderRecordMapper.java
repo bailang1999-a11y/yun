@@ -2,6 +2,7 @@ package com.xiyiyun.shop.persistence.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.xiyiyun.shop.persistence.entity.OrderRecordEntity;
+import com.xiyiyun.shop.persistence.OrderSummaryProjection;
 import java.math.BigDecimal;
 import java.util.List;
 import org.apache.ibatis.annotations.Delete;
@@ -188,6 +189,45 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         </script>
         """)
     long countSnapshots(
+        @Param("keyword") String keyword,
+        @Param("status") String status,
+        @Param("goodsType") String goodsType,
+        @Param("createdFrom") java.time.OffsetDateTime createdFrom,
+        @Param("userId") Long userId
+    );
+
+    @Select("""
+        <script>
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(external_max_amount), 0) AS externalAmount,
+               COALESCE(SUM(CASE WHEN external_max_amount IS NULL THEN 1 ELSE 0 END), 0) AS missingExternalAmountCount,
+               COALESCE(SUM(CASE WHEN status IN ('UNPAID', 'PROCURING', 'WAITING_MANUAL') THEN 1 ELSE 0 END), 0) AS activeCount,
+               COALESCE(SUM(CASE WHEN status = 'DELIVERED' THEN 1 ELSE 0 END), 0) AS deliveredCount,
+               COALESCE(SUM(CASE WHEN status IN ('FAILED', 'REFUNDED', 'CANCELLED') THEN 1 ELSE 0 END), 0) AS failedCount
+        FROM orders
+        WHERE deleted_at IS NULL
+        <if test="userId != null"> AND user_id = #{userId}</if>
+        <if test="status != null"> AND LOWER(status) = #{status}</if>
+        <if test="goodsType != null"> AND LOWER(goods_type) = #{goodsType}</if>
+        <if test="createdFrom != null"> AND created_at &gt;= #{createdFrom}</if>
+        <if test="keyword != null">
+          AND (   LOWER(order_no) LIKE #{keyword} ESCAPE '\\\\'
+               OR LOWER(COALESCE(goods_name, '')) LIKE #{keyword} ESCAPE '\\\\'
+               OR LOWER(COALESCE(source_platform_code, '')) LIKE #{keyword} ESCAPE '\\\\'
+               OR LOWER(COALESCE(recharge_account, '')) LIKE #{keyword} ESCAPE '\\\\'
+               OR LOWER(COALESCE(request_id, '')) LIKE #{keyword} ESCAPE '\\\\'
+               OR LOWER(CASE
+                     WHEN delivery_message IS NOT NULL AND TRIM(delivery_message) != '' THEN delivery_message
+                     WHEN status = 'DELIVERED' THEN '订单已完成'
+                     WHEN status = 'FAILED' THEN '订单处理失败'
+                     WHEN status = 'REFUNDED' THEN '订单已退款'
+                     WHEN status IN ('CANCELLED', 'CLOSED') THEN '订单已关闭'
+                     ELSE COALESCE(delivery_status, '')
+                   END) LIKE #{keyword} ESCAPE '\\\\')
+        </if>
+        </script>
+        """)
+    OrderSummaryProjection selectSummary(
         @Param("keyword") String keyword,
         @Param("status") String status,
         @Param("goodsType") String goodsType,

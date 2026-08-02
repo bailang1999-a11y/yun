@@ -2076,6 +2076,38 @@ public class InMemoryShopRepository implements TokenAuthPort {
         return PageSlice.of(filterMemoryOrders(search, status, goodsType, createdFrom, userId), limit, offset);
     }
 
+    public OrderSummaryItem summarizeOrders(
+        String search,
+        String status,
+        String goodsType,
+        OffsetDateTime createdFrom,
+        Long userId
+    ) {
+        if (persistentOrderStore != null) {
+            try {
+                return persistentOrderStore.summarizeOrders(search, status, goodsType, createdFrom, userId);
+            } catch (RuntimeException ex) {
+                recordReadFallback("ORDER", "SUMMARY", ex);
+            }
+        }
+        List<OrderItem> matched = filterMemoryOrders(search, status, goodsType, createdFrom, userId);
+        BigDecimal externalAmount = matched.stream()
+            .map(OrderItem::externalMaxAmount)
+            .filter(Objects::nonNull)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+        long missingExternalAmountCount = matched.stream().filter(item -> item.externalMaxAmount() == null).count();
+        long activeCount = matched.stream()
+            .filter(item -> List.of(OrderStatus.UNPAID, OrderStatus.PROCURING, OrderStatus.WAITING_MANUAL).contains(item.status()))
+            .count();
+        long deliveredCount = matched.stream().filter(item -> item.status() == OrderStatus.DELIVERED).count();
+        long failedCount = matched.stream()
+            .filter(item -> List.of(OrderStatus.FAILED, OrderStatus.REFUNDED, OrderStatus.CANCELLED).contains(item.status()))
+            .count();
+        return new OrderSummaryItem(
+            matched.size(), externalAmount, missingExternalAmountCount, activeCount, deliveredCount, failedCount
+        );
+    }
+
     /**
      * 内存兜底筛选。仅在持久层缺失（单元测试）或读失败降级时使用，
      * 匹配语义须与 {@code OrderRecordMapper.selectSnapshotPage} 的 SQL 保持一致。

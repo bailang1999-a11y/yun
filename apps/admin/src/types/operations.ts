@@ -454,6 +454,15 @@ export interface OrderQuery {
   createdFrom?: string
 }
 
+export interface OrderSummary {
+  total: number
+  externalAmount: number
+  missingExternalAmountCount: number
+  activeCount: number
+  deliveredCount: number
+  failedCount: number
+}
+
 export interface OrderRefreshResult {
   total: number
   refreshed: number

@@ -36,6 +36,51 @@ class BackendCoreFixesTest {
     }
 
     @Test
+    void inMemoryOrderSummaryUsesAllFiltersAndNotOnlyOnePage() {
+        InMemoryShopRepository repository = newRepository();
+        orders(repository).clear();
+        OffsetDateTime boundary = OffsetDateTime.now().minusHours(1);
+        OrderItem oldOrder = repository.createOrder(
+            new CreateOrderRequest(10003L, 1, "13800000001", "", "summary-old", "h5"), 90001L, "", "h5"
+        );
+        OrderItem delivered = repository.createOrder(
+            new CreateOrderRequest(10003L, 1, "13800000001", "", "summary-delivered", "h5"), 90001L, "", "h5"
+        );
+        OrderItem active = repository.createOrder(
+            new CreateOrderRequest(10003L, 1, "13800000001", "", "summary-active", "h5"), 90001L, "", "h5"
+        );
+        OrderItem failed = repository.createOrder(
+            new CreateOrderRequest(10003L, 1, "13800000001", "", "summary-failed", "h5"), 90001L, "", "h5"
+        );
+        orders(repository).put(oldOrder.orderNo(), withSummaryFields(
+            oldOrder, OrderStatus.DELIVERED, boundary.minusSeconds(1), new BigDecimal("9.00")
+        ));
+        orders(repository).put(delivered.orderNo(), withSummaryFields(
+            delivered, OrderStatus.DELIVERED, boundary, new BigDecimal("10.50")
+        ));
+        orders(repository).put(active.orderNo(), withSummaryFields(
+            active, OrderStatus.PROCURING, boundary.plusSeconds(1), null
+        ));
+        orders(repository).put(failed.orderNo(), withSummaryFields(
+            failed, OrderStatus.FAILED, boundary.plusSeconds(2), new BigDecimal("3.25")
+        ));
+
+        OrderSummaryItem summary = repository.summarizeOrders(null, null, null, boundary, null);
+
+        assertThat(summary.total()).isEqualTo(3);
+        assertThat(summary.externalAmount()).isEqualByComparingTo("13.75");
+        assertThat(summary.missingExternalAmountCount()).isEqualTo(1);
+        assertThat(summary.activeCount()).isEqualTo(1);
+        assertThat(summary.deliveredCount()).isEqualTo(1);
+        assertThat(summary.failedCount()).isEqualTo(1);
+
+        OrderSummaryItem filtered = repository.summarizeOrders(
+            active.orderNo(), "procuring", active.goodsType().name().toLowerCase(), boundary, null
+        );
+        assertThat(filtered).isEqualTo(new OrderSummaryItem(1, BigDecimal.ZERO, 1, 1, 0, 0));
+    }
+
+    @Test
     void categoryReorderRequiresEverySiblingAndPersistsRequestedOrder() {
         InMemoryShopRepository repository = newRepository();
 
@@ -403,6 +448,21 @@ class BackendCoreFixesTest {
             item.status(), item.rechargeAccount(), item.rechargeFields(), item.buyerRemark(), item.requestId(),
             item.paymentNo(), item.payMethod(), item.deliveryItems(), item.channelAttempts(), item.deliveryMessage(),
             createdAt, item.paidAt(), item.deliveredAt(), item.upstreamOrderNo(), item.externalMaxAmount()
+        );
+    }
+
+    private static OrderItem withSummaryFields(
+        OrderItem item,
+        OrderStatus status,
+        OffsetDateTime createdAt,
+        BigDecimal externalMaxAmount
+    ) {
+        return new OrderItem(
+            item.orderNo(), item.userId(), item.buyerAccount(), item.goodsId(), item.goodsName(), item.goodsType(),
+            item.platform(), item.orderIp(), item.orderIpLocation(), item.quantity(), item.unitPrice(), item.payAmount(),
+            status, item.rechargeAccount(), item.rechargeFields(), item.buyerRemark(), item.requestId(),
+            item.paymentNo(), item.payMethod(), item.deliveryItems(), item.channelAttempts(), item.deliveryMessage(),
+            createdAt, item.paidAt(), item.deliveredAt(), item.upstreamOrderNo(), externalMaxAmount
         );
     }
 
