@@ -67,6 +67,12 @@ export async function updateCategory(categoryId: Category['id'], payload: Catego
   return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
 }
 
+export async function updateCategorySort(categoryId: Category['id'], sort: number) {
+  const { data } = await apiClient.post<unknown>(`/api/admin/categories/${categoryId}`, { sort }, { timeout: CATEGORY_WRITE_TIMEOUT_MS })
+
+  return normalizeCategory(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
 export async function deleteCategory(categoryId: Category['id']) {
   const { data } = await apiClient.post(`/api/admin/categories/${categoryId}/delete`, undefined, { timeout: CATEGORY_WRITE_TIMEOUT_MS })
 

@@ -5,15 +5,17 @@ import {
   BadgeIcon,
   BookOpen,
   BriefcaseBusiness,
+  Check,
   Edit3,
   Film,
   Flame,
   FolderPlus,
   Gamepad2,
+  GripVertical,
   HeartHandshake,
   ImagePlus,
+  LoaderCircle,
   MonitorCog,
-  MoreVertical,
   Plus,
   RefreshCw,
   Rocket,
@@ -22,7 +24,7 @@ import {
   Trash2,
   X
 } from 'lucide-vue-next'
-import { createCategory, deleteCategory, fetchCategories, updateCategory } from '../api/catalog'
+import { createCategory, deleteCategory, fetchCategories, updateCategory, updateCategorySort } from '../api/catalog'
 import { uploadImage } from '../api/uploads'
 import type { Category, CategoryCreatePayload, CategoryUpdatePayload } from '../types/operations'
 import { buildCategoryTree, flattenCategoryTree } from '../utils/categoryTree'
@@ -41,6 +43,8 @@ const MAX_CATEGORY_DEPTH = 5
 const categories = ref<Category[]>([])
 const loading = ref(false)
 const saving = ref(false)
+const sortSaving = ref(false)
+const sortFeedback = ref<'idle' | 'saving' | 'saved'>('idle')
 const deleting = ref(false)
 const iconUploading = ref(false)
 const selectedCategoryId = ref<string>(props.modelValue == null ? '' : String(props.modelValue))
@@ -51,11 +55,20 @@ const editingCategoryId = ref<Category['id']>()
 const iconFileInput = ref<HTMLInputElement>()
 const contextMenuRef = ref<HTMLElement>()
 let contextMenuTrigger: HTMLElement | undefined
+let sortFeedbackTimer: ReturnType<typeof window.setTimeout> | undefined
 const contextMenu = reactive({
   visible: false,
   x: 0,
   y: 0,
   row: undefined as Category | undefined
+})
+const dragState = reactive({
+  itemId: '',
+  parentKey: '',
+  level: 0,
+  overId: '',
+  moved: false,
+  snapshot: [] as Array<{ id: string; sort: number }>
 })
 
 const form = reactive<CategoryCreatePayload & { icon: string; iconUrl: string; customIconUrl: string; nickname: string }>({
@@ -140,6 +153,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('click', handleWindowClick)
   window.removeEventListener('keydown', handleKeydown)
+  if (sortFeedbackTimer) window.clearTimeout(sortFeedbackTimer)
 })
 
 async function loadCategories() {
@@ -176,6 +190,132 @@ function selectCategory(row: Category | null) {
 
 function syncRootToSelection() {
   selectedPath.value = findPathForId(categoryTree.value, selectedCategoryId.value)
+}
+
+function parentKey(parentId?: Category['id']) {
+  return parentId == null ? 'root' : String(parentId)
+}
+
+function handleDragStart(event: DragEvent, row: Category, level: number, siblings: Category[]) {
+  if (sortSaving.value || siblings.length < 2) {
+    event.preventDefault()
+    return
+  }
+
+  closeContextMenu()
+  clearSavedFeedback()
+  dragState.itemId = String(row.id)
+  dragState.parentKey = parentKey(row.parentId)
+  dragState.level = level
+  dragState.overId = ''
+  dragState.moved = false
+  dragState.snapshot = siblings.map((item) => ({ id: String(item.id), sort: Number(item.sort ?? 0) }))
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', String(row.id))
+  }
+}
+
+function handleDragEnter(row: Category, level: number, siblings: Category[]) {
+  const targetId = String(row.id)
+  if (!canDropOn(row, level) || targetId === dragState.itemId || targetId === dragState.overId) return
+
+  const orderedIds = siblings.map((item) => String(item.id))
+  const sourceIndex = orderedIds.indexOf(dragState.itemId)
+  const targetIndex = orderedIds.indexOf(targetId)
+  if (sourceIndex < 0 || targetIndex < 0) return
+
+  orderedIds.splice(sourceIndex, 1)
+  orderedIds.splice(targetIndex, 0, dragState.itemId)
+  const sortById = new Map(orderedIds.map((id, index) => [id, (index + 1) * 10]))
+  categories.value = categories.value.map((item) => {
+    const nextSort = sortById.get(String(item.id))
+    return nextSort === undefined ? item : { ...item, sort: nextSort }
+  })
+  dragState.overId = targetId
+  dragState.moved = true
+  syncRootToSelection()
+}
+
+function handleDragOver(event: DragEvent, row: Category, level: number) {
+  if (!canDropOn(row, level)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+function canDropOn(row: Category, level: number) {
+  return Boolean(
+    dragState.itemId &&
+    dragState.level === level &&
+    dragState.parentKey === parentKey(row.parentId)
+  )
+}
+
+function handleDrop(event: DragEvent, row: Category, level: number) {
+  if (!canDropOn(row, level)) return
+  event.preventDefault()
+  const snapshot = [...dragState.snapshot]
+  const moved = dragState.moved
+  resetDragState()
+  if (moved) void persistCategoryOrder(snapshot)
+}
+
+function handleDragEnd() {
+  if (!dragState.itemId) return
+  if (dragState.moved) restoreCategorySorts(dragState.snapshot)
+  resetDragState()
+}
+
+function resetDragState() {
+  dragState.itemId = ''
+  dragState.parentKey = ''
+  dragState.level = 0
+  dragState.overId = ''
+  dragState.moved = false
+  dragState.snapshot = []
+}
+
+function restoreCategorySorts(snapshot: Array<{ id: string; sort: number }>) {
+  const sortById = new Map(snapshot.map((item) => [item.id, item.sort]))
+  categories.value = categories.value.map((item) => {
+    const previousSort = sortById.get(String(item.id))
+    return previousSort === undefined ? item : { ...item, sort: previousSort }
+  })
+  syncRootToSelection()
+}
+
+async function persistCategoryOrder(snapshot: Array<{ id: string; sort: number }>) {
+  const previousSortById = new Map(snapshot.map((item) => [item.id, item.sort]))
+  const changed = categories.value.filter((item) => {
+    const previousSort = previousSortById.get(String(item.id))
+    return previousSort !== undefined && previousSort !== Number(item.sort ?? 0)
+  })
+  if (!changed.length) return
+
+  sortSaving.value = true
+  sortFeedback.value = 'saving'
+  try {
+    await Promise.all(changed.map((item) => updateCategorySort(item.id, Number(item.sort ?? 0))))
+    emit('categories-loaded', categories.value)
+    sortFeedback.value = 'saved'
+    sortFeedbackTimer = window.setTimeout(() => {
+      sortFeedback.value = 'idle'
+      sortFeedbackTimer = undefined
+    }, 1800)
+  } catch (error) {
+    sortFeedback.value = 'idle'
+    await loadCategories()
+    ElMessage.error(errorMessage(error, '分类排序保存失败，已恢复服务器顺序'))
+  } finally {
+    sortSaving.value = false
+  }
+}
+
+function clearSavedFeedback() {
+  if (sortFeedback.value !== 'saved') return
+  if (sortFeedbackTimer) window.clearTimeout(sortFeedbackTimer)
+  sortFeedbackTimer = undefined
+  sortFeedback.value = 'idle'
 }
 
 function iconForCategory(row: Category) {
@@ -487,9 +627,14 @@ async function removeCategory(row: Category) {
               <em>{{ categories.length }} 个节点</em>
               <em>当前 {{ selectedCategory?.name || selectedRoot?.name || '未选择' }}</em>
               <em>{{ depthLabel(selectedCategory || selectedRoot) }}</em>
+              <em v-if="sortFeedback !== 'idle'" class="sort-feedback" :data-state="sortFeedback">
+                <LoaderCircle v-if="sortFeedback === 'saving'" :size="13" aria-hidden="true" />
+                <Check v-else :size="13" aria-hidden="true" />
+                {{ sortFeedback === 'saving' ? '正在保存排序' : '排序已保存' }}
+              </em>
             </span>
           </div>
-          <el-button :icon="RefreshCw" :loading="loading" @click="loadCategories">刷新</el-button>
+          <el-button :icon="RefreshCw" :loading="loading" :disabled="sortSaving" @click="loadCategories">刷新</el-button>
         </div>
 
         <section
@@ -504,7 +649,11 @@ async function removeCategory(row: Category) {
             <span v-if="level.parent">归属 {{ level.parent.name }}</span>
             <span v-else>{{ level.nodes.length ? `${level.nodes.length} 个一级分类` : '暂无一级分类' }}</span>
           </div>
-          <div :class="level.level <= 2 ? 'category-strip' : 'category-matrix'">
+          <TransitionGroup
+            tag="div"
+            name="category-order"
+            :class="level.level <= 2 ? 'category-strip' : 'category-matrix'"
+          >
             <button
               v-for="item in level.nodes"
               :key="item.id"
@@ -512,9 +661,18 @@ async function removeCategory(row: Category) {
               class="category-icon-card"
               :class="{
                 root: level.level === 1,
-                active: selectedPath.some((pathItem) => String(pathItem.id) === String(item.id))
+                active: selectedPath.some((pathItem) => String(pathItem.id) === String(item.id)),
+                dragging: dragState.itemId === String(item.id),
+                'drag-over': dragState.overId === String(item.id)
               }"
+              :draggable="!sortSaving && level.nodes.length > 1"
+              :aria-grabbed="dragState.itemId === String(item.id)"
               @click="level.level === 1 ? selectRoot(item) : selectChild(item)"
+              @dragstart="handleDragStart($event, item, level.level, level.nodes)"
+              @dragenter.prevent="handleDragEnter(item, level.level, level.nodes)"
+              @dragover="handleDragOver($event, item, level.level)"
+              @drop="handleDrop($event, item, level.level)"
+              @dragend="handleDragEnd"
               @contextmenu.prevent="openContextMenu($event, item)"
               @keydown.shift.f10.prevent="openKeyboardContextMenu($event, item)"
               @keydown.f2.prevent="openEdit(item)"
@@ -528,9 +686,15 @@ async function removeCategory(row: Category) {
               <strong>{{ item.name }}</strong>
               <em>{{ item.children?.length ? `${item.children.length} 个子类` : `排序 ${item.sort}` }}</em>
               <small v-if="level.level >= 3" :data-enabled="item.enabled">{{ item.enabled ? '启用' : '停用' }}</small>
-              <span class="card-more" aria-hidden="true"><MoreVertical :size="15" /></span>
+              <span class="drag-handle" title="拖动排序" aria-hidden="true"><GripVertical :size="15" /></span>
             </button>
-            <button type="button" class="category-icon-card add-card" :class="{ 'root-add-card': level.level === 1 }" @click="openCreate(level.parent?.id)">
+            <button
+              :key="`add-${level.level}-${level.parent?.id ?? 'root'}`"
+              type="button"
+              class="category-icon-card add-card"
+              :class="{ 'root-add-card': level.level === 1 }"
+              @click="openCreate(level.parent?.id)"
+            >
               <span class="icon-bubble">
                 <Plus v-if="level.level <= 2" :size="30" />
                 <FolderPlus v-else :size="28" />
@@ -538,7 +702,7 @@ async function removeCategory(row: Category) {
               <strong>新增分类</strong>
               <em>{{ level.parent ? `挂到 ${level.parent.name}` : '一级分类' }}</em>
             </button>
-          </div>
+          </TransitionGroup>
         </section>
 
       </div>
@@ -751,6 +915,21 @@ async function removeCategory(row: Category) {
   font-size: 12px;
 }
 
+.category-breadcrumb .sort-feedback {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #67d9ff;
+}
+
+.category-breadcrumb .sort-feedback[data-state="saved"] {
+  color: #58e6b5;
+}
+
+.category-breadcrumb .sort-feedback[data-state="saving"] svg {
+  animation: category-sort-spin 800ms linear infinite;
+}
+
 .category-strip {
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   align-items: start;
@@ -776,7 +955,19 @@ async function removeCategory(row: Category) {
   border-radius: 18px;
   background: transparent;
   cursor: pointer;
-  transition: transform 150ms ease, background 150ms ease, border-color 150ms ease;
+  transition: transform 150ms ease, background 150ms ease, border-color 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
+}
+
+.category-order-move {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+}
+
+.category-icon-card[draggable="true"] {
+  cursor: grab;
+}
+
+.category-icon-card[draggable="true"]:active {
+  cursor: grabbing;
 }
 
 .category-icon-card:hover,
@@ -786,6 +977,21 @@ async function removeCategory(row: Category) {
   background:
     linear-gradient(135deg, rgba(0, 255, 195, 0.12), rgba(58, 165, 255, 0.08)),
     rgba(4, 19, 32, 0.34);
+}
+
+.category-icon-card.dragging {
+  z-index: 1;
+  transform: scale(0.97);
+  border-color: rgba(103, 217, 255, 0.72);
+  border-style: dashed;
+  background: rgba(58, 165, 255, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(103, 217, 255, 0.08);
+  opacity: 0.4;
+}
+
+.category-icon-card.drag-over {
+  border-color: rgba(0, 255, 195, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(0, 255, 195, 0.18), 0 8px 24px rgba(0, 255, 195, 0.08);
 }
 
 .category-icon-card.add-card {
@@ -872,7 +1078,7 @@ async function removeCategory(row: Category) {
   background: rgba(0, 255, 195, 0.1);
 }
 
-.card-more {
+.drag-handle {
   position: absolute;
   top: 8px;
   left: 8px;
@@ -883,15 +1089,34 @@ async function removeCategory(row: Category) {
   border-radius: 8px;
   color: rgba(255, 255, 255, 0.34);
   background: rgba(255, 255, 255, 0.035);
-  opacity: 0;
+  opacity: 0.56;
   transition: opacity 150ms ease, color 150ms ease, background 150ms ease;
 }
 
-.category-icon-card:hover .card-more,
-.category-icon-card.active .card-more {
+.category-icon-card:hover .drag-handle,
+.category-icon-card.active .drag-handle,
+.category-icon-card.dragging .drag-handle {
   color: rgba(255, 255, 255, 0.8);
   background: rgba(255, 255, 255, 0.08);
   opacity: 1;
+}
+
+@keyframes category-sort-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .category-order-move,
+  .category-icon-card,
+  .drag-handle {
+    transition-duration: 1ms !important;
+  }
+
+  .category-breadcrumb .sort-feedback[data-state="saving"] svg {
+    animation: none;
+  }
 }
 
 .icon-picker {
