@@ -30,6 +30,7 @@ public class AgisoOrderCallbackService {
     private final OutboundProtocolService protocolService;
     private final String appSecret;
     private final Map<String, AgisoCallbackTaskEntity> prepared = new ConcurrentHashMap<>();
+    private boolean invalidFailCodeTasksRecovered;
 
     public AgisoOrderCallbackService(
         AgisoCallbackTaskStore taskStore,
@@ -79,12 +80,24 @@ public class AgisoOrderCallbackService {
 
     void dispatchDue() {
         OffsetDateTime now = OffsetDateTime.now();
+        recoverInvalidFailCodeTasks(now);
         for (AgisoCallbackTaskEntity task : taskStore.findDue(now, BATCH_SIZE)) {
             try {
                 process(task, now);
             } catch (RuntimeException ex) {
                 LOGGER.warn("Agiso callback task {} processing failed: {}", task.getId(), ex.toString());
             }
+        }
+    }
+
+    private void recoverInvalidFailCodeTasks(OffsetDateTime now) {
+        if (invalidFailCodeTasksRecovered) {
+            return;
+        }
+        int recovered = taskStore.recoverInvalidFailCodeTasks(now);
+        invalidFailCodeTasksRecovered = true;
+        if (recovered > 0) {
+            LOGGER.info("Recovered {} Agiso callbacks rejected by the legacy invalid failCode", recovered);
         }
     }
 

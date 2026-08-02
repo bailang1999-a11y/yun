@@ -573,7 +573,7 @@ class AgisoSupplierControllerTest {
 
         assertThat(cardResponse).containsEntry("code", 200);
         assertThat(data(cardResponse)).containsEntry("orderStatus", 30)
-            .containsEntry("failCode", 1)
+            .containsEntry("failCode", 9999)
             .containsEntry("failReason", "上游明确失败");
         verifyNoInteractions(callbackService);
     }

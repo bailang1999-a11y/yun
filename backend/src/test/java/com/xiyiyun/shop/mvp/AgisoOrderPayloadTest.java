@@ -8,6 +8,7 @@ import com.xiyiyun.shop.OrderStatus;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class AgisoOrderPayloadTest {
@@ -34,7 +35,20 @@ class AgisoOrderPayloadTest {
             .containsEntry("failReason", "");
         assertThat(AgisoOrderPayload.from(order(OrderStatus.REFUNDED), APP_SECRET))
             .containsEntry("orderStatus", 30)
-            .containsEntry("failCode", 1);
+            .containsEntry("failCode", 9999);
+    }
+
+    @Test
+    void everyFinalFailureUsesAValidAgisoGlobalErrorCode() {
+        Set<Integer> documentedCodes = Set.of(401, 403, 408, 1001, 1002, 1100, 1101, 1210, 1220, 1230, 1240, 1250, 9999);
+
+        for (OrderStatus status : List.of(
+            OrderStatus.FAILED, OrderStatus.REFUNDED, OrderStatus.CANCELLED, OrderStatus.CLOSED
+        )) {
+            assertThat(AgisoOrderPayload.from(order(status), APP_SECRET))
+                .containsEntry("orderStatus", 30)
+                .satisfies(payload -> assertThat(payload.get("failCode")).isIn(documentedCodes));
+        }
     }
 
     @Test

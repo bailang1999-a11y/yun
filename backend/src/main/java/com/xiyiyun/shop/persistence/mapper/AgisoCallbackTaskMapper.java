@@ -158,4 +158,16 @@ public interface AgisoCallbackTaskMapper extends BaseMapper<AgisoCallbackTaskEnt
         @Param("id") Long id,
         @Param("lastError") String lastError
     );
+
+    @Update("""
+        UPDATE agiso_callback_tasks
+        SET state = 'PENDING',
+            attempt_count = 0,
+            next_attempt_at = #{nextAttemptAt},
+            lease_until = NULL
+        WHERE state IN ('PENDING', 'DEAD')
+          AND order_no IS NOT NULL
+          AND last_error LIKE '%FailCode的值非法%'
+        """)
+    int recoverInvalidFailCodeTasks(@Param("nextAttemptAt") OffsetDateTime nextAttemptAt);
 }

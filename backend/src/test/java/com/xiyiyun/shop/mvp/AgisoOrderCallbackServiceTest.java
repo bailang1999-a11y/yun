@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -105,9 +106,23 @@ class AgisoOrderCallbackServiceTest {
         verify(callbackClient).post(eq(CALLBACK_URL), payloadCaptor.capture(), eq(30));
         assertThat(payloadCaptor.getValue())
             .containsEntry("orderStatus", 30)
-            .containsEntry("failCode", 1)
+            .containsEntry("failCode", 9999)
             .containsEntry("failReason", "done");
+        assertThat(payloadCaptor.getValue().get("sign")).isEqualTo(
+            AgisoSignatureUtil.sign(payloadCaptor.getValue(), APP_SECRET + MEMBER_SECRET)
+        );
         verify(taskStore).markSent(eq(1L), any());
+    }
+
+    @Test
+    void legacyInvalidFailCodeTasksAreRecoveredOnlyOncePerProcess() {
+        when(taskStore.recoverInvalidFailCodeTasks(any())).thenReturn(2);
+        when(taskStore.findDue(any(), anyInt())).thenReturn(List.of());
+
+        service.dispatchDue();
+        service.dispatchDue();
+
+        verify(taskStore, times(1)).recoverInvalidFailCodeTasks(any());
     }
 
     @Test

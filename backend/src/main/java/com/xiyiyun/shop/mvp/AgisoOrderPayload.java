@@ -17,6 +17,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
 final class AgisoOrderPayload {
+    private static final int GENERIC_FAILURE_CODE = 9999;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Set<OrderStatus> FAILURE_STATUSES = Set.of(
         OrderStatus.FAILED, OrderStatus.REFUNDED, OrderStatus.CANCELLED, OrderStatus.CLOSED
@@ -30,7 +31,7 @@ final class AgisoOrderPayload {
         result.put("orderNo", clean(order.requestId()));
         result.put("outTradeNo", clean(order.orderNo()));
         result.put("orderStatus", status(order));
-        result.put("failCode", FAILURE_STATUSES.contains(order.status()) ? 1 : 0);
+        result.put("failCode", FAILURE_STATUSES.contains(order.status()) ? GENERIC_FAILURE_CODE : 0);
         result.put("failReason", FAILURE_STATUSES.contains(order.status()) ? clean(order.deliveryMessage()) : "");
         result.put("orderCost", money(order.payAmount()));
         result.put("cards", order.goodsType() == GoodsType.CARD && order.status() == OrderStatus.DELIVERED
