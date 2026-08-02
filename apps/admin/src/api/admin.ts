@@ -25,6 +25,7 @@ export {
   enableRechargeField,
   fetchCategories,
   fetchRechargeFields,
+  reorderCategories,
   setCategoryEnabled,
   updateCategory,
   updateRechargeField

@@ -95,6 +95,17 @@ class CatalogPersistenceStoreTest {
         verify(categoryRecordMapper).softDelete(11L);
     }
 
+    @Test
+    void saveCategorySnapshotsWritesEveryCategoryInOneStoreCall() {
+        CategoryItem first = new CategoryItem(1L, "会员权益", 0L, 20, true);
+        CategoryItem second = new CategoryItem(2L, "游戏直充", 0L, 10, true);
+
+        store.saveCategorySnapshots(List.of(first, second));
+
+        verify(categoryRecordMapper).upsertSnapshot(org.mockito.ArgumentMatchers.argThat(item -> item.getId().equals(1L) && item.getSortNo() == 20));
+        verify(categoryRecordMapper).upsertSnapshot(org.mockito.ArgumentMatchers.argThat(item -> item.getId().equals(2L) && item.getSortNo() == 10));
+    }
+
     private CategoryRecordEntity category(Long id, Long parentId, String name, int sort) {
         CategoryRecordEntity category = new CategoryRecordEntity();
         category.setId(id);

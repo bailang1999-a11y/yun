@@ -6,6 +6,8 @@ import {
   BookOpen,
   BriefcaseBusiness,
   Check,
+  ChevronDown,
+  ChevronUp,
   Edit3,
   Film,
   Flame,
@@ -24,7 +26,7 @@ import {
   Trash2,
   X
 } from 'lucide-vue-next'
-import { createCategory, deleteCategory, fetchCategories, updateCategory, updateCategorySort } from '../api/catalog'
+import { createCategory, deleteCategory, fetchCategories, reorderCategories, updateCategory } from '../api/catalog'
 import { uploadImage } from '../api/uploads'
 import type { Category, CategoryCreatePayload, CategoryUpdatePayload } from '../types/operations'
 import { buildCategoryTree, flattenCategoryTree } from '../utils/categoryTree'
@@ -286,16 +288,28 @@ function restoreCategorySorts(snapshot: Array<{ id: string; sort: number }>) {
 
 async function persistCategoryOrder(snapshot: Array<{ id: string; sort: number }>) {
   const previousSortById = new Map(snapshot.map((item) => [item.id, item.sort]))
-  const changed = categories.value.filter((item) => {
+  const changed = categories.value.some((item) => {
     const previousSort = previousSortById.get(String(item.id))
     return previousSort !== undefined && previousSort !== Number(item.sort ?? 0)
   })
-  if (!changed.length) return
+  if (!changed) return
+
+  const siblingIds = new Set(snapshot.map((item) => item.id))
+  const orderedIds = categories.value
+    .filter((item) => siblingIds.has(String(item.id)))
+    .sort((left, right) => Number(left.sort ?? 0) - Number(right.sort ?? 0))
+    .map((item) => item.id)
 
   sortSaving.value = true
   sortFeedback.value = 'saving'
   try {
-    await Promise.all(changed.map((item) => updateCategorySort(item.id, Number(item.sort ?? 0))))
+    const saved = await reorderCategories(orderedIds)
+    const savedSortById = new Map(saved.map((item) => [String(item.id), Number(item.sort ?? 0)]))
+    categories.value = categories.value.map((item) => {
+      const savedSort = savedSortById.get(String(item.id))
+      return savedSort === undefined ? item : { ...item, sort: savedSort }
+    })
+    syncRootToSelection()
     emit('categories-loaded', categories.value)
     sortFeedback.value = 'saved'
     sortFeedbackTimer = window.setTimeout(() => {
@@ -543,6 +557,37 @@ function removeContextRow() {
   if (contextMenu.row) removeCategory(contextMenu.row)
 }
 
+function contextRowSiblings() {
+  if (!contextMenu.row) return []
+  const key = parentKey(contextMenu.row.parentId)
+  return categories.value
+    .filter((item) => parentKey(item.parentId) === key)
+    .sort((left, right) => Number(left.sort ?? 0) - Number(right.sort ?? 0))
+}
+
+function canMoveContextRow(offset: number) {
+  const siblings = contextRowSiblings()
+  const index = siblings.findIndex((item) => String(item.id) === String(contextMenu.row?.id))
+  return !sortSaving.value && index >= 0 && index + offset >= 0 && index + offset < siblings.length
+}
+
+function moveContextRow(offset: number) {
+  if (!contextMenu.row || !canMoveContextRow(offset)) return
+  const siblings = contextRowSiblings()
+  const index = siblings.findIndex((item) => String(item.id) === String(contextMenu.row?.id))
+  const snapshot = siblings.map((item) => ({ id: String(item.id), sort: Number(item.sort ?? 0) }))
+  const [moving] = siblings.splice(index, 1)
+  siblings.splice(index + offset, 0, moving)
+  const sortById = new Map(siblings.map((item, sortIndex) => [String(item.id), (sortIndex + 1) * 10]))
+  categories.value = categories.value.map((item) => {
+    const nextSort = sortById.get(String(item.id))
+    return nextSort === undefined ? item : { ...item, sort: nextSort }
+  })
+  syncRootToSelection()
+  closeContextMenu(true)
+  void persistCategoryOrder(snapshot)
+}
+
 async function submitCategory() {
   if (iconUploading.value) {
     ElMessage.warning('图标正在上传，请稍后保存')
@@ -726,6 +771,14 @@ async function removeCategory(row: Category) {
         <button type="button" role="menuitem" @click="createChildForContextRow">
           <FolderPlus :size="16" />
           <span>添加子分类</span>
+        </button>
+        <button type="button" role="menuitem" :disabled="!canMoveContextRow(-1)" @click="moveContextRow(-1)">
+          <ChevronUp :size="16" />
+          <span>向前移动</span>
+        </button>
+        <button type="button" role="menuitem" :disabled="!canMoveContextRow(1)" @click="moveContextRow(1)">
+          <ChevronDown :size="16" />
+          <span>向后移动</span>
         </button>
         <button type="button" role="menuitem" class="danger" :disabled="deleting" @click="removeContextRow">
           <Trash2 :size="16" />

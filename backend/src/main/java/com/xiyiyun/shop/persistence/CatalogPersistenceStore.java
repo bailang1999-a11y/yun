@@ -44,6 +44,11 @@ public class CatalogPersistenceStore {
     }
 
     @Transactional
+    public void saveCategorySnapshots(List<CategoryItem> categories) {
+        categories.forEach(category -> categoryRecordMapper.upsertSnapshot(persistenceMapper.toCategoryRecord(category)));
+    }
+
+    @Transactional
     public GoodsRecordEntity saveGoodsSnapshot(GoodsItem goods) {
         GoodsRecordEntity entity = persistenceMapper.toGoodsRecord(goods);
         goodsRecordMapper.upsertSnapshot(entity);

@@ -380,6 +380,11 @@ public class AdminMvpController {
         return safe(() -> repository.updateCategory(id, request));
     }
 
+    @PostMapping("/categories/reorder")
+    public ApiResponse<List<CategoryItem>> reorderCategories(@RequestBody ReorderCategoriesRequest request) {
+        return safe(() -> repository.reorderCategories(request));
+    }
+
     @PostMapping("/categories/{id}/enable")
     public ApiResponse<CategoryItem> enableCategory(@PathVariable Long id) {
         return safe(() -> repository.updateCategoryStatus(id, true));

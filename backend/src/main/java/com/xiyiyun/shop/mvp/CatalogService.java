@@ -356,6 +356,40 @@ public class CatalogService {
         }
     }
 
+    public List<CategoryItem> reorderCategories(ReorderCategoriesRequest request) {
+        synchronized (categoryLock) {
+            if (request == null || request.categoryIds() == null || request.categoryIds().isEmpty()) {
+                throw new IllegalArgumentException("category ids are required");
+            }
+            List<Long> orderedIds = request.categoryIds();
+            if (orderedIds.stream().anyMatch(Objects::isNull) || new LinkedHashSet<>(orderedIds).size() != orderedIds.size()) {
+                throw new IllegalArgumentException("category ids must be unique");
+            }
+
+            List<CategoryItem> ordered = orderedIds.stream()
+                .map(id -> findCategorySnapshot(id).orElseThrow(() -> new IllegalArgumentException("category not found")))
+                .toList();
+            Long parentId = normalizedCategoryParentId(ordered.getFirst().parentId());
+            if (ordered.stream().anyMatch(item -> !Objects.equals(normalizedCategoryParentId(item.parentId()), parentId))) {
+                throw new IllegalArgumentException("categories must have the same parent");
+            }
+            Set<Long> siblingIds = allCategorySnapshots().stream()
+                .filter(item -> Objects.equals(normalizedCategoryParentId(item.parentId()), parentId))
+                .map(CategoryItem::id)
+                .collect(java.util.stream.Collectors.toSet());
+            if (!siblingIds.equals(new LinkedHashSet<>(orderedIds))) {
+                throw new IllegalArgumentException("all sibling category ids are required");
+            }
+
+            List<CategoryItem> reordered = java.util.stream.IntStream.range(0, ordered.size())
+                .mapToObj(index -> withCategorySort(ordered.get(index), (index + 1) * 10))
+                .toList();
+            persistCategorySnapshots(reordered);
+            reordered.forEach(item -> categories.put(item.id(), item));
+            return reordered.stream().map(this::enrichCategory).toList();
+        }
+    }
+
     public CategoryItem updateCategoryStatus(Long id, boolean enabled) {
         synchronized (categoryLock) {
             CategoryItem item = findCategorySnapshot(id).orElse(null);
@@ -1043,6 +1077,18 @@ public class CatalogService {
         }
     }
 
+    private void persistCategorySnapshots(List<CategoryItem> categoryItems) {
+        if (catalogPersistenceStore == null) {
+            return;
+        }
+        try {
+            catalogPersistenceStore.saveCategorySnapshots(categoryItems);
+        } catch (RuntimeException ex) {
+            appendOperation("PERSISTENCE_MIRROR_FAILED", "CATEGORY", "reorder", persistenceErrorMessage(ex));
+            throw ex;
+        }
+    }
+
     private void deletePersistentCategory(Long id) {
         if (catalogPersistenceStore == null || id == null) {
             return;
@@ -1599,6 +1645,27 @@ public class CatalogService {
 
     private CategoryItem enrichCategory(CategoryItem item) {
         return enrichCategory(item, null, null);
+    }
+
+    private Long normalizedCategoryParentId(Long parentId) {
+        return parentId == null ? 0L : parentId;
+    }
+
+    private CategoryItem withCategorySort(CategoryItem item, int sort) {
+        return new CategoryItem(
+            item.id(),
+            item.name(),
+            item.nickname(),
+            item.parentId(),
+            item.icon(),
+            item.iconUrl(),
+            item.customIconUrl(),
+            sort,
+            item.enabled(),
+            item.status(),
+            item.level(),
+            item.hasChildren()
+        );
     }
 
     private CategoryItem enrichCategory(CategoryItem item, Map<Long, CategoryItem> categorySnapshot, Set<Long> parentIds) {

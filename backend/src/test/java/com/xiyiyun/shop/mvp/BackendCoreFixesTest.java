@@ -16,6 +16,22 @@ import org.junit.jupiter.api.Test;
 
 class BackendCoreFixesTest {
     @Test
+    void categoryReorderRequiresEverySiblingAndPersistsRequestedOrder() {
+        InMemoryShopRepository repository = newRepository();
+
+        assertThatThrownBy(() -> repository.reorderCategories(new ReorderCategoriesRequest(List.of(3L, 1L))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessage("all sibling category ids are required");
+
+        repository.reorderCategories(new ReorderCategoriesRequest(List.of(3L, 1L, 2L)));
+
+        assertThat(repository.listCategories().stream()
+            .filter(item -> item.parentId() == null || item.parentId() == 0L)
+            .map(CategoryItem::id))
+            .containsExactly(3L, 1L, 2L);
+    }
+
+    @Test
     void loginRejectsUserWithoutPasswordHash() {
         InMemoryShopRepository repository = newRepository();
 

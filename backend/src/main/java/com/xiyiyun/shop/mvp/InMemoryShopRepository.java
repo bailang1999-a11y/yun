@@ -1320,6 +1320,10 @@ public class InMemoryShopRepository implements TokenAuthPort {
         return catalogService.updateCategory(id, request);
     }
 
+    public List<CategoryItem> reorderCategories(ReorderCategoriesRequest request) {
+        return catalogService.reorderCategories(request);
+    }
+
     public CategoryItem updateCategoryStatus(Long id, boolean enabled) {
         return catalogService.updateCategoryStatus(id, enabled);
     }

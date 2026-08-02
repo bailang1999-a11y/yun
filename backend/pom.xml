@@ -11,7 +11,7 @@
 
   <groupId>com.xiyiyun</groupId>
   <artifactId>xiyiyun-backend</artifactId>
-  <version>1.52</version>
+  <version>1.53</version>
   <name>xiyiyun-backend</name>
 
   <properties>
