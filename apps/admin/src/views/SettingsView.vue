@@ -5,6 +5,7 @@ import type { UploadRawFile } from 'element-plus'
 import { ImageUp, RefreshCw, Save, X } from 'lucide-vue-next'
 import { fetchSettings, updateSettings } from '../api/operations'
 import { fetchUserGroups } from '../api/users'
+import WeComRobotSettingsPanel from '../components/WeComRobotSettingsPanel.vue'
 import type { SystemSetting, UserGroup } from '../types/operations'
 
 const loading = ref(false)
@@ -28,7 +29,12 @@ const form = reactive<SystemSetting>({
   registrationEnabled: true,
   registrationType: 'MOBILE',
   defaultUserGroupId: '1',
-  notificationReceivers: { ops: '' }
+  notificationReceivers: { ops: '' },
+  wecomRobot: {
+    enabled: false,
+    webhookUrl: '',
+    events: []
+  }
 })
 
 onMounted(() => {
@@ -58,7 +64,11 @@ async function loadSettings() {
 async function saveSettings() {
   saving.value = true
   try {
-    Object.assign(form, await updateSettings({ ...form, notificationReceivers: { ...form.notificationReceivers } }))
+    Object.assign(form, await updateSettings({
+      ...form,
+      notificationReceivers: { ...form.notificationReceivers },
+      wecomRobot: { ...form.wecomRobot, events: [...form.wecomRobot.events] }
+    }))
     ElMessage.success('系统设置已保存')
   } catch {
     ElMessage.error('系统设置保存失败')
@@ -255,6 +265,8 @@ function clearLogo() {
         </el-form-item>
       </el-form>
     </article>
+
+    <WeComRobotSettingsPanel v-model="form.wecomRobot" />
 
     <div class="save-bar">
       <el-button type="primary" :icon="Save" :loading="saving" @click="saveSettings">保存系统设置</el-button>

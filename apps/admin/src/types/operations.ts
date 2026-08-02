@@ -617,6 +617,31 @@ export interface SystemSetting {
   registrationType: string
   defaultUserGroupId?: number | string
   notificationReceivers: Record<string, string>
+  wecomRobot: WeComRobotSetting
+}
+
+export type WeComNotificationEvent =
+  | 'ORDER_CREATED'
+  | 'PAYMENT_SUCCEEDED'
+  | 'DELIVERY_SUCCEEDED'
+  | 'DELIVERY_FAILED'
+  | 'ORDER_REFUNDED'
+  | 'UPSTREAM_EXCEPTION'
+
+export interface WeComRobotSetting {
+  enabled: boolean
+  webhookUrl: string
+  events: WeComNotificationEvent[]
+}
+
+export interface WeComRobotDelivery {
+  id: number | string
+  event: WeComNotificationEvent | string
+  status: string
+  orderNo?: string
+  attemptCount: number
+  errorMessage?: string
+  createdAt?: string
 }
 
 export interface PaymentRecord {

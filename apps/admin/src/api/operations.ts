@@ -1,7 +1,15 @@
 import { apiClient } from './client'
 import { cleanParams, numberValue, text } from './normalize'
 import { type ApiEnvelope, type PageResult, unwrapPage, unwrapValue } from './response'
-import type { OperationLog, PaymentRecord, RefundRecord, SmsLog, SystemSetting } from '../types/operations'
+import type {
+  OperationLog,
+  PaymentRecord,
+  RefundRecord,
+  SmsLog,
+  SystemSetting,
+  WeComNotificationEvent,
+  WeComRobotDelivery
+} from '../types/operations'
 
 export async function fetchSettings() {
   const { data } = await apiClient.get<unknown>('/api/admin/settings')
@@ -13,6 +21,25 @@ export async function updateSettings(payload: SystemSetting) {
   const { data } = await apiClient.post<unknown>('/api/admin/settings', payload)
 
   return normalizeSettings(unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>))
+}
+
+export async function sendWeComRobotTest() {
+  const { data } = await apiClient.post<unknown>('/api/admin/wecom-robot/test')
+  return unwrapValue<Record<string, unknown>>(data as ApiEnvelope<Record<string, unknown>>)
+}
+
+export async function fetchWeComRobotDeliveries(limit = 5): Promise<WeComRobotDelivery[]> {
+  const { data } = await apiClient.get<unknown>('/api/admin/wecom-robot/deliveries', { params: { limit } })
+  const value = unwrapValue<unknown>(data as ApiEnvelope<unknown>)
+  const items = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && Array.isArray((value as Record<string, unknown>).items)
+      ? (value as Record<string, unknown>).items as unknown[]
+      : []
+
+  return items
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
+    .map(normalizeWeComRobotDelivery)
 }
 
 export type PageQuery = { page?: number; pageSize?: number }
@@ -59,6 +86,12 @@ export async function fetchOperationLogsPage(query: PageQuery = {}): Promise<Pag
 
 function normalizeSettings(item: Record<string, unknown>): SystemSetting {
   const receivers = item.notificationReceivers
+  const wecomRobot = item.wecomRobot && typeof item.wecomRobot === 'object'
+    ? item.wecomRobot as Record<string, unknown>
+    : {}
+  const events = Array.isArray(wecomRobot.events)
+    ? wecomRobot.events.filter((event): event is WeComNotificationEvent => typeof event === 'string')
+    : []
   return {
     siteName: text(item.siteName, '喜易云'),
     logoUrl: text(item.logoUrl),
@@ -77,7 +110,24 @@ function normalizeSettings(item: Record<string, unknown>): SystemSetting {
     registrationEnabled: item.registrationEnabled !== false,
     registrationType: text(item.registrationType, 'MOBILE'),
     defaultUserGroupId: text(item.defaultUserGroupId, '1'),
-    notificationReceivers: receivers && typeof receivers === 'object' ? (receivers as Record<string, string>) : {}
+    notificationReceivers: receivers && typeof receivers === 'object' ? (receivers as Record<string, string>) : {},
+    wecomRobot: {
+      enabled: Boolean(wecomRobot.enabled),
+      webhookUrl: text(wecomRobot.webhookUrl),
+      events
+    }
+  }
+}
+
+function normalizeWeComRobotDelivery(item: Record<string, unknown>): WeComRobotDelivery {
+  return {
+    id: text(item.id),
+    event: text(item.event),
+    status: text(item.status),
+    orderNo: text(item.orderNo),
+    attemptCount: numberValue(item.attemptCount),
+    errorMessage: text(item.errorMessage),
+    createdAt: text(item.createdAt)
   }
 }
 
