@@ -18,7 +18,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
     @Select("""
         SELECT id, order_no, user_id, buyer_account, source_platform_id, source_platform_code,
                goods_id, goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount,
-               pay_amount, cost_amount, status, delivery_status, delivery_message,
+               pay_amount, external_max_amount, cost_amount, status, delivery_status, delivery_message,
                delivery_items_json, delivery_card_ids_json, channel_attempts_json, recharge_account, recharge_fields_json,
                buyer_remark, admin_remark, request_id, upstream_order_no,
                paid_at, delivered_at, closed_at, created_at
@@ -39,7 +39,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         <script>
         SELECT id, order_no, user_id, buyer_account, source_platform_id, source_platform_code,
                goods_id, goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount,
-               pay_amount, cost_amount, status, delivery_status, delivery_message,
+               pay_amount, external_max_amount, cost_amount, status, delivery_status, delivery_message,
                delivery_items_json, delivery_card_ids_json, channel_attempts_json, recharge_account, recharge_fields_json,
                buyer_remark, admin_remark, request_id, upstream_order_no,
                paid_at, delivered_at, closed_at, created_at
@@ -115,7 +115,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         <script>
         SELECT id, order_no, user_id, buyer_account, source_platform_id, source_platform_code,
                goods_id, goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount,
-               pay_amount, cost_amount, status, delivery_status, delivery_message,
+               pay_amount, external_max_amount, cost_amount, status, delivery_status, delivery_message,
                delivery_items_json, delivery_card_ids_json, channel_attempts_json, recharge_account, recharge_fields_json,
                buyer_remark, admin_remark, request_id, upstream_order_no,
                paid_at, delivered_at, closed_at, created_at
@@ -194,7 +194,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
     @Select("""
         SELECT id, order_no, user_id, buyer_account, source_platform_id, source_platform_code,
                goods_id, goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount,
-               pay_amount, cost_amount, status, delivery_status, delivery_message,
+               pay_amount, external_max_amount, cost_amount, status, delivery_status, delivery_message,
                delivery_items_json, delivery_card_ids_json, channel_attempts_json, recharge_account, recharge_fields_json,
                buyer_remark, admin_remark, request_id, upstream_order_no,
                paid_at, delivered_at, closed_at, created_at
@@ -218,7 +218,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
     @Select("""
         SELECT id, order_no, user_id, buyer_account, source_platform_id, source_platform_code,
                goods_id, goods_name, goods_type, order_ip, order_ip_location, quantity, unit_price, total_amount,
-               pay_amount, cost_amount, status, delivery_status, delivery_message,
+               pay_amount, external_max_amount, cost_amount, status, delivery_status, delivery_message,
                delivery_items_json, delivery_card_ids_json, channel_attempts_json, recharge_account, recharge_fields_json,
                buyer_remark, admin_remark, request_id, upstream_order_no,
                paid_at, delivered_at, closed_at, created_at

@@ -33,11 +33,48 @@ public record OrderItem(
     OffsetDateTime createdAt,
     OffsetDateTime paidAt,
     OffsetDateTime deliveredAt,
-    String upstreamOrderNo
+    String upstreamOrderNo,
+    BigDecimal externalMaxAmount
 ) {
     public OrderItem {
         rechargeFields = rechargeFields == null ? Map.of() : Map.copyOf(rechargeFields);
         upstreamOrderNo = upstreamOrderNo == null ? "" : upstreamOrderNo.trim();
+    }
+
+    public OrderItem(
+        String orderNo,
+        Long userId,
+        String buyerAccount,
+        Long goodsId,
+        String goodsName,
+        GoodsType goodsType,
+        String platform,
+        String orderIp,
+        String orderIpLocation,
+        Integer quantity,
+        BigDecimal unitPrice,
+        BigDecimal payAmount,
+        OrderStatus status,
+        String rechargeAccount,
+        Map<String, String> rechargeFields,
+        String buyerRemark,
+        String requestId,
+        String paymentNo,
+        String payMethod,
+        List<String> deliveryItems,
+        List<ChannelAttemptItem> channelAttempts,
+        String deliveryMessage,
+        OffsetDateTime createdAt,
+        OffsetDateTime paidAt,
+        OffsetDateTime deliveredAt,
+        String upstreamOrderNo
+    ) {
+        this(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            upstreamOrderNo, null
+        );
     }
 
     /**
@@ -85,7 +122,7 @@ public record OrderItem(
             orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
             quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
             paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
-            nextUpstreamOrderNo
+            nextUpstreamOrderNo, externalMaxAmount
         );
     }
 
@@ -203,7 +240,8 @@ public record OrderItem(
             createdAt,
             paidAt,
             resolvedDeliveredAt,
-            upstreamOrderNo
+            upstreamOrderNo,
+            externalMaxAmount
         );
     }
 
@@ -242,7 +280,8 @@ public record OrderItem(
             createdAt,
             nextPaidAt,
             resolvedDeliveredAt,
-            upstreamOrderNo
+            upstreamOrderNo,
+            externalMaxAmount
         );
     }
 
@@ -283,7 +322,8 @@ public record OrderItem(
             createdAt,
             paidAt,
             deliveredAt,
-            upstreamOrderNo
+            upstreamOrderNo,
+            externalMaxAmount
         );
     }
 }

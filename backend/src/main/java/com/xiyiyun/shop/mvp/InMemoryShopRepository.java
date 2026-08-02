@@ -4170,6 +4170,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
             order.payAmount(),
             order.status(),
             order.rechargeAccount(),
+            order.rechargeFields(),
             order.buyerRemark(),
             order.requestId(),
             order.paymentNo(),
@@ -4179,7 +4180,9 @@ public class InMemoryShopRepository implements TokenAuthPort {
             order.deliveryMessage(),
             order.createdAt(),
             order.paidAt(),
-            order.deliveredAt()
+            order.deliveredAt(),
+            order.upstreamOrderNo(),
+            order.externalMaxAmount()
         );
     }
 

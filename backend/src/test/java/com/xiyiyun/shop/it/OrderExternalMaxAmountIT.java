@@ -42,6 +42,9 @@ class OrderExternalMaxAmountIT extends AbstractIntegrationTest {
             BigDecimal.class,
             "IT-EXTERNAL-MAX-1"
         )).isEqualByComparingTo("2.0000");
+        assertThat(persistentOrderStore.findOrder("IT-EXTERNAL-MAX-1").orElseThrow().externalMaxAmount())
+            .as("admin order responses must expose the downstream maxAmount")
+            .isEqualByComparingTo("9.9900");
     }
 
     @Test

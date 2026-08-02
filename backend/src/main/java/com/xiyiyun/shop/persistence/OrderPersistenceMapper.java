@@ -34,7 +34,7 @@ public class OrderPersistenceMapper {
     };
 
     public OrderRecordEntity toOrderRecord(OrderItem order) {
-        return toOrderRecord(order, null);
+        return toOrderRecord(order, order.externalMaxAmount());
     }
 
     public OrderRecordEntity toOrderRecord(OrderItem order, BigDecimal externalMaxAmount) {
@@ -52,7 +52,7 @@ public class OrderPersistenceMapper {
         entity.setUnitPrice(order.unitPrice());
         entity.setTotalAmount(totalAmount(order));
         entity.setPayAmount(order.payAmount());
-        entity.setExternalMaxAmount(externalMaxAmount);
+        entity.setExternalMaxAmount(externalMaxAmount == null ? order.externalMaxAmount() : externalMaxAmount);
         entity.setStatus(order.status() == null ? null : order.status().name());
         entity.setDeliveryStatus(deliveryStatus(order.status()));
         entity.setDeliveryMessage(order.deliveryMessage());
@@ -108,7 +108,8 @@ public class OrderPersistenceMapper {
             entity.getCreatedAt(),
             entity.getPaidAt(),
             entity.getDeliveredAt(),
-            entity.getUpstreamOrderNo()
+            entity.getUpstreamOrderNo(),
+            entity.getExternalMaxAmount()
         );
     }
 

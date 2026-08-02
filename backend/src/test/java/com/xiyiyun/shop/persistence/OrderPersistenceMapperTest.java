@@ -73,6 +73,7 @@ class OrderPersistenceMapperTest {
         record.setQuantity(2);
         record.setUnitPrice(new BigDecimal("12.50"));
         record.setPayAmount(new BigDecimal("25.00"));
+        record.setExternalMaxAmount(new BigDecimal("99.9900"));
         record.setStatus("DELIVERED");
         record.setDeliveryStatus("DELIVERED");
         record.setRechargeAccount("acct");
@@ -89,8 +90,16 @@ class OrderPersistenceMapperTest {
         assertThat(item.goodsType()).isEqualTo(GoodsType.CARD);
         assertThat(item.status()).isEqualTo(OrderStatus.DELIVERED);
         assertThat(item.payAmount()).isEqualByComparingTo("25.00");
+        assertThat(item.externalMaxAmount()).isEqualByComparingTo("99.9900");
         assertThat(item.rechargeFields()).containsEntry("uid", "12345").containsEntry("zone", "cn");
         assertThat(item.createdAt()).isEqualTo(now);
+        assertThat(item.withStatus(OrderStatus.REFUNDED, "refunded", now.plusMinutes(3)).externalMaxAmount())
+            .isEqualByComparingTo("99.9900");
+        assertThat(item.withUpstreamOrderNo("UP-1").externalMaxAmount()).isEqualByComparingTo("99.9900");
+        assertThat(item.withPayment("PAY-2", "balance").externalMaxAmount()).isEqualByComparingTo("99.9900");
+        assertThat(item.withProcurementResult(
+            OrderStatus.DELIVERED, List.of(), List.of(), "delivered", now.plusMinutes(1), now.plusMinutes(2)
+        ).externalMaxAmount()).isEqualByComparingTo("99.9900");
     }
 
     @Test
