@@ -418,6 +418,7 @@ export interface Order {
   goodsName?: string
   goods?: string | { name?: string }
   amount: number | string
+  externalMaxAmount?: number | string
   unitPrice?: number | string
   quantity?: number
   status: string
@@ -437,6 +438,7 @@ export interface Order {
   supplierGoodsName?: string
   buyerRemark?: string
   requestId?: string
+  upstreamOrderNo?: string
   deliveryItems?: string[]
   channelAttempts?: ChannelAttempt[]
   deliveryMessage?: string

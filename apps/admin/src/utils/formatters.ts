@@ -123,7 +123,8 @@ export function formatPaymentMethod(value?: string) {
   return paymentMethodLabels[value || ''] || value || '-'
 }
 
-export function formatOrderSource(source?: string, requestId?: string | boolean, platform?: string) {
+export function formatOrderSource(source?: string, requestId?: string | boolean, platform?: string, buyerRemark?: string) {
+  if (buyerRemark?.trim() === '阿奇索标准货源订单') return '抖音API 下单'
   const normalized = (source || platform || '').trim().toLowerCase()
   const requestKey = typeof requestId === 'string' ? requestId.trim().toLowerCase() : ''
   if (/^h5[_-]/.test(requestKey)) return 'H5 下单'

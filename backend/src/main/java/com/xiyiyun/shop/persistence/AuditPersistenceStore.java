@@ -107,6 +107,17 @@ public class AuditPersistenceStore {
         );
     }
 
+    @Transactional(readOnly = true)
+    public AuditLogMaxIds maxLogIds() {
+        return new AuditLogMaxIds(
+            operationLogRecordMapper.selectMaxId(),
+            smsLogRecordMapper.selectMaxId(),
+            openApiLogRecordMapper.selectMaxId()
+        );
+    }
+
+    public record AuditLogMaxIds(long operationLog, long smsLog, long openApiLog) { }
+
     private OperationLogRecordEntity toEntity(OperationLogItem item) {
         OperationLogRecordEntity entity = new OperationLogRecordEntity();
         entity.setId(item.id());

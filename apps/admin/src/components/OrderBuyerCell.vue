@@ -20,15 +20,16 @@ const buyerContact = computed(() => props.order.buyerContact || props.order.buye
 <style scoped>
 .stack-cell {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   min-width: 0;
 }
 
 .stack-cell strong {
   min-width: 0;
   color: rgba(255, 255, 255, 0.84);
-  font-size: 14px;
-  font-weight: 800;
+  font-size: var(--order-row-primary-size, 13px);
+  font-weight: var(--order-row-primary-weight, 600);
+  line-height: var(--order-row-primary-line, 18px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -37,7 +38,9 @@ const buyerContact = computed(() => props.order.buyerContact || props.order.buye
 .stack-cell span {
   min-width: 0;
   color: rgba(255, 255, 255, 0.45);
-  font-size: 12px;
+  font-size: var(--order-row-secondary-size, 12px);
+  font-weight: var(--order-row-secondary-weight, 500);
+  line-height: var(--order-row-secondary-line, 17px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

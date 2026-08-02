@@ -44,4 +44,7 @@ public interface OperationLogRecordMapper extends BaseMapper<OperationLogRecordE
     /** 批次8C：与 {@link #selectSnapshotPage} 同表、同 WHERE（此表无筛选条件），供分页返回 total。 */
     @Select("SELECT COUNT(*) FROM admin_operation_logs")
     long countSnapshots();
+
+    @Select("SELECT COALESCE(MAX(id), 0) FROM admin_operation_logs")
+    long selectMaxId();
 }

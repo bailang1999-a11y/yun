@@ -115,6 +115,13 @@ export async function deleteOrder(orderNo: string) {
 
 function normalizeOrder(item: Record<string, unknown>): Order {
   const deliveryItems = Array.isArray(item.deliveryItems) ? item.deliveryItems.map((value) => text(value)) : []
+  const externalMaxAmount = item.externalMaxAmount
+  const normalizedExternalMaxAmount = externalMaxAmount === undefined
+    || externalMaxAmount === null
+    || (typeof externalMaxAmount === 'string' && !externalMaxAmount.trim())
+    || !Number.isFinite(Number(externalMaxAmount))
+    ? undefined
+    : numberValue(externalMaxAmount)
   const channelAttempts = Array.isArray(item.channelAttempts)
     ? item.channelAttempts.map((attempt) => {
         const record = typeof attempt === 'object' && attempt !== null ? (attempt as Record<string, unknown>) : {}
@@ -145,6 +152,7 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     goodsId: text(item.goodsId),
     goodsName: text(item.goodsName, '未知商品'),
     amount: numberValue(item.amount ?? item.payAmount ?? item.totalAmount),
+    externalMaxAmount: normalizedExternalMaxAmount,
     unitPrice: numberValue(item.unitPrice),
     quantity: numberValue(item.quantity, 1),
     status: text(item.status, 'UNKNOWN'),
@@ -164,6 +172,7 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     supplierGoodsName: text(item.supplierGoodsName),
     buyerRemark: text(item.buyerRemark),
     requestId: text(item.requestId),
+    upstreamOrderNo: text(item.upstreamOrderNo),
     deliveryItems,
     channelAttempts,
     deliveryMessage: text(item.deliveryMessage),

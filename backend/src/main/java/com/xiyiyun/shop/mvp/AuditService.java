@@ -45,6 +45,21 @@ public class AuditService {
 
     AuditService(AuditPersistenceStore auditPersistenceStore) {
         this.auditPersistenceStore = auditPersistenceStore;
+        seedLogIds();
+    }
+
+    private void seedLogIds() {
+        if (auditPersistenceStore == null) {
+            return;
+        }
+        try {
+            AuditPersistenceStore.AuditLogMaxIds maxIds = auditPersistenceStore.maxLogIds();
+            operationLogId.set(maxIds.operationLog() + 1);
+            smsLogId.set(maxIds.smsLog() + 1);
+            openApiLogId.set(maxIds.openApiLog() + 1);
+        } catch (RuntimeException ignored) {
+            // Keep in-memory logging available while persistence is unavailable.
+        }
     }
 
     boolean persistenceEnabled() {

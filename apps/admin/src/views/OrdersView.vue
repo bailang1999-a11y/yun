@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Activity,
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
   CircleDollarSign,
   Download,
   Ellipsis,
-  Eye,
   PackageCheck,
   RefreshCw,
   RotateCcw,
@@ -26,16 +25,16 @@ import OrderDurationText from '../components/OrderDurationText.vue'
 import OrderGoodsCell from '../components/OrderGoodsCell.vue'
 import OrderPaymentBadge from '../components/OrderPaymentBadge.vue'
 import OrderSourceBadge from '../components/OrderSourceBadge.vue'
+import OrderStatusBadge from '../components/OrderStatusBadge.vue'
+import RechargeAccountTag from '../components/RechargeAccountTag.vue'
+import OrderDetailView from './OrderDetailView.vue'
 import {
   formatDateTime,
   formatDeliveryType,
   formatMoney,
-  formatOrderStatus,
-  orderStatusOptions,
-  orderStatusTagType
+  orderStatusOptions
 } from '../utils/formatters'
 
-const router = useRouter()
 const orders = ref<Order[]>([])
 const loading = ref(false)
 const syncing = ref(false)
@@ -43,6 +42,9 @@ const upstreamRefreshing = ref(false)
 const exporting = ref(false)
 const lastSyncedAt = ref('')
 const operatingOrder = ref('')
+const expandedOrderNo = ref('')
+const orderDetailCache = reactive(new Map<string, Order>())
+const ordersTableArea = ref<HTMLElement | null>(null)
 const nowTick = ref(Date.now())
 const pagination = reactive({
   page: 1,
@@ -51,6 +53,9 @@ const pagination = reactive({
 })
 let refreshTimer: number | undefined
 let durationTimer: number | undefined
+let tableResizeFrame: number | undefined
+let tableResizeObserver: ResizeObserver | undefined
+let pageSizeReloadPending = false
 let unsubscribeRealtime: (() => void) | undefined
 const filters = reactive({
   search: '',
@@ -59,16 +64,69 @@ const filters = reactive({
 })
 
 const statusOptions = orderStatusOptions
+const TABLE_HEADER_HEIGHT = 42
+const TABLE_HORIZONTAL_SCROLLBAR_HEIGHT = 12
+const ORDER_ROW_HEIGHT = 58
+
+function hasExternalAmount(value?: number | string) {
+  return value !== undefined && value !== null && value !== '' && Number.isFinite(Number(value))
+}
+
+function formatExternalAmount(value?: number | string) {
+  return hasExternalAmount(value) ? formatMoney(value) : '未提供'
+}
+
+function orderDurationTone(status?: string) {
+  if (status === 'DELIVERED') return 'success'
+  if (['FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED'].includes(status || '')) return 'danger'
+  return 'processing'
+}
+
+function toggleOrderDetails(row: Order) {
+  expandedOrderNo.value = expandedOrderNo.value === row.orderNo ? '' : row.orderNo
+}
+
+function handleOrderRowClick(row: Order, _column: unknown, event: Event) {
+  const target = event.target
+  if (target instanceof Element && target.closest('button, a, input, select, textarea, [role="button"], [role="menuitem"]')) return
+  toggleOrderDetails(row)
+}
+
+function orderRowClassName({ row }: { row: Order }) {
+  return expandedOrderNo.value === row.orderNo ? 'is-expanded' : ''
+}
+
+function handleDetailUpdated(updatedOrder: Order) {
+  orderDetailCache.set(updatedOrder.orderNo, updatedOrder)
+  orders.value = orders.value.map((item) => (item.orderNo === updatedOrder.orderNo ? updatedOrder : item))
+}
+
+async function copyLocalOrderNo(value: string) {
+  try {
+    await navigator.clipboard.writeText(value)
+    ElMessage.success('本地订单号已复制')
+  } catch {
+    ElMessage.error('复制失败，请手动复制')
+  }
+}
 
 const orderSummary = computed(() => {
-  const totalAmount = orders.value.reduce((sum, order) => sum + (Number(order.amount) || 0), 0)
+  const pricedOrders = orders.value.filter((order) => hasExternalAmount(order.externalMaxAmount))
+  const totalAmount = pricedOrders.reduce((sum, order) => sum + Number(order.externalMaxAmount), 0)
+  const missingAmountCount = orders.value.length - pricedOrders.length
   const activeCount = orders.value.filter((order) => ['UNPAID', 'PROCURING', 'WAITING_MANUAL'].includes(order.status)).length
   const failedCount = orders.value.filter((order) => ['FAILED', 'REFUNDED', 'CANCELLED'].includes(order.status)).length
   const deliveredCount = orders.value.filter((order) => order.status === 'DELIVERED').length
 
   return [
     { label: '当前结果', value: `${orders.value.length}`, hint: '笔订单', icon: ClipboardList, tone: 'total' },
-    { label: '订单金额', value: formatMoney(totalAmount), hint: '当前筛选汇总', icon: CircleDollarSign, tone: 'money' },
+    {
+      label: '订单金额',
+      value: formatMoney(totalAmount),
+      hint: missingAmountCount ? `当前筛选汇总 · ${missingAmountCount} 笔未提供` : '当前筛选汇总',
+      icon: CircleDollarSign,
+      tone: 'money'
+    },
     { label: '处理中', value: `${activeCount}`, hint: '待支付 / 采购 / 人工', icon: Activity, tone: 'active' },
     { label: '已发货', value: `${deliveredCount}`, hint: failedCount ? `${failedCount} 笔异常或关闭` : '暂无异常', icon: PackageCheck, tone: 'done' }
   ]
@@ -84,6 +142,34 @@ function deliveryClass(value?: string) {
   if (key === 'CARD') return 'card'
   if (key === 'MANUAL') return 'manual'
   return 'unknown'
+}
+
+function syncPageSizeFromTable(reload = true) {
+  const tableHeight = ordersTableArea.value?.clientHeight || 0
+  if (tableHeight <= TABLE_HEADER_HEIGHT + TABLE_HORIZONTAL_SCROLLBAR_HEIGHT) return
+
+  const availableRowsHeight = tableHeight - TABLE_HEADER_HEIGHT - TABLE_HORIZONTAL_SCROLLBAR_HEIGHT
+  const nextPageSize = Math.max(1, Math.floor(availableRowsHeight / ORDER_ROW_HEIGHT))
+  if (nextPageSize === pagination.pageSize) return
+
+  const firstVisibleOrderIndex = (pagination.page - 1) * pagination.pageSize
+  pagination.pageSize = nextPageSize
+  pagination.page = Math.floor(firstVisibleOrderIndex / nextPageSize) + 1
+
+  if (!reload) return
+  if (loading.value || syncing.value || upstreamRefreshing.value) {
+    pageSizeReloadPending = true
+    return
+  }
+  void loadOrders()
+}
+
+function schedulePageSizeSync() {
+  if (tableResizeFrame) window.cancelAnimationFrame(tableResizeFrame)
+  tableResizeFrame = window.requestAnimationFrame(() => {
+    tableResizeFrame = undefined
+    syncPageSizeFromTable()
+  })
 }
 
 async function loadOrders(options: { silent?: boolean } = {}) {
@@ -104,6 +190,10 @@ async function loadOrders(options: { silent?: boolean } = {}) {
   } finally {
     loading.value = false
     syncing.value = false
+    if (pageSizeReloadPending) {
+      pageSizeReloadPending = false
+      void loadOrders()
+    }
   }
 }
 
@@ -128,6 +218,10 @@ async function refreshOrdersWithUpstream() {
     ElMessage.error(message)
   } finally {
     upstreamRefreshing.value = false
+    if (pageSizeReloadPending) {
+      pageSizeReloadPending = false
+      void loadOrders()
+    }
   }
 }
 
@@ -151,6 +245,7 @@ async function exportOrders() {
 }
 
 function resetFilters() {
+  expandedOrderNo.value = ''
   filters.search = ''
   filters.status = ''
   filters.goodsType = ''
@@ -159,11 +254,13 @@ function resetFilters() {
 }
 
 function searchOrders() {
+  expandedOrderNo.value = ''
   pagination.page = 1
   void loadOrders()
 }
 
 function handlePageChange(page: number) {
+  expandedOrderNo.value = ''
   pagination.page = page
   void loadOrders()
 }
@@ -204,6 +301,8 @@ async function handleManualCommand(command: unknown, row: Order) {
     if (action === 'delete') {
       await deleteOrder(row.orderNo)
       orders.value = orders.value.filter((item) => item.orderNo !== row.orderNo)
+      orderDetailCache.delete(row.orderNo)
+      if (expandedOrderNo.value === row.orderNo) expandedOrderNo.value = ''
       pagination.total = Math.max(0, pagination.total - 1)
       ElMessage.success('订单已删除')
     }
@@ -215,9 +314,13 @@ async function handleManualCommand(command: unknown, row: Order) {
   }
 }
 
-onMounted(loadOrders)
-
 onMounted(() => {
+  syncPageSizeFromTable(false)
+  if ('ResizeObserver' in window && ordersTableArea.value) {
+    tableResizeObserver = new ResizeObserver(schedulePageSizeSync)
+    tableResizeObserver.observe(ordersTableArea.value)
+  }
+  void loadOrders()
   refreshTimer = window.setInterval(() => {
     if (!exporting.value) void loadOrders({ silent: true })
   }, 10000)
@@ -232,6 +335,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (refreshTimer) window.clearInterval(refreshTimer)
   if (durationTimer) window.clearInterval(durationTimer)
+  if (tableResizeFrame) window.cancelAnimationFrame(tableResizeFrame)
+  tableResizeObserver?.disconnect()
   unsubscribeRealtime?.()
 })
 </script>
@@ -294,11 +399,22 @@ onBeforeUnmount(() => {
       <div class="table-caption">
         <div>
           <strong>订单明细</strong>
-          <span>{{ pagination.total ? `共 ${pagination.total} 笔，每页 10 笔` : '暂无订单数据' }}</span>
+          <span>{{ pagination.total ? `共 ${pagination.total} 笔，每页 ${pagination.pageSize} 笔` : '暂无订单数据' }}</span>
         </div>
       </div>
 
-      <el-table v-loading="loading" :data="orders" height="620" class="orders-table" style="width: 100%">
+      <div ref="ordersTableArea" class="orders-table-area">
+        <el-table
+          v-loading="loading"
+          :data="orders"
+          :expand-row-keys="expandedOrderNo ? [expandedOrderNo] : []"
+          :row-class-name="orderRowClassName"
+          row-key="orderNo"
+          height="100%"
+          class="orders-table"
+          style="width: 100%"
+          @row-click="handleOrderRowClick"
+        >
       <template #empty>
         <div class="orders-empty">
           <ClipboardList :size="34" />
@@ -307,23 +423,56 @@ onBeforeUnmount(() => {
           <el-button v-if="!loading" type="primary" :icon="RefreshCw" @click="resetFilters">清空筛选并刷新</el-button>
         </div>
       </template>
-      <el-table-column prop="orderNo" label="订单号" min-width="210" fixed="left" show-overflow-tooltip />
+      <el-table-column label="订单信息" width="260" fixed="left">
+        <template #default="{ row }">
+          <div class="order-primary-cell">
+            <div class="order-meta-line">
+              <time>{{ formatTime(row.createdAt) }}</time>
+              <span aria-hidden="true">·</span>
+              <span class="order-duration" :class="`is-${orderDurationTone(row.status)}`">
+                耗时 <OrderDurationText :order="row" :now="nowTick" />
+              </span>
+            </div>
+            <div>
+              <button
+                type="button"
+                class="local-order-number"
+                :title="`${row.orderNo} · 点击复制`"
+                aria-label="复制本地订单号"
+                @click="copyLocalOrderNo(row.orderNo)"
+              >
+                {{ row.orderNo }}
+              </button>
+            </div>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column label="商品 / 货源" min-width="320" show-overflow-tooltip>
         <template #default="{ row }">
           <OrderGoodsCell :order="row" />
         </template>
       </el-table-column>
-      <el-table-column label="下单用户" min-width="160" show-overflow-tooltip>
+      <el-table-column label="充值账号" min-width="184" align="center" header-align="center">
         <template #default="{ row }">
-          <OrderBuyerCell :order="row" />
+          <div class="recharge-account-cell">
+            <RechargeAccountTag :value="row.rechargeAccount" />
+          </div>
         </template>
       </el-table-column>
-      <el-table-column label="金额" width="130">
+      <el-table-column label="金额" width="160">
         <template #default="{ row }">
-          <span class="amount-card">
-            <small>实付</small>
-            <strong>{{ formatMoney(row.amount) }}</strong>
-          </span>
+          <div class="amount-breakdown">
+            <div>
+              <small>实付金额</small>
+              <strong :class="{ missing: !hasExternalAmount(row.externalMaxAmount) }">
+                {{ formatExternalAmount(row.externalMaxAmount) }}
+              </strong>
+            </div>
+            <div>
+              <small>成本金额</small>
+              <span>{{ formatMoney(row.amount) }}</span>
+            </div>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="支付方式" width="130">
@@ -333,7 +482,7 @@ onBeforeUnmount(() => {
       </el-table-column>
       <el-table-column label="状态" width="130">
         <template #default="{ row }">
-          <el-tag :type="orderStatusTagType(row.status)" effect="dark">{{ formatOrderStatus(row.status) }}</el-tag>
+          <OrderStatusBadge :status="row.status" />
         </template>
       </el-table-column>
       <el-table-column label="发货类型" width="120">
@@ -346,21 +495,45 @@ onBeforeUnmount(() => {
       </el-table-column>
       <el-table-column label="来源" width="132">
         <template #default="{ row }">
-          <OrderSourceBadge :source="row.orderSource" :request-id="row.requestId" :platform="row.platform" />
+          <OrderSourceBadge :source="row.orderSource" :request-id="row.requestId" :platform="row.platform" :remark="row.buyerRemark" />
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" width="150">
-        <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
+      <el-table-column label="下单用户" min-width="160" show-overflow-tooltip>
+        <template #default="{ row }">
+          <OrderBuyerCell :order="row" />
+        </template>
       </el-table-column>
-      <el-table-column label="订单处理耗时" width="140">
-        <template #default="{ row }"><OrderDurationText :order="row" :now="nowTick" /></template>
+      <el-table-column
+        type="expand"
+        width="1"
+        class-name="order-expand-column"
+        label-class-name="order-expand-column"
+      >
+        <template #default="{ row }">
+          <div class="order-expanded-detail" @click.stop>
+            <OrderDetailView
+              :order-number="row.orderNo"
+              :initial-order="orderDetailCache.get(row.orderNo) || row"
+              embedded
+              @updated="handleDetailUpdated"
+            />
+          </div>
+        </template>
       </el-table-column>
       <el-table-column label="操作" width="170" fixed="right">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-button class="row-action" size="small" :icon="Eye" @click="router.push({ name: 'order-detail', params: { orderNo: row.orderNo } })">
-              详情
-            </el-button>
+            <button
+              type="button"
+              class="order-expand-trigger"
+              :class="{ expanded: expandedOrderNo === row.orderNo }"
+              :title="expandedOrderNo === row.orderNo ? '收起订单详情' : '展开订单详情'"
+              :aria-label="expandedOrderNo === row.orderNo ? '收起订单详情' : '展开订单详情'"
+              :aria-expanded="expandedOrderNo === row.orderNo"
+              @click.stop="toggleOrderDetails(row)"
+            >
+              <ChevronDown :size="17" />
+            </button>
             <el-dropdown
               trigger="click"
               :disabled="Boolean(operatingOrder)"
@@ -380,7 +553,8 @@ onBeforeUnmount(() => {
           </div>
         </template>
       </el-table-column>
-      </el-table>
+        </el-table>
+      </div>
       <div class="table-pagination">
         <el-pagination
           background
@@ -412,10 +586,29 @@ onBeforeUnmount(() => {
 }
 
 .orders-page {
-  min-height: calc(100vh - 132px);
+  --order-font-primary: 13px;
+  --order-font-secondary: 11px;
+  --order-font-control: 12px;
+  --order-weight-primary: 600;
+  --order-weight-secondary: 500;
+  --order-weight-control: 600;
+  --order-line-primary: 19px;
+  --order-line-secondary: 16px;
+  --order-line-control: 18px;
+  --order-row-primary-size: 13px;
+  --order-row-primary-weight: 600;
+  --order-row-primary-line: 18px;
+  --order-row-secondary-size: 12px;
+  --order-row-secondary-weight: 500;
+  --order-row-secondary-line: 17px;
+  height: calc(100vh - 48px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .orders-hero {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -431,14 +624,17 @@ onBeforeUnmount(() => {
 
 .title-block span {
   color: rgba(255, 255, 255, 0.46);
-  font-size: 12px;
+  font-size: var(--order-font-secondary);
+  font-weight: var(--order-weight-secondary);
+  line-height: var(--order-line-secondary);
 }
 
 .title-block h2 {
   margin: 0;
   color: rgba(255, 255, 255, 0.92);
   font-size: 21px;
-  font-weight: 850;
+  font-weight: 700;
+  line-height: 30px;
   letter-spacing: 0;
 }
 
@@ -487,6 +683,7 @@ onBeforeUnmount(() => {
 .orders-control-strip {
   position: relative;
   z-index: 1;
+  flex: 0 0 auto;
   display: grid;
   gap: 12px;
   margin-bottom: 12px;
@@ -559,7 +756,9 @@ onBeforeUnmount(() => {
 .summary-item em {
   min-width: 0;
   color: rgba(255, 255, 255, 0.46);
-  font-size: 12px;
+  font-size: var(--order-font-secondary);
+  font-weight: var(--order-weight-secondary);
+  line-height: var(--order-line-secondary);
   font-style: normal;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -579,7 +778,8 @@ onBeforeUnmount(() => {
   min-width: 0;
   color: rgba(255, 255, 255, 0.9);
   font-size: 19px;
-  font-weight: 800;
+  font-weight: 700;
+  line-height: 27px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -608,15 +808,29 @@ onBeforeUnmount(() => {
 .orders-table-shell {
   position: relative;
   z-index: 1;
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   overflow: hidden;
   border-radius: 16px;
   background: rgba(5, 12, 25, 0.34);
   border: 0.5px solid rgba(255, 255, 255, 0.09);
 }
 
+.orders-table-area {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.orders-table {
+  height: 100%;
+}
+
 .table-caption {
   min-height: 48px;
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
@@ -634,15 +848,19 @@ onBeforeUnmount(() => {
 .table-caption strong {
   color: rgba(255, 255, 255, 0.88);
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 650;
+  line-height: 20px;
 }
 
 .table-caption span {
   color: rgba(255, 255, 255, 0.46);
-  font-size: 12px;
+  font-size: var(--order-font-secondary);
+  font-weight: var(--order-weight-secondary);
+  line-height: var(--order-line-secondary);
 }
 
 .table-pagination {
+  flex: 0 0 auto;
   display: flex;
   justify-content: flex-end;
   padding: 12px 14px;
@@ -655,71 +873,182 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.order-expand-trigger {
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  flex: 0 0 30px;
+  place-items: center;
+  padding: 0;
+  color: rgba(220, 234, 248, 0.56);
+  border: 1px solid rgba(183, 215, 244, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.order-expand-trigger:hover,
+.order-expand-trigger.expanded {
+  color: #93c5fd;
+  border-color: rgba(96, 165, 250, 0.28);
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.order-expand-trigger svg {
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.order-expand-trigger.expanded svg {
+  transform: rotate(180deg);
+}
+
 .row-action {
   --el-button-bg-color: rgba(255, 255, 255, 0.07);
   --el-button-border-color: rgba(255, 255, 255, 0.12);
   --el-button-text-color: rgba(255, 255, 255, 0.84);
+  font-size: var(--order-font-control);
+  font-weight: var(--order-weight-control);
+  line-height: var(--order-line-control);
 }
 
-.amount-card {
-  position: relative;
-  min-width: 92px;
-  height: 34px;
-  display: inline-flex;
+.order-primary-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.order-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: var(--order-row-primary-size);
+  font-weight: var(--order-row-primary-weight);
+  line-height: var(--order-row-primary-line);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.order-meta-line time {
+  color: rgba(255, 255, 255, 0.88);
+  font-variant-numeric: tabular-nums;
+}
+
+.order-meta-line > span[aria-hidden="true"] {
+  color: rgba(255, 255, 255, 0.24);
+}
+
+.order-duration {
+  min-width: 0;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.order-duration.is-processing {
+  color: #60a5fa;
+}
+
+.order-duration.is-success {
+  color: #4ade80;
+}
+
+.order-duration.is-danger {
+  color: #f87171;
+}
+
+.order-primary-cell > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.local-order-number {
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 0;
+  color: rgba(255, 255, 255, 0.44);
+  font-size: var(--order-row-secondary-size);
+  font-weight: var(--order-row-secondary-weight);
+  line-height: var(--order-row-secondary-line);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.local-order-number:hover {
+  color: rgba(219, 234, 254, 0.72);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.local-order-number:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.7);
+  outline-offset: 1px;
+}
+
+.recharge-account-cell {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.amount-breakdown {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.amount-breakdown > div {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 7px;
-  padding: 4px 8px 4px 5px;
-  overflow: hidden;
-  border-radius: 11px;
-  color: #fff7ad;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.028)),
-    radial-gradient(circle at 18% 0%, rgba(250, 204, 21, 0.26), transparent 48%),
-    rgba(234, 179, 8, 0.08);
-  border: 0.5px solid rgba(250, 204, 21, 0.34);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.13),
-    inset 0 -10px 18px rgba(113, 63, 18, 0.12),
-    0 8px 22px rgba(234, 179, 8, 0.08);
+  gap: 8px;
+  min-width: 0;
 }
 
-.amount-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  border-radius: inherit;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.14), transparent 36%);
-  opacity: 0.55;
+.amount-breakdown > div:first-child small,
+.amount-breakdown > div:first-child strong {
+  font-size: var(--order-row-primary-size);
+  font-weight: var(--order-row-primary-weight);
+  line-height: var(--order-row-primary-line);
 }
 
-.amount-card small {
-  position: relative;
-  z-index: 1;
-  height: 23px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
-  border-radius: 8px;
-  color: rgba(255, 251, 214, 0.78);
-  font-size: 10px;
-  font-weight: 850;
-  line-height: 1;
-  background: rgba(7, 16, 30, 0.28);
-  border: 0.5px solid rgba(255, 255, 255, 0.1);
+.amount-breakdown > div:last-child small,
+.amount-breakdown > div:last-child span {
+  font-size: var(--order-row-secondary-size);
+  font-weight: var(--order-row-secondary-weight);
+  line-height: var(--order-row-secondary-line);
 }
 
-.amount-card strong {
-  position: relative;
-  z-index: 1;
+.amount-breakdown small {
+  color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+}
+
+.amount-breakdown strong {
   color: #fff3a3;
-  font-size: 14px;
-  font-weight: 900;
-  line-height: 1;
-  letter-spacing: 0;
   font-variant-numeric: tabular-nums;
-  text-shadow: 0 0 18px rgba(234, 179, 8, 0.28);
+  white-space: nowrap;
+}
+
+.amount-breakdown strong.missing {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.amount-breakdown span {
+  color: rgba(255, 255, 255, 0.58);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .delivery-pill {
@@ -732,7 +1061,9 @@ onBeforeUnmount(() => {
   padding: 0 8px;
   border-radius: 9px;
   color: rgba(255, 255, 255, 0.8);
-  font-size: 12px;
+  font-size: var(--order-font-control);
+  font-weight: var(--order-weight-control);
+  line-height: var(--order-line-control);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.055);
 }
@@ -758,18 +1089,47 @@ onBeforeUnmount(() => {
 .orders-table :deep(.el-table__header th.el-table__cell) {
   height: 42px;
   color: rgba(255, 255, 255, 0.56);
-  font-size: 12px;
-  font-weight: 750;
+  font-size: var(--order-font-control);
+  font-weight: var(--order-weight-control);
+  line-height: var(--order-line-control);
   background: rgba(255, 255, 255, 0.042) !important;
 }
 
 .orders-table :deep(.el-table__row) {
+  cursor: pointer;
   transition: background 160ms ease;
+}
+
+.orders-table :deep(.el-table__row.is-expanded > td.el-table__cell) {
+  background: rgba(59, 130, 246, 0.065) !important;
 }
 
 .orders-table :deep(.el-table__row td.el-table__cell) {
   height: 58px;
   border-bottom-color: rgba(255, 255, 255, 0.065);
+}
+
+.orders-table :deep(td.order-expand-column),
+.orders-table :deep(th.order-expand-column) {
+  width: 1px !important;
+  padding: 0 !important;
+}
+
+.orders-table :deep(.order-expand-column .cell) {
+  width: 0;
+  overflow: hidden;
+  padding: 0 !important;
+}
+
+.orders-table :deep(td.el-table__expanded-cell) {
+  height: auto;
+  padding: 0 !important;
+  background: rgba(4, 12, 24, 0.72) !important;
+}
+
+.order-expanded-detail {
+  width: 100%;
+  min-width: 0;
 }
 
 .orders-table :deep(.el-table__fixed-right),
@@ -779,13 +1139,17 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(20px);
 }
 
-.orders-table :deep(.el-table__cell .cell) {
+.orders-table :deep(td.el-table__cell .cell) {
   display: flex;
   align-items: center;
+  font-size: var(--order-font-primary);
+  font-weight: var(--order-weight-primary);
+  line-height: var(--order-line-primary);
 }
 
 .orders-table :deep(.el-table__cell:nth-child(2) .cell),
-.orders-table :deep(.el-table__cell:nth-child(3) .cell) {
+.orders-table :deep(.el-table__cell:nth-child(3) .cell),
+.orders-table :deep(.el-table__cell:nth-child(9) .cell) {
   align-items: stretch;
 }
 
@@ -793,7 +1157,9 @@ onBeforeUnmount(() => {
   min-width: 72px;
   justify-content: center;
   border-radius: 9px;
-  font-weight: 750;
+  font-size: var(--order-font-control);
+  font-weight: var(--order-weight-control);
+  line-height: var(--order-line-control);
 }
 
 .orders-empty {
@@ -844,6 +1210,12 @@ onBeforeUnmount(() => {
   50% {
     transform: scale(1.45);
     opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .order-expand-trigger svg {
+    transition: none;
   }
 }
 </style>

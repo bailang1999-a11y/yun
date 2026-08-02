@@ -33,7 +33,9 @@ const meta = computed(() => {
   padding: 0 9px;
   border-radius: 9px;
   color: rgba(255, 255, 255, 0.78);
-  font-size: 12px;
+  font-size: var(--order-font-control, 12px);
+  font-weight: var(--order-weight-control, 600);
+  line-height: var(--order-line-control, 18px);
   border: 0.5px solid rgba(255, 255, 255, 0.1);
   background: rgba(255, 255, 255, 0.045);
 }

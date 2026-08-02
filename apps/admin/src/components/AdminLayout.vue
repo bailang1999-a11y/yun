@@ -230,7 +230,7 @@ async function submitSuperAdminCredentials() {
     </aside>
 
     <section class="workspace">
-      <header class="topbar">
+      <header v-if="route.name !== 'orders'" class="topbar">
         <div>
           <p>运营管理后台</p>
           <h1>{{ currentTitle }}</h1>

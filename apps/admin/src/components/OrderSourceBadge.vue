@@ -7,10 +7,11 @@ const props = defineProps<{
   source?: string
   requestId?: string
   platform?: string
+  remark?: string
 }>()
 
 const meta = computed(() => {
-  const label = formatOrderSource(props.source, props.requestId, props.platform)
+  const label = formatOrderSource(props.source, props.requestId, props.platform, props.remark)
   if (label.includes('API')) return { label, icon: Webhook, className: 'api' }
   if (label.includes('Web')) return { label, icon: Monitor, className: 'web' }
   if (label.includes('H5')) return { label, icon: MonitorSmartphone, className: 'h5' }
