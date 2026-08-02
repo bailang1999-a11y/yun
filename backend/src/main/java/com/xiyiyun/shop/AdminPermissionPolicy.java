@@ -70,6 +70,7 @@ public class AdminPermissionPolicy {
 
         // ---- settings:manage：系统设置、短信登录、人机验证、支付通道 ----
         Map.entry("settings", "settings:manage"),
+        Map.entry("wecom-robot", "settings:manage"),
         Map.entry("sms-login-settings", "settings:manage"),
         Map.entry("captcha-settings", "settings:manage"),
         Map.entry("payment-channels", "settings:manage"),

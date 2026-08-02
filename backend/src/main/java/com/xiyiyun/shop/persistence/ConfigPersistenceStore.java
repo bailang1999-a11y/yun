@@ -104,7 +104,13 @@ public class ConfigPersistenceStore {
     }
 
     public String decryptSecretFromSetting(String ciphertext, String nonce) {
-        return cardCipherService.decrypt(Base64.getDecoder().decode(ciphertext), Base64.getDecoder().decode(nonce));
+        return decryptSecretFromSetting(ciphertext, nonce, "v1");
+    }
+
+    public String decryptSecretFromSetting(String ciphertext, String nonce, String keyVersion) {
+        return cardCipherService.decrypt(
+            Base64.getDecoder().decode(ciphertext), Base64.getDecoder().decode(nonce), keyVersion
+        );
     }
 
     @Transactional
@@ -131,6 +137,18 @@ public class ConfigPersistenceStore {
         settings.put("registrationType", item.registrationType());
         settings.put("defaultUserGroupId", String.valueOf(item.defaultUserGroupId()));
         settings.put("notification.ops", item.notificationReceivers() == null ? "" : item.notificationReceivers().getOrDefault("ops", ""));
+        settings.put("wecom.robot.enabled", String.valueOf(item.wecomRobot().enabled()));
+        settings.put(
+            "wecom.robot.events",
+            item.wecomRobot().events().stream().map(Enum::name).collect(java.util.stream.Collectors.joining(","))
+        );
+        Map<String, String> webhook = item.wecomRobot().webhookUrl().isBlank()
+            ? Map.of("ciphertext", "", "nonce", "", "keyVersion", "", "hash", "")
+            : encryptSecretForSetting(item.wecomRobot().webhookUrl());
+        settings.put("wecom.robot.webhook.ciphertext", webhook.get("ciphertext"));
+        settings.put("wecom.robot.webhook.nonce", webhook.get("nonce"));
+        settings.put("wecom.robot.webhook.keyVersion", webhook.get("keyVersion"));
+        settings.put("wecom.robot.webhook.hash", webhook.get("hash"));
         settings.forEach((key, value) -> systemSettingRecordMapper.upsertSetting(toSystemSettingRecord(key, value)));
     }
 

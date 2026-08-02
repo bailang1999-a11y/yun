@@ -40,6 +40,7 @@ public class PersistentOrderStore {
     private final CardRecordMapper cardRecordMapper;
     private final CardCipherService cardCipherService;
     private final MemberOrderCallbackTaskStore memberCallbackTaskStore;
+    private final WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore;
     private final OrderPersistenceMapper persistenceMapper = new OrderPersistenceMapper();
 
     public PersistentOrderStore(
@@ -57,7 +58,23 @@ public class PersistentOrderStore {
             refundRecordMapper,
             cardRecordMapper,
             cardCipherService,
+            null,
             null
+        );
+    }
+
+    public PersistentOrderStore(
+        OrderRecordMapper orderRecordMapper,
+        PaymentRecordMapper paymentRecordMapper,
+        PaymentCallbackLogMapper paymentCallbackLogMapper,
+        RefundRecordMapper refundRecordMapper,
+        CardRecordMapper cardRecordMapper,
+        CardCipherService cardCipherService,
+        MemberOrderCallbackTaskStore memberCallbackTaskStore
+    ) {
+        this(
+            orderRecordMapper, paymentRecordMapper, paymentCallbackLogMapper, refundRecordMapper,
+            cardRecordMapper, cardCipherService, memberCallbackTaskStore, null
         );
     }
 
@@ -69,7 +86,8 @@ public class PersistentOrderStore {
         RefundRecordMapper refundRecordMapper,
         CardRecordMapper cardRecordMapper,
         CardCipherService cardCipherService,
-        MemberOrderCallbackTaskStore memberCallbackTaskStore
+        MemberOrderCallbackTaskStore memberCallbackTaskStore,
+        WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore
     ) {
         this.orderRecordMapper = orderRecordMapper;
         this.paymentRecordMapper = paymentRecordMapper;
@@ -78,6 +96,7 @@ public class PersistentOrderStore {
         this.cardRecordMapper = cardRecordMapper;
         this.cardCipherService = cardCipherService;
         this.memberCallbackTaskStore = memberCallbackTaskStore;
+        this.weComRobotDeliveryTaskStore = weComRobotDeliveryTaskStore;
     }
 
     @Transactional
@@ -100,6 +119,9 @@ public class PersistentOrderStore {
         }
         if (memberCallbackTaskStore != null) {
             memberCallbackTaskStore.registerTerminalOrder(order);
+        }
+        if (weComRobotDeliveryTaskStore != null) {
+            weComRobotDeliveryTaskStore.registerOrderEvents(order);
         }
         return entity;
     }
@@ -365,6 +387,9 @@ public class PersistentOrderStore {
         Long orderId = orderRecordMapper.findIdByOrderNo(orderNo);
         if (memberCallbackTaskStore != null) {
             memberCallbackTaskStore.deleteByOrderNo(orderNo);
+        }
+        if (weComRobotDeliveryTaskStore != null) {
+            weComRobotDeliveryTaskStore.deleteByOrderNo(orderNo);
         }
         paymentCallbackLogMapper.hardDeleteByOrderNo(orderNo);
         if (orderId != null) {

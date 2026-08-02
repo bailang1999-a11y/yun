@@ -45,10 +45,16 @@ public class AdminMvpController {
     private static final long ORDER_EXPORT_MAX_ROWS = 200_000L;
 
     private final InMemoryShopRepository repository;
+    private final WeComRobotNotificationService weComRobotNotificationService;
     private final Path uploadDir;
 
-    public AdminMvpController(InMemoryShopRepository repository, @Value("${xiyiyun.upload.dir:uploads}") String uploadDir) {
+    public AdminMvpController(
+        InMemoryShopRepository repository,
+        WeComRobotNotificationService weComRobotNotificationService,
+        @Value("${xiyiyun.upload.dir:uploads}") String uploadDir
+    ) {
         this.repository = repository;
+        this.weComRobotNotificationService = weComRobotNotificationService;
         this.uploadDir = Path.of(uploadDir).toAbsolutePath().normalize();
     }
 
@@ -231,7 +237,19 @@ public class AdminMvpController {
 
     @PostMapping("/settings")
     public ApiResponse<SystemSettingItem> updateSettings(@RequestBody UpdateSystemSettingRequest request) {
-        return ApiResponse.ok(repository.updateSystemSetting(request));
+        return safe(() -> repository.updateSystemSetting(request));
+    }
+
+    @PostMapping("/wecom-robot/test")
+    public ApiResponse<String> testWeComRobot() {
+        return safe(weComRobotNotificationService::sendTest);
+    }
+
+    @GetMapping("/wecom-robot/deliveries")
+    public ApiResponse<List<WeComRobotDeliveryItem>> weComRobotDeliveries(
+        @RequestParam(defaultValue = "5") Integer limit
+    ) {
+        return ApiResponse.ok(weComRobotNotificationService.latestDeliveries(limit == null ? 5 : limit));
     }
 
     @GetMapping("/categories")

@@ -135,6 +135,8 @@ class AdminPermissionPolicyFailClosedTest {
         "/api/admin/open-api-logs,users:manage",
         // ---- settings:manage ----
         "/api/admin/settings,settings:manage",
+        "/api/admin/wecom-robot/test,settings:manage",
+        "/api/admin/wecom-robot/deliveries,settings:manage",
         "/api/admin/sms-login-settings,settings:manage",
         "/api/admin/captcha-settings,settings:manage",
         "/api/admin/captcha-settings/test,settings:manage",

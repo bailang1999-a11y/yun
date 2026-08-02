@@ -9,7 +9,10 @@ import com.xiyiyun.shop.mvp.GoodsChannelItem;
 import com.xiyiyun.shop.mvp.GroupRuleItem;
 import com.xiyiyun.shop.mvp.RechargeFieldItem;
 import com.xiyiyun.shop.mvp.SupplierItem;
+import com.xiyiyun.shop.mvp.SystemSettingItem;
 import com.xiyiyun.shop.mvp.UserGroupItem;
+import com.xiyiyun.shop.mvp.WeComNotificationEvent;
+import com.xiyiyun.shop.mvp.WeComRobotSetting;
 import com.xiyiyun.shop.persistence.entity.GoodsChannelRecordEntity;
 import com.xiyiyun.shop.persistence.entity.RechargeFieldRecordEntity;
 import com.xiyiyun.shop.persistence.entity.SupplierRecordEntity;
@@ -24,6 +27,7 @@ import com.xiyiyun.shop.persistence.mapper.UserGroupRecordMapper;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -66,6 +70,34 @@ class ConfigPersistenceStoreTest {
         assertThat(encrypted.get("hash")).hasSize(64);
         assertThat(store.decryptSecretFromSetting(encrypted.get("ciphertext"), encrypted.get("nonce")))
             .isEqualTo("member-api-secret");
+    }
+
+    @Test
+    void saveSystemSettingEncryptsWeComWebhookInsteadOfPersistingPlaintext() {
+        String webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=693a91f6-7abc-4bc4-97a0-0ec2aifa5aaa";
+        SystemSettingItem setting = new SystemSettingItem(
+            "喜易云", "", "", "", "", "", "", "MOCK", true, "TENCENT", false,
+            30, true, false, true, "MOBILE", 1L, Map.of(),
+            new WeComRobotSetting(true, webhook, List.of(WeComNotificationEvent.DELIVERY_SUCCEEDED))
+        );
+
+        store.saveSystemSetting(setting);
+
+        ArgumentCaptor<com.xiyiyun.shop.persistence.entity.SystemSettingRecordEntity> captor =
+            ArgumentCaptor.forClass(com.xiyiyun.shop.persistence.entity.SystemSettingRecordEntity.class);
+        verify(systemSettingRecordMapper, org.mockito.Mockito.atLeastOnce()).upsertSetting(captor.capture());
+        Map<String, String> saved = captor.getAllValues().stream().collect(java.util.stream.Collectors.toMap(
+            com.xiyiyun.shop.persistence.entity.SystemSettingRecordEntity::getSettingKey,
+            com.xiyiyun.shop.persistence.entity.SystemSettingRecordEntity::getSettingValue
+        ));
+        assertThat(saved).doesNotContainValue(webhook);
+        assertThat(saved.get("wecom.robot.webhook.ciphertext")).isNotBlank();
+        assertThat(store.decryptSecretFromSetting(
+            saved.get("wecom.robot.webhook.ciphertext"),
+            saved.get("wecom.robot.webhook.nonce"),
+            saved.get("wecom.robot.webhook.keyVersion")
+        )).isEqualTo(webhook);
+        assertThat(saved.get("wecom.robot.events")).isEqualTo("DELIVERY_SUCCEEDED");
     }
 
     @Test

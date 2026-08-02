@@ -66,6 +66,21 @@ class SchemaStackingTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("企业微信群机器人可靠通知任务结构存在")
+    void weComRobotDeliveryTaskStructureExists() {
+        assertTableExists("wecom_robot_delivery_tasks");
+        assertColumn("wecom_robot_delivery_tasks", "event_id", "varchar(64)", false);
+        assertColumn("wecom_robot_delivery_tasks", "event_type", "varchar(32)", false);
+        assertColumn("wecom_robot_delivery_tasks", "markdown_content", "text", false);
+        assertColumn("wecom_robot_delivery_tasks", "state", "varchar(16)", false);
+        assertUniqueIndexColumns(
+            "uk_wecom_robot_delivery_event",
+            "wecom_robot_delivery_tasks",
+            List.of("event_id")
+        );
+    }
+
+    @Test
     @DisplayName("cards.card_kind_id 与 uk_cards_kind_hash 存在（005/001 卡种维度）")
     void cardsCardKindStructureExists() {
         assertColumn("cards", "card_kind_id", "bigint unsigned", true);

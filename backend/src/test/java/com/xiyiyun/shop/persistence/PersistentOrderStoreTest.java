@@ -77,6 +77,27 @@ class PersistentOrderStoreTest {
     }
 
     @Test
+    void saveOrderSnapshotRegistersTheWeComOutboxInTheSameCall() {
+        MemberOrderCallbackTaskStore memberTaskStore = mock(MemberOrderCallbackTaskStore.class);
+        WeComRobotDeliveryTaskStore weComTaskStore = mock(WeComRobotDeliveryTaskStore.class);
+        PersistentOrderStore callbackStore = new PersistentOrderStore(
+            orderRecordMapper,
+            paymentRecordMapper,
+            paymentCallbackLogMapper,
+            refundRecordMapper,
+            cardRecordMapper,
+            cardCipherService,
+            memberTaskStore,
+            weComTaskStore
+        );
+        when(orderRecordMapper.findIdByOrderNo("ORD-1")).thenReturn(101L);
+
+        callbackStore.saveOrderSnapshot(order());
+
+        verify(weComTaskStore).registerOrderEvents(any(OrderItem.class));
+    }
+
+    @Test
     void saveExternalMaxAmountReportsWhetherTheScopedWriteSucceeded() {
         when(orderRecordMapper.saveExternalMaxAmount("ORD-1", 90001L, new BigDecimal("12.3400")))
             .thenReturn(1);

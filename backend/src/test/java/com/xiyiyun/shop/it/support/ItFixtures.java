@@ -24,6 +24,7 @@ public class ItFixtures {
 
     /** 业务表清单：每个测试方法前清空，避免互相污染。 */
     private static final List<String> BUSINESS_TABLES = List.of(
+        "wecom_robot_delivery_tasks",
         "member_order_callback_tasks",
         "order_status_logs",
         "payment_callback_logs",

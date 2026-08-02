@@ -145,7 +145,8 @@ public class ConfigService {
             request.registrationEnabled() == null ? systemSetting.registrationEnabled() : request.registrationEnabled(),
             registrationTypeNormalizer.apply(defaultText(request.registrationType(), systemSetting.registrationType())),
             defaultUserGroupValidator.apply(request.defaultUserGroupId() == null ? systemSetting.defaultUserGroupId() : request.defaultUserGroupId()),
-            request.notificationReceivers() == null ? systemSetting.notificationReceivers() : Map.copyOf(request.notificationReceivers())
+            request.notificationReceivers() == null ? systemSetting.notificationReceivers() : Map.copyOf(request.notificationReceivers()),
+            request.wecomRobot() == null ? systemSetting.wecomRobot() : request.wecomRobot().validated()
         );
         persistSystemSetting(systemSetting);
         return systemSetting;
@@ -179,11 +180,33 @@ public class ConfigService {
                 booleanSetting(settings, "registrationEnabled", systemSetting.registrationEnabled()),
                 registrationTypeNormalizer.apply(defaultText(settings.get("registrationType"), systemSetting.registrationType())),
                 longSetting(settings, "defaultUserGroupId", systemSetting.defaultUserGroupId()),
-                Map.of("ops", defaultText(settings.get("notification.ops"), systemSetting.notificationReceivers().getOrDefault("ops", "")))
+                Map.of("ops", defaultText(settings.get("notification.ops"), systemSetting.notificationReceivers().getOrDefault("ops", ""))),
+                loadWeComRobotSetting(settings)
             );
         } catch (RuntimeException ex) {
             auditService.appendOperation("PERSISTENCE_READ_FALLBACK", "SYSTEM_SETTING", "GLOBAL", persistenceErrorMessage(ex));
         }
+    }
+
+    private WeComRobotSetting loadWeComRobotSetting(Map<String, String> settings) {
+        String ciphertext = defaultText(settings.get("wecom.robot.webhook.ciphertext"), "");
+        String nonce = defaultText(settings.get("wecom.robot.webhook.nonce"), "");
+        String keyVersion = defaultText(settings.get("wecom.robot.webhook.keyVersion"), "");
+        String webhookUrl = "";
+        if (!ciphertext.isEmpty() && !nonce.isEmpty() && !keyVersion.isEmpty()) {
+            webhookUrl = configPersistenceStore.decryptSecretFromSetting(ciphertext, nonce, keyVersion);
+        }
+        List<WeComNotificationEvent> events = new ArrayList<>();
+        for (String value : defaultText(settings.get("wecom.robot.events"), "").split(",")) {
+            try {
+                if (!value.isBlank()) events.add(WeComNotificationEvent.valueOf(value.trim()));
+            } catch (IllegalArgumentException ignored) {
+                // Ignore values from newer versions during rollback or mixed-version startup.
+            }
+        }
+        return new WeComRobotSetting(
+            booleanSetting(settings, "wecom.robot.enabled", false), webhookUrl, events
+        ).validated();
     }
 
     private void persistSystemSetting(SystemSettingItem item) {

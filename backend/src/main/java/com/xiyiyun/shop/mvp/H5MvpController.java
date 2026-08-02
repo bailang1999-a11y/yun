@@ -45,7 +45,7 @@ public class H5MvpController {
 
     @GetMapping("/settings")
     public ApiResponse<SystemSettingItem> settings() {
-        return ApiResponse.ok(repository.systemSetting());
+        return ApiResponse.ok(repository.systemSetting().publicView());
     }
 
     @GetMapping("/payment-channels")

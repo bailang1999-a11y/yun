@@ -14,14 +14,17 @@ import org.springframework.transaction.annotation.Transactional;
 public class OrderCreationStore {
     private final OrderRecordMapper orderRecordMapper;
     private final UserBalanceTransactionMapper stockMapper;
+    private final WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore;
     private final OrderPersistenceMapper persistenceMapper = new OrderPersistenceMapper();
 
     public OrderCreationStore(
         OrderRecordMapper orderRecordMapper,
-        UserBalanceTransactionMapper stockMapper
+        UserBalanceTransactionMapper stockMapper,
+        WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore
     ) {
         this.orderRecordMapper = orderRecordMapper;
         this.stockMapper = stockMapper;
+        this.weComRobotDeliveryTaskStore = weComRobotDeliveryTaskStore;
     }
 
     @Transactional
@@ -46,6 +49,7 @@ public class OrderCreationStore {
         if (reserveStock && stockMapper.deductGoodsStock(order.goodsId(), order.quantity()) != 1) {
             throw new IllegalStateException("goods stock is insufficient");
         }
+        weComRobotDeliveryTaskStore.registerOrderEvents(order);
         return new CreateResult(order, true);
     }
 

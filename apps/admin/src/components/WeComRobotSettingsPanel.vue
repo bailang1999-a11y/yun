@@ -70,7 +70,7 @@ function isOfficialWebhook(value: string) {
     return url.protocol === 'https:'
       && url.hostname === 'qyapi.weixin.qq.com'
       && url.pathname === '/cgi-bin/webhook/send'
-      && Boolean(url.searchParams.get('key'))
+      && /^[A-Za-z0-9_-]{16,128}$/.test(url.searchParams.get('key') || '')
       && [...url.searchParams.keys()].every((key) => key === 'key')
   } catch {
     return false
@@ -188,7 +188,7 @@ function statusMeta(status: string) {
           <div v-for="item in deliveries" :key="item.id" class="delivery-item">
             <component :is="statusMeta(item.status).icon" :class="statusMeta(item.status).className" :size="16" />
             <div class="delivery-copy">
-              <strong>{{ eventLabels[item.event] || item.event }}</strong>
+              <strong>{{ eventLabels[item.event] || (item.event === 'TEST' ? '测试消息' : item.event) }}</strong>
               <span>{{ item.orderNo || '测试消息' }} · {{ item.createdAt || '刚刚' }}</span>
               <small v-if="item.errorMessage">{{ item.errorMessage }}</small>
             </div>
