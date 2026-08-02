@@ -92,8 +92,8 @@ public class AgisoCallbackTaskStore {
     }
 
     @Transactional
-    public int recoverInvalidFailCodeTasks(OffsetDateTime nextAttemptAt) {
-        return mapper.recoverInvalidFailCodeTasks(requiredTime(nextAttemptAt, "nextAttemptAt"));
+    public int recoverLegacyRejectedTasks(OffsetDateTime nextAttemptAt) {
+        return mapper.recoverLegacyRejectedTasks(requiredTime(nextAttemptAt, "nextAttemptAt"));
     }
 
     private Long requiredUserId(Long value) {

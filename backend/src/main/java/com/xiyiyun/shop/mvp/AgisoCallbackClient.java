@@ -36,12 +36,20 @@ class AgisoCallbackClient {
             int code = root.path("code").asInt(-1);
             if (code != 200) {
                 String message = root.path("message").asText("");
-                throw new IllegalStateException("agiso callback rejected: code=" + code
-                    + (StringUtils.hasText(message) ? " message=" + message : ""));
+                if (!alreadyInExpectedTerminalState(payload, message)) {
+                    throw new IllegalStateException("agiso callback rejected: code=" + code
+                        + (StringUtils.hasText(message) ? " message=" + message : ""));
+                }
             }
         } catch (JsonProcessingException ex) {
             throw new IllegalStateException("agiso callback returned invalid JSON", ex);
         }
+    }
+
+    private boolean alreadyInExpectedTerminalState(Map<String, Object> payload, String message) {
+        return "30".equals(String.valueOf(payload.get("orderStatus")).trim())
+            && StringUtils.hasText(message)
+            && message.contains("当前状态为【请求失败】，不允许进行回调处理");
     }
 
     private JsonNode responseNode(String response) throws JsonProcessingException {

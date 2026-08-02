@@ -116,13 +116,13 @@ class AgisoOrderCallbackServiceTest {
 
     @Test
     void legacyInvalidFailCodeTasksAreRecoveredOnlyOncePerProcess() {
-        when(taskStore.recoverInvalidFailCodeTasks(any())).thenReturn(2);
+        when(taskStore.recoverLegacyRejectedTasks(any())).thenReturn(2);
         when(taskStore.findDue(any(), anyInt())).thenReturn(List.of());
 
         service.dispatchDue();
         service.dispatchDue();
 
-        verify(taskStore, times(1)).recoverInvalidFailCodeTasks(any());
+        verify(taskStore, times(1)).recoverLegacyRejectedTasks(any());
     }
 
     @Test

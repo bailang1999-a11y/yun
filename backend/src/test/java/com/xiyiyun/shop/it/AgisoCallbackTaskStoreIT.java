@@ -80,9 +80,19 @@ class AgisoCallbackTaskStoreIT extends AbstractIntegrationTest {
             legacyDead.getId(), "agiso callback rejected: code=9999 message=FailCode的值非法"
         )).isTrue();
 
-        assertThat(taskStore.recoverInvalidFailCodeTasks(now)).isEqualTo(2);
+        AgisoCallbackTaskEntity alreadyFailed = taskStore.registerPending(
+            90001L, "external-6", "https://mai.91kami.com/callback/already-failed", "DIRECT", now.plusMinutes(5)
+        );
+        assertThat(taskStore.bindOrder(90001L, "external-6", "local-6", now.plusMinutes(5))).isTrue();
+        jdbcTemplate.update(
+            "UPDATE agiso_callback_tasks SET attempt_count = 13, last_error = ? WHERE id = ?",
+            "agiso callback rejected: code=9999 message=当前状态为【请求失败】，不允许进行回调处理",
+            alreadyFailed.getId()
+        );
+
+        assertThat(taskStore.recoverLegacyRejectedTasks(now)).isEqualTo(3);
         assertThat(taskStore.findDue(now, 20))
-            .filteredOn(task -> List.of("external-4", "external-5").contains(task.getRequestId()))
+            .filteredOn(task -> List.of("external-4", "external-5", "external-6").contains(task.getRequestId()))
             .allSatisfy(task -> {
                 assertThat(task.getState()).isEqualTo("PENDING");
                 assertThat(task.getAttemptCount()).isZero();

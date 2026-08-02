@@ -167,7 +167,8 @@ public interface AgisoCallbackTaskMapper extends BaseMapper<AgisoCallbackTaskEnt
             lease_until = NULL
         WHERE state IN ('PENDING', 'DEAD')
           AND order_no IS NOT NULL
-          AND last_error LIKE '%FailCode的值非法%'
+          AND (last_error LIKE '%FailCode的值非法%'
+            OR last_error LIKE '%当前状态为【请求失败】，不允许进行回调处理%')
         """)
-    int recoverInvalidFailCodeTasks(@Param("nextAttemptAt") OffsetDateTime nextAttemptAt);
+    int recoverLegacyRejectedTasks(@Param("nextAttemptAt") OffsetDateTime nextAttemptAt);
 }

@@ -94,6 +94,28 @@ class AgisoCallbackClientTest {
     }
 
     @Test
+    void acceptsAnAlreadyFailedOrderAsAnIdempotentFailureCallback() {
+        SupplierHttpClient http = mock(SupplierHttpClient.class);
+        when(http.post(any(), any())).thenReturn(
+            "{\"code\":9999,\"message\":\"当前状态为【请求失败】，不允许进行回调处理\"}"
+        );
+        AgisoCallbackClient client = new AgisoCallbackClient(http);
+
+        client.post(
+            "http://cb-acpr.agiso.com/SupplierOrderNotify/test",
+            Map.of("orderNo", "test-order", "orderStatus", 30, "failCode", 9999),
+            30
+        );
+
+        assertThatThrownBy(() -> client.post(
+            "http://cb-acpr.agiso.com/SupplierOrderNotify/test",
+            Map.of("orderNo", "test-order", "orderStatus", 20, "failCode", 0),
+            30
+        )).isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("当前状态为【请求失败】");
+    }
+
+    @Test
     void rejectsEmptyAndNonObjectResponses() {
         SupplierHttpClient http = mock(SupplierHttpClient.class);
         AgisoCallbackClient client = new AgisoCallbackClient(http);
