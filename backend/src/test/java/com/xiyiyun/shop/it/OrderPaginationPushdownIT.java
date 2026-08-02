@@ -122,6 +122,27 @@ class OrderPaginationPushdownIT extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("创建时间下限同时约束分页数据和 total，并可与状态组合筛选")
+    void createdFromMustNarrowItemsAndTotalInclusively() {
+        seedBaseData();
+        OffsetDateTime boundary = OffsetDateTime.now().minusHours(24).withNano(0);
+        fixtures.insertOrder("IT8CT01", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "DELIVERED", 1, PRICE);
+        fixtures.insertOrder("IT8CT02", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "DELIVERED", 1, PRICE);
+        fixtures.insertOrder("IT8CT03", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "PAID", 1, PRICE);
+        jdbcTemplate.update("UPDATE orders SET created_at = ? WHERE order_no = ?", boundary.minusSeconds(1), "IT8CT01");
+        jdbcTemplate.update("UPDATE orders SET created_at = ? WHERE order_no = ?", boundary, "IT8CT02");
+        jdbcTemplate.update("UPDATE orders SET created_at = ? WHERE order_no = ?", boundary.plusSeconds(1), "IT8CT03");
+
+        PageSlice<OrderItem> recent = repository.pageOrders(null, null, null, boundary, null, 10, 0);
+        PageSlice<OrderItem> delivered = repository.pageOrders(null, "DELIVERED", null, boundary, null, 10, 0);
+
+        assertThat(recent.total()).isEqualTo(2L);
+        assertThat(orderNos(recent)).containsExactly("IT8CT03", "IT8CT02");
+        assertThat(delivered.total()).isEqualTo(1L);
+        assertThat(orderNos(delivered)).containsExactly("IT8CT02");
+    }
+
+    @Test
     @DisplayName("状态筛选大小写不敏感，与原内存实现的 toLowerCase 归一一致")
     void statusFilterMustBeCaseInsensitive() {
         seedBaseData();

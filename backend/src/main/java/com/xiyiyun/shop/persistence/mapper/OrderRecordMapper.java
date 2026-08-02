@@ -124,6 +124,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         <if test="userId != null"> AND user_id = #{userId}</if>
         <if test="status != null"> AND LOWER(status) = #{status}</if>
         <if test="goodsType != null"> AND LOWER(goods_type) = #{goodsType}</if>
+        <if test="createdFrom != null"> AND created_at &gt;= #{createdFrom}</if>
         <if test="keyword != null">
           AND (   LOWER(order_no) LIKE #{keyword} ESCAPE '\\\\'
                OR LOWER(COALESCE(goods_name, '')) LIKE #{keyword} ESCAPE '\\\\'
@@ -147,6 +148,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         @Param("keyword") String keyword,
         @Param("status") String status,
         @Param("goodsType") String goodsType,
+        @Param("createdFrom") java.time.OffsetDateTime createdFrom,
         @Param("userId") Long userId,
         @Param("limit") int limit,
         @Param("offset") long offset
@@ -167,6 +169,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         <if test="userId != null"> AND user_id = #{userId}</if>
         <if test="status != null"> AND LOWER(status) = #{status}</if>
         <if test="goodsType != null"> AND LOWER(goods_type) = #{goodsType}</if>
+        <if test="createdFrom != null"> AND created_at &gt;= #{createdFrom}</if>
         <if test="keyword != null">
           AND (   LOWER(order_no) LIKE #{keyword} ESCAPE '\\\\'
                OR LOWER(COALESCE(goods_name, '')) LIKE #{keyword} ESCAPE '\\\\'
@@ -188,6 +191,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         @Param("keyword") String keyword,
         @Param("status") String status,
         @Param("goodsType") String goodsType,
+        @Param("createdFrom") java.time.OffsetDateTime createdFrom,
         @Param("userId") Long userId
     );
 

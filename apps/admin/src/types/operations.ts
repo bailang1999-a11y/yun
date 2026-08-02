@@ -451,6 +451,7 @@ export interface OrderQuery {
   search?: string
   status?: string
   goodsType?: string
+  createdFrom?: string
 }
 
 export interface OrderRefreshResult {

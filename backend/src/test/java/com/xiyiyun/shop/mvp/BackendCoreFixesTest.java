@@ -16,6 +16,26 @@ import org.junit.jupiter.api.Test;
 
 class BackendCoreFixesTest {
     @Test
+    void inMemoryOrderPagingAppliesCreatedFromInclusively() {
+        InMemoryShopRepository repository = newRepository();
+        orders(repository).clear();
+        OffsetDateTime boundary = OffsetDateTime.now().minusHours(1);
+        OrderItem oldOrder = repository.createOrder(
+            new CreateOrderRequest(10003L, 1, "13800000001", "", "time-old", "h5"), 90001L, "", "h5"
+        );
+        OrderItem boundaryOrder = repository.createOrder(
+            new CreateOrderRequest(10003L, 1, "13800000001", "", "time-boundary", "h5"), 90001L, "", "h5"
+        );
+        orders(repository).put(oldOrder.orderNo(), withCreatedAt(oldOrder, boundary.minusSeconds(1)));
+        orders(repository).put(boundaryOrder.orderNo(), withCreatedAt(boundaryOrder, boundary));
+
+        PageSlice<OrderItem> slice = repository.pageOrders(null, null, null, boundary, null, 10, 0);
+
+        assertThat(slice.total()).isEqualTo(1L);
+        assertThat(slice.items()).extracting(OrderItem::orderNo).containsExactly(boundaryOrder.orderNo());
+    }
+
+    @Test
     void categoryReorderRequiresEverySiblingAndPersistsRequestedOrder() {
         InMemoryShopRepository repository = newRepository();
 
@@ -373,6 +393,16 @@ class BackendCoreFixesTest {
             item.type(), item.platform(), price, item.originalPrice(), maxBuy, item.requireRechargeAccount(), item.accountTypes(),
             "retail-default", priceMode, item.priceCoefficient(), item.priceFixedAdd(), stock, item.sales(), item.status(), item.tags(),
             item.createdAt(), item.updatedAt(), availablePlatforms, item.forbiddenPlatforms(), item.cardKindId()
+        );
+    }
+
+    private static OrderItem withCreatedAt(OrderItem item, OffsetDateTime createdAt) {
+        return new OrderItem(
+            item.orderNo(), item.userId(), item.buyerAccount(), item.goodsId(), item.goodsName(), item.goodsType(),
+            item.platform(), item.orderIp(), item.orderIpLocation(), item.quantity(), item.unitPrice(), item.payAmount(),
+            item.status(), item.rechargeAccount(), item.rechargeFields(), item.buyerRemark(), item.requestId(),
+            item.paymentNo(), item.payMethod(), item.deliveryItems(), item.channelAttempts(), item.deliveryMessage(),
+            createdAt, item.paidAt(), item.deliveredAt(), item.upstreamOrderNo(), item.externalMaxAmount()
         );
     }
 

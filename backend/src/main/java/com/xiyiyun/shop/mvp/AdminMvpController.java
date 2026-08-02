@@ -12,7 +12,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -580,11 +582,15 @@ public class AdminMvpController {
         @RequestParam(required = false) String search,
         @RequestParam(required = false) String status,
         @RequestParam(required = false) String goodsType,
+        @RequestParam(required = false) String createdFrom,
         @RequestParam(required = false) Integer page,
         @RequestParam(required = false) Integer pageSize
     ) {
         return page(
-            repository.pageOrders(search, status, goodsType, null, normalizePageSize(pageSize), pageOffset(page, pageSize)),
+            repository.pageOrders(
+                search, status, goodsType, parseOrderCreatedFrom(createdFrom), null,
+                normalizePageSize(pageSize), pageOffset(page, pageSize)
+            ),
             page,
             pageSize
         );
@@ -595,8 +601,10 @@ public class AdminMvpController {
         @RequestParam(required = false) String search,
         @RequestParam(required = false) String status,
         @RequestParam(required = false) String goodsType,
+        @RequestParam(required = false) String createdFrom,
         HttpServletResponse response
     ) throws IOException {
+        OffsetDateTime parsedCreatedFrom = parseOrderCreatedFrom(createdFrom);
         String filename = URLEncoder.encode("喜易云订单导出.xlsx", StandardCharsets.UTF_8).replaceAll("\\+", "%20");
         response.setContentType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         response.setCharacterEncoding("utf-8");
@@ -612,7 +620,9 @@ public class AdminMvpController {
             long offset = 0;
             while (offset < ORDER_EXPORT_MAX_ROWS) {
                 int limit = (int) Math.min(ORDER_EXPORT_BATCH_SIZE, ORDER_EXPORT_MAX_ROWS - offset);
-                PageSlice<OrderItem> slice = repository.pageOrders(search, status, goodsType, null, limit, offset);
+                PageSlice<OrderItem> slice = repository.pageOrders(
+                    search, status, goodsType, parsedCreatedFrom, null, limit, offset
+                );
                 if (slice.items().isEmpty()) {
                     break;
                 }
@@ -928,6 +938,16 @@ public class AdminMvpController {
     private void rejectEmbeddedImage(String value) {
         if (text(value).toLowerCase(Locale.ROOT).startsWith("data:image/")) {
             throw new IllegalArgumentException("图片请先上传为文件后再保存，不能保存 base64 图片");
+        }
+    }
+
+    private OffsetDateTime parseOrderCreatedFrom(String value) {
+        String normalized = text(value);
+        if (normalized.isEmpty()) return null;
+        try {
+            return OffsetDateTime.parse(normalized, DateTimeFormatter.ISO_OFFSET_DATE_TIME);
+        } catch (DateTimeParseException ex) {
+            throw new IllegalArgumentException("订单创建时间格式不正确");
         }
     }
 

@@ -2048,9 +2048,23 @@ public class InMemoryShopRepository implements TokenAuthPort {
      * @param userId 限定用户，null 表示管理端不限用户
      */
     public PageSlice<OrderItem> pageOrders(String search, String status, String goodsType, Long userId, int limit, long offset) {
+        return pageOrders(search, status, goodsType, null, userId, limit, offset);
+    }
+
+    public PageSlice<OrderItem> pageOrders(
+        String search,
+        String status,
+        String goodsType,
+        OffsetDateTime createdFrom,
+        Long userId,
+        int limit,
+        long offset
+    ) {
         if (persistentOrderStore != null) {
             try {
-                PageSlice<OrderItem> slice = persistentOrderStore.pageOrders(search, status, goodsType, userId, limit, offset);
+                PageSlice<OrderItem> slice = persistentOrderStore.pageOrders(
+                    search, status, goodsType, createdFrom, userId, limit, offset
+                );
                 return new PageSlice<>(
                     slice.items().stream().map(this::withLatestSupplierNames).toList(),
                     slice.total()
@@ -2059,14 +2073,20 @@ public class InMemoryShopRepository implements TokenAuthPort {
                 recordReadFallback("ORDER", "LIST", ex);
             }
         }
-        return PageSlice.of(filterMemoryOrders(search, status, goodsType, userId), limit, offset);
+        return PageSlice.of(filterMemoryOrders(search, status, goodsType, createdFrom, userId), limit, offset);
     }
 
     /**
      * 内存兜底筛选。仅在持久层缺失（单元测试）或读失败降级时使用，
      * 匹配语义须与 {@code OrderRecordMapper.selectSnapshotPage} 的 SQL 保持一致。
      */
-    private List<OrderItem> filterMemoryOrders(String search, String status, String goodsType, Long userId) {
+    private List<OrderItem> filterMemoryOrders(
+        String search,
+        String status,
+        String goodsType,
+        OffsetDateTime createdFrom,
+        Long userId
+    ) {
         String keyword = normalize(search);
         String normalizedStatus = normalize(status);
         String normalizedGoodsType = normalize(goodsType);
@@ -2075,6 +2095,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
             .filter(order -> !StringUtils.hasText(keyword) || containsOrderKeyword(order, keyword))
             .filter(order -> !StringUtils.hasText(normalizedStatus) || normalize(String.valueOf(order.status())).equals(normalizedStatus))
             .filter(order -> !StringUtils.hasText(normalizedGoodsType) || normalize(String.valueOf(order.goodsType())).equals(normalizedGoodsType))
+            .filter(order -> createdFrom == null || (order.createdAt() != null && !order.createdAt().isBefore(createdFrom)))
             .sorted(Comparator.comparing(OrderItem::createdAt).reversed())
             .map(this::withLatestSupplierNames)
             .toList();

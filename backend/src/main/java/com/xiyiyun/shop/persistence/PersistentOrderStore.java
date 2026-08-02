@@ -326,16 +326,33 @@ public class PersistentOrderStore {
         int limit,
         long offset
     ) {
+        return pageOrders(search, status, goodsType, null, userId, limit, offset);
+    }
+
+    @Transactional(readOnly = true)
+    public PageSlice<OrderItem> pageOrders(
+        String search,
+        String status,
+        String goodsType,
+        OffsetDateTime createdFrom,
+        Long userId,
+        int limit,
+        long offset
+    ) {
         String keyword = likeKeyword(search);
         String normalizedStatus = filterValue(status);
         String normalizedGoodsType = filterValue(goodsType);
-        long total = orderRecordMapper.countSnapshots(keyword, normalizedStatus, normalizedGoodsType, userId);
+        long total = orderRecordMapper.countSnapshots(
+            keyword, normalizedStatus, normalizedGoodsType, createdFrom, userId
+        );
         if (total <= offset) {
             // 越界页不必再查数据，但 total 仍要如实返回，前端才能把页码收回到有效范围。
             return new PageSlice<>(List.of(), total);
         }
         List<OrderItem> items = orderRecordMapper
-            .selectSnapshotPage(keyword, normalizedStatus, normalizedGoodsType, userId, limit, offset)
+            .selectSnapshotPage(
+                keyword, normalizedStatus, normalizedGoodsType, createdFrom, userId, limit, offset
+            )
             .stream()
             .map(this::toOrderItem)
             .toList();

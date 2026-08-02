@@ -60,10 +60,18 @@ let unsubscribeRealtime: (() => void) | undefined
 const filters = reactive({
   search: '',
   status: '',
-  goodsType: ''
+  goodsType: '',
+  timeRange: 'all'
 })
 
 const statusOptions = orderStatusOptions
+const timeRangeOptions = [
+  { label: '全部时间', value: 'all' },
+  { label: '当天', value: 'today' },
+  { label: '近 24 小时', value: '24h' },
+  { label: '近 1 周', value: '7d' },
+  { label: '近 1 月', value: '30d' }
+]
 const TABLE_HEADER_HEIGHT = 42
 const TABLE_HORIZONTAL_SCROLLBAR_HEIGHT = 12
 const ORDER_ROW_HEIGHT = 58
@@ -136,6 +144,34 @@ function formatTime(value?: string) {
   return formatDateTime(value, { compact: true })
 }
 
+function createdFromForRange(range: string) {
+  if (range === 'all') return undefined
+  const now = new Date()
+  const start = new Date(now)
+  if (range === 'today') {
+    start.setHours(0, 0, 0, 0)
+  } else {
+    const duration: Record<string, number> = {
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+      '30d': 30 * 24 * 60 * 60 * 1000
+    }
+    const milliseconds = duration[range]
+    if (!milliseconds) return undefined
+    start.setTime(now.getTime() - milliseconds)
+  }
+  return start.toISOString()
+}
+
+function orderQuery() {
+  return {
+    search: filters.search,
+    status: filters.status,
+    goodsType: filters.goodsType,
+    createdFrom: createdFromForRange(filters.timeRange)
+  }
+}
+
 function deliveryClass(value?: string) {
   const key = String(value || '').toUpperCase()
   if (key === 'DIRECT') return 'direct'
@@ -181,7 +217,7 @@ async function loadOrders(options: { silent?: boolean } = {}) {
   }
 
   try {
-    const result = await fetchOrdersPage({ ...filters, page: pagination.page, pageSize: pagination.pageSize })
+    const result = await fetchOrdersPage({ ...orderQuery(), page: pagination.page, pageSize: pagination.pageSize })
     orders.value = result.items
     pagination.total = result.total
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -202,7 +238,7 @@ async function refreshOrdersWithUpstream() {
   upstreamRefreshing.value = true
   try {
     const result = await refreshUnfinishedOrders()
-    const page = await fetchOrdersPage({ ...filters, page: pagination.page, pageSize: pagination.pageSize })
+    const page = await fetchOrdersPage({ ...orderQuery(), page: pagination.page, pageSize: pagination.pageSize })
     orders.value = page.items
     pagination.total = page.total
     lastSyncedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -229,7 +265,7 @@ async function exportOrders() {
   exporting.value = true
 
   try {
-    const blob = await exportOrdersExcel(filters)
+    const blob = await exportOrdersExcel(orderQuery())
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -249,6 +285,7 @@ function resetFilters() {
   filters.search = ''
   filters.status = ''
   filters.goodsType = ''
+  filters.timeRange = 'all'
   pagination.page = 1
   void loadOrders()
 }
@@ -361,28 +398,6 @@ onBeforeUnmount(() => {
     </header>
 
     <section class="orders-control-strip">
-      <div class="filter-bar" aria-label="订单筛选">
-        <el-input
-          v-model="filters.search"
-          class="search-input"
-          clearable
-          placeholder="订单号 / 商品 / 充值账号"
-          :prefix-icon="Search"
-          @keyup.enter="searchOrders"
-          @clear="searchOrders"
-        />
-        <el-select v-model="filters.status" clearable placeholder="订单状态" @change="searchOrders">
-          <el-option v-for="status in statusOptions" :key="status.value" :label="status.label" :value="status.value" />
-        </el-select>
-        <el-select v-model="filters.goodsType" clearable placeholder="发货类型" @change="searchOrders">
-          <el-option label="卡密" value="CARD" />
-          <el-option label="直充" value="DIRECT" />
-          <el-option label="代充" value="MANUAL" />
-        </el-select>
-        <el-button type="primary" :icon="Search" :loading="loading" @click="searchOrders">查询</el-button>
-        <el-button class="ghost-action" :icon="RotateCcw" @click="resetFilters">重置</el-button>
-      </div>
-
       <div class="order-summary" aria-label="订单概览">
         <article v-for="item in orderSummary" :key="item.label" class="summary-item" :class="`summary-item--${item.tone}`">
           <span class="summary-icon">
@@ -392,6 +407,31 @@ onBeforeUnmount(() => {
           <strong>{{ item.value }}</strong>
           <em>{{ item.hint }}</em>
         </article>
+      </div>
+
+      <div class="filter-bar" aria-label="订单筛选">
+        <el-select v-model="filters.status" clearable placeholder="订单状态" @change="searchOrders">
+          <el-option v-for="status in statusOptions" :key="status.value" :label="status.label" :value="status.value" />
+        </el-select>
+        <el-select v-model="filters.goodsType" clearable placeholder="发货类型" @change="searchOrders">
+          <el-option label="卡密" value="CARD" />
+          <el-option label="直充" value="DIRECT" />
+          <el-option label="代充" value="MANUAL" />
+        </el-select>
+        <el-select v-model="filters.timeRange" placeholder="创建时间" @change="searchOrders">
+          <el-option v-for="option in timeRangeOptions" :key="option.value" :label="option.label" :value="option.value" />
+        </el-select>
+        <el-button type="primary" :icon="Search" :loading="loading" @click="searchOrders">查询</el-button>
+        <el-button class="ghost-action" :icon="RotateCcw" @click="resetFilters">重置</el-button>
+        <el-input
+          v-model="filters.search"
+          class="search-input"
+          clearable
+          placeholder="订单号 / 商品 / 充值账号"
+          :prefix-icon="Search"
+          @keyup.enter="searchOrders"
+          @clear="searchOrders"
+        />
       </div>
     </section>
 
@@ -698,7 +738,7 @@ onBeforeUnmount(() => {
 
 .filter-bar {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) 152px 152px 96px 96px;
+  grid-template-columns: 144px 144px 144px 88px 88px minmax(280px, 1fr);
   gap: 10px;
   align-items: center;
 }
@@ -1189,7 +1229,11 @@ onBeforeUnmount(() => {
 
 @media (max-width: 1280px) {
   .filter-bar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .search-input {
+    grid-column: auto;
   }
 
   .order-summary {
@@ -1203,6 +1247,18 @@ onBeforeUnmount(() => {
 
   .head-actions {
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 900px) {
+  .filter-bar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .filter-bar {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
