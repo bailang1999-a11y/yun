@@ -69,13 +69,18 @@ public class JingzhaoSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         SupplierItem supplier = context.supplier();
         Map<String, Object> body = baseParams(context);
         body.put("product_id", defaultText(channel.supplierGoodsId(), "").trim());
         body.put("quantity", order.quantity() == null ? 1 : order.quantity());
         body.put("outer_order_id", order.orderNo());
-        body.put("safe_cost", order.payAmount());
+        body.put("safe_cost", price.totalCost());
         if (StringUtils.hasText(order.rechargeAccount())) {
             body.put("recharge_account", order.rechargeAccount().trim());
         }

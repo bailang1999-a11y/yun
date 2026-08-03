@@ -76,7 +76,12 @@ public class FanchenSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         SupplierItem supplier = context.supplier();
         Map<String, Object> body = baseParams(context);
         body.put("productid", defaultText(channel.supplierGoodsId(), "").trim());
@@ -94,7 +99,7 @@ public class FanchenSupplierAdapter implements SupplierAdapter {
         if (StringUtils.hasText(context.callbackUrl())) {
             body.put("back_url", context.callbackUrl());
         }
-        body.put("checkprice", order.payAmount());
+        body.put("checkprice", price.totalCost());
 
         JsonNode root = post(context, "/fcgameonlinepay.do", body, "order submit", false);
         String code = textValue(root, "resultno");

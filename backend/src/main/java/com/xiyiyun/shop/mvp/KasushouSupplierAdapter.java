@@ -76,7 +76,12 @@ public class KasushouSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         SupplierItem supplier = context.supplier();
         validateCredentials(context);
         Map<String, Object> body = new LinkedHashMap<>();

@@ -111,7 +111,12 @@ public interface SupplierAdapter {
      * @throws SupplierBusinessException  上游明确拒单 —— 调用方可置 FAILED
      * @throws SupplierTransportException 超时/网络/5xx/无法解析 —— 调用方必须转 PROCURING（缺陷 A4）
      */
-    UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel);
+    UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    );
 
     /**
      * 查询上游订单状态。对应原订单查询分发链里的 {@code fetchXxxOrderStatus} + 状态映射。

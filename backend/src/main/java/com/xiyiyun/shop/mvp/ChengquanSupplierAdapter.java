@@ -70,7 +70,12 @@ public class ChengquanSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         SupplierItem supplier = context.supplier();
         Map<String, Object> body = baseParams(context);
         body.put("order_no", order.orderNo());

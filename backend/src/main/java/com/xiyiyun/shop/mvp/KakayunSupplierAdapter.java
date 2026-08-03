@@ -64,14 +64,19 @@ public class KakayunSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         SupplierItem supplier = context.supplier();
         validateCredentials(context);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("goodsid", SupplierGoodsId.of(channel.supplierGoodsId()));
         body.put("buynum", order.quantity() == null ? 1 : order.quantity());
         body.put("usorderno", order.orderNo());
-        body.put("maxmoney", order.payAmount());
+        body.put("maxmoney", price.totalCost());
         if (StringUtils.hasText(order.rechargeAccount())) {
             body.put("attach", order.rechargeAccount().trim());
         }

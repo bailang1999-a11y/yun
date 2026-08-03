@@ -2883,35 +2883,46 @@ public class InMemoryShopRepository implements TokenAuthPort {
             attempts.add(attempt(channel, "FAILED", "指定渠道失败：渠道已停用"));
         } else if (!"ENABLED".equals(supplier.status())) {
             attempts.add(attempt(channel, "FAILED", "指定渠道失败：供应商已停用"));
-        } else if (supplier.balance() != null && supplier.balance().compareTo(order.payAmount()) < 0) {
-            attempts.add(attempt(channel, "FAILED", "指定渠道失败：供应商余额不足"));
         } else {
+            ProcurementPrice price;
             try {
-                ProcurementSubmitResult result = submitProcurementOrder(order, channel, supplier);
-                attempts.add(attempt(channel, "SUCCESS", result.attemptMessage()));
-                OrderItem procuring = order
-                    .withUpstreamOrderNo(firstText(result.upstreamOrderNo(), order.upstreamOrderNo(), ""))
-                    .withProcurementResult(
-                        OrderStatus.PROCURING,
-                        result.deliveryItems(),
-                        List.copyOf(attempts),
-                        "指定渠道重试成功：已提交到 " + channel.supplierName() + "，等待上游处理",
-                        order.paidAt() == null ? OffsetDateTime.now() : order.paidAt(),
-                        null
-                    );
-                saveOrder(procuring);
-                appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel submitted to upstream");
-                publishOrder(procuring);
-                return procuring;
-            } catch (SupplierTransportException ex) {
-                // 缺陷 A4：结果未知不能判失败，转中间态等待上游确认。
-                OrderItem unknown = unknownProcurementResult(order, channel, attempts, "指定渠道重试", ex);
-                saveOrder(unknown);
-                appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel result unknown, kept procuring");
-                publishOrder(unknown);
-                return unknown;
+                price = procurementPrice(order, channel);
             } catch (RuntimeException ex) {
-                attempts.add(attempt(channel, "FAILED", "指定渠道提交失败：" + ex.getMessage()));
+                attempts.add(attempt(channel, "FAILED", "指定渠道采购价格不可用：" + ex.getMessage()));
+                price = null;
+            }
+            if (price != null && supplier.balance() != null && supplier.balance().compareTo(price.totalCost()) < 0) {
+                attempts.add(attempt(channel, price, "FAILED", "指定渠道失败：供应商余额不足"));
+                price = null;
+            }
+            if (price != null) {
+                try {
+                    ProcurementSubmitResult result = submitProcurementOrder(order, channel, supplier, price);
+                    attempts.add(attempt(channel, price, "SUCCESS", result.attemptMessage()));
+                    OrderItem procuring = order
+                        .withUpstreamOrderNo(firstText(result.upstreamOrderNo(), order.upstreamOrderNo(), ""))
+                        .withProcurementResult(
+                            OrderStatus.PROCURING,
+                            result.deliveryItems(),
+                            List.copyOf(attempts),
+                            "指定渠道重试成功：已提交到 " + channel.supplierName() + "，等待上游处理",
+                            order.paidAt() == null ? OffsetDateTime.now() : order.paidAt(),
+                            null
+                        );
+                    saveOrder(procuring);
+                    appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel submitted to upstream");
+                    publishOrder(procuring);
+                    return procuring;
+                } catch (SupplierTransportException ex) {
+                    // 缺陷 A4：结果未知不能判失败，转中间态等待上游确认。
+                    OrderItem unknown = unknownProcurementResult(order, channel, price, attempts, "指定渠道重试", ex);
+                    saveOrder(unknown);
+                    appendOperation("ORDER_RETRY_CHANNEL", "ORDER", orderNo, "specific channel result unknown, kept procuring");
+                    publishOrder(unknown);
+                    return unknown;
+                } catch (RuntimeException ex) {
+                    attempts.add(attempt(channel, price, "FAILED", "指定渠道提交失败：" + ex.getMessage()));
+                }
             }
         }
 
@@ -3947,14 +3958,21 @@ public class InMemoryShopRepository implements TokenAuthPort {
                 attempts.add(attempt(channel, "FAILED", "供应商已停用"));
                 continue;
             }
-            if (supplier.balance() != null && supplier.balance().compareTo(order.payAmount()) < 0) {
-                attempts.add(attempt(channel, "FAILED", "供应商余额不足"));
+            ProcurementPrice price;
+            try {
+                price = procurementPrice(order, channel);
+            } catch (RuntimeException ex) {
+                attempts.add(attempt(channel, "FAILED", "采购价格不可用：" + ex.getMessage()));
+                continue;
+            }
+            if (supplier.balance() != null && supplier.balance().compareTo(price.totalCost()) < 0) {
+                attempts.add(attempt(channel, price, "FAILED", "供应商余额不足"));
                 continue;
             }
 
             try {
-                ProcurementSubmitResult result = submitProcurementOrder(order, channel, supplier);
-                attempts.add(attempt(channel, "SUCCESS", result.attemptMessage()));
+                ProcurementSubmitResult result = submitProcurementOrder(order, channel, supplier, price);
+                attempts.add(attempt(channel, price, "SUCCESS", result.attemptMessage()));
                 return order
                     .withUpstreamOrderNo(firstText(result.upstreamOrderNo(), order.upstreamOrderNo(), ""))
                     .withProcurementResult(
@@ -3969,10 +3987,10 @@ public class InMemoryShopRepository implements TokenAuthPort {
                 // 缺陷 A4：超时 / 连接异常 / 5xx / 响应无法解析 —— 上游是否已受理未知。
                 // 绝不能置 FAILED（上游可能已扣我方预付款），必须转中间态等待回调或对账，
                 // 也不能继续尝试下一个渠道（否则同一笔订单可能在两家上游各下一单）。
-                return unknownProcurementResult(order, channel, attempts, trigger, ex);
+                return unknownProcurementResult(order, channel, price, attempts, trigger, ex);
             } catch (RuntimeException ex) {
                 // 上游明确拒单（SupplierBusinessException）或本地前置校验失败 —— 可安全判失败并降级下一渠道。
-                attempts.add(attempt(channel, "FAILED", "提交失败：" + ex.getMessage()));
+                attempts.add(attempt(channel, price, "FAILED", "提交失败：" + ex.getMessage()));
             }
         }
 
@@ -4001,12 +4019,13 @@ public class InMemoryShopRepository implements TokenAuthPort {
     private OrderItem unknownProcurementResult(
         OrderItem order,
         GoodsChannelItem channel,
+        ProcurementPrice price,
         List<ChannelAttemptItem> attempts,
         String trigger,
         SupplierTransportException ex
     ) {
         List<ChannelAttemptItem> nextAttempts = new ArrayList<>(attempts);
-        nextAttempts.add(attempt(channel, "PROCURING", "上游结果未知，待对账：" + ex.getMessage()));
+        nextAttempts.add(attempt(channel, price, "PROCURING", "上游结果未知，待对账：" + ex.getMessage()));
         return order.withProcurementResult(
             OrderStatus.PROCURING,
             order.deliveryItems() == null ? List.of() : order.deliveryItems(),
@@ -4020,7 +4039,8 @@ public class InMemoryShopRepository implements TokenAuthPort {
     private ProcurementSubmitResult submitProcurementOrder(
         OrderItem order,
         GoodsChannelItem channel,
-        SupplierItem supplier
+        SupplierItem supplier,
+        ProcurementPrice price
     ) {
         // 批次3 分发链④：原为「6 个 isXxx 或串守卫 + 6 段 if 分发 + 尾部卡速售兜底」。
         SupplierAdapter adapter = supplierAdapters.find(supplier)
@@ -4029,12 +4049,19 @@ public class InMemoryShopRepository implements TokenAuthPort {
         if (isPlaceholderBaseUrl(supplier.baseUrl())) {
             throw new IllegalStateException("供应商地址是占位地址，不能真实下单");
         }
-        UpstreamSubmitResult result = adapter.submitOrder(supplierContext(supplier), order, channel);
+        UpstreamSubmitResult result = adapter.submitOrder(supplierContext(supplier), order, channel, price);
         return new ProcurementSubmitResult(
             result.deliveryItems(),
             result.attemptMessage(),
             result.upstreamOrderNo()
         );
+    }
+
+    private ProcurementPrice procurementPrice(OrderItem order, GoodsChannelItem channel) {
+        GoodsItem goods = findGoodsSnapshot(order.goodsId()).orElse(null);
+        ProcurementPrice price = ProcurementPrice.resolve(goods, channel, order.quantity());
+        persistProcurementCost(order.orderNo(), price.totalCost());
+        return price;
     }
 
     /** 批次3：新增 upstreamOrderNo，供缺陷 A4 把上游订单号落到 orders.upstream_order_no。 */
@@ -4170,6 +4197,15 @@ public class InMemoryShopRepository implements TokenAuthPort {
     }
 
     private ChannelAttemptItem attempt(GoodsChannelItem channel, String status, String message) {
+        return attempt(channel, null, status, message);
+    }
+
+    private ChannelAttemptItem attempt(
+        GoodsChannelItem channel,
+        ProcurementPrice price,
+        String status,
+        String message
+    ) {
         SupplierItem supplier = findSupplierSnapshot(channel.supplierId()).orElse(null);
         String effectiveCallbackUrl = "SUCCESS".equals(status) || "PROCURING".equals(status)
             ? SupplierCallbackUrlResolver.effectiveUrl(configService.outboundPublicBaseUrl(), supplier)
@@ -4183,7 +4219,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
             channel.supplierName(),
             channel.supplierGoodsId(),
             null,
-            null,
+            price == null ? null : price.unitCost(),
             null,
             null,
             null,
@@ -5765,6 +5801,18 @@ public class InMemoryShopRepository implements TokenAuthPort {
             persistentOrderStore.saveOrderSnapshot(order, externalMaxAmount);
         } catch (RuntimeException ex) {
             appendOperation("PERSISTENCE_MIRROR_FAILED", "ORDER", order.orderNo(), persistenceErrorMessage(ex));
+            throw ex;
+        }
+    }
+
+    private void persistProcurementCost(String orderNo, BigDecimal costAmount) {
+        if (persistentOrderStore == null || !StringUtils.hasText(orderNo) || costAmount == null) {
+            return;
+        }
+        try {
+            persistentOrderStore.saveCostAmount(orderNo, costAmount);
+        } catch (RuntimeException ex) {
+            appendOperation("PERSISTENCE_MIRROR_FAILED", "ORDER", orderNo, persistenceErrorMessage(ex));
             throw ex;
         }
     }

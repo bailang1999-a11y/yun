@@ -109,6 +109,14 @@ class PersistentOrderStoreTest {
     }
 
     @Test
+    void saveCostAmountReportsWhetherTheOrderWriteSucceeded() {
+        when(orderRecordMapper.saveCostAmount("ORD-1", new BigDecimal("99.2000"))).thenReturn(1);
+
+        assertThat(store.saveCostAmount("ORD-1", new BigDecimal("99.2000"))).isTrue();
+        verify(orderRecordMapper).saveCostAmount("ORD-1", new BigDecimal("99.2000"));
+    }
+
+    @Test
     void listOrdersMapsPersistedSnapshots() {
         when(orderRecordMapper.selectActiveSnapshots()).thenReturn(List.of(orderRecord("ORD-1")));
         when(paymentRecordMapper.findLatestByOrderNo("ORD-1")).thenReturn(paymentRecord("PAY-1", "balance"));

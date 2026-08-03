@@ -66,7 +66,12 @@ public class FengzhushouSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         SupplierItem supplier = context.supplier();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("projectCode", projectCode(supplier));
@@ -76,7 +81,7 @@ public class FengzhushouSupplierAdapter implements SupplierAdapter {
         body.put("account", defaultText(order.rechargeAccount(), "").trim());
         body.put("num", order.quantity() == null ? 1 : order.quantity());
         body.put("callbackUrl", context.callbackUrl());
-        body.put("skuPrice", order.payAmount());
+        body.put("skuPrice", price.totalCost());
         body.put("ext", defaultText(order.buyerRemark(), "").trim());
         body.put("sign", FengzhushouSignatureUtil.sign(body, signKey(context)));
 

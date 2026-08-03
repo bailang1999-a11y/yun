@@ -83,7 +83,12 @@ public class FuluSupplierAdapter implements SupplierAdapter {
     }
 
     @Override
-    public UpstreamSubmitResult submitOrder(SupplierCallContext context, OrderItem order, GoodsChannelItem channel) {
+    public UpstreamSubmitResult submitOrder(
+        SupplierCallContext context,
+        OrderItem order,
+        GoodsChannelItem channel,
+        ProcurementPrice price
+    ) {
         Map<String, Object> biz = new LinkedHashMap<>();
         biz.put("product_id", defaultText(channel.supplierGoodsId(), "").trim());
         biz.put("customer_order_no", order.orderNo());
@@ -94,7 +99,7 @@ public class FuluSupplierAdapter implements SupplierAdapter {
         if (StringUtils.hasText(order.orderIp())) {
             biz.put("charge_ip", order.orderIp().trim());
         }
-        biz.put("customer_price", order.payAmount());
+        biz.put("customer_price", price.totalCost());
 
         JsonNode root = postJson(context, "order.notify", biz, "order submit", false);
         ensureOk(root, "order submit");

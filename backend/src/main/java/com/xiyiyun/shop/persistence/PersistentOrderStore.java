@@ -156,6 +156,11 @@ public class PersistentOrderStore {
         return orderRecordMapper.saveExternalMaxAmount(orderNo, userId, externalMaxAmount) == 1;
     }
 
+    @Transactional
+    public boolean saveCostAmount(String orderNo, BigDecimal costAmount) {
+        return orderRecordMapper.saveCostAmount(orderNo, costAmount) == 1;
+    }
+
     /**
      * 落上游订单号（缺陷 A4）。
      *

@@ -6,12 +6,14 @@ import com.xiyiyun.shop.it.support.ItFixtures;
 import com.xiyiyun.shop.mvp.OrderItem;
 import com.xiyiyun.shop.mvp.OrderSummaryItem;
 import com.xiyiyun.shop.mvp.PageSlice;
+import com.xiyiyun.shop.persistence.PersistentOrderStore;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 
 /**
  * 批次8C：订单列表分页下推到 SQL 后的行为守卫。
@@ -41,6 +43,9 @@ class OrderPaginationPushdownIT extends AbstractIntegrationTest {
     private static final long DIRECT_GOODS_ID = 8101L;
     private static final BigDecimal PRICE = new BigDecimal("10.00");
 
+    @Autowired
+    private PersistentOrderStore orderStore;
+
     private void seedBaseData() {
         fixtures.insertUserGroup();
         fixtures.insertCategory();
@@ -63,6 +68,23 @@ class OrderPaginationPushdownIT extends AbstractIntegrationTest {
                 OffsetDateTime.now().minusMinutes(count - i), orderNo
             );
         }
+    }
+
+    @Test
+    @DisplayName("采购成本独立落库，后续订单快照不得用空值覆盖")
+    void procurementCostMustSurviveLaterOrderSnapshots() {
+        seedBaseData();
+        fixtures.insertOrder("IT8C-COST", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "PAID", 2, PRICE);
+
+        assertThat(orderStore.saveCostAmount("IT8C-COST", new BigDecimal("18.4000"))).isTrue();
+        OrderItem snapshot = orderStore.findOrder("IT8C-COST").orElseThrow();
+        orderStore.saveOrderSnapshot(snapshot);
+
+        assertThat(jdbcTemplate.queryForObject(
+            "SELECT cost_amount FROM orders WHERE order_no = ?",
+            BigDecimal.class,
+            "IT8C-COST"
+        )).isEqualByComparingTo("18.4000");
     }
 
     private List<String> orderNos(PageSlice<OrderItem> slice) {

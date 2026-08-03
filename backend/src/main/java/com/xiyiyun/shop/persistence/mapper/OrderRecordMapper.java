@@ -349,7 +349,7 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
             total_amount = VALUES(total_amount),
             pay_amount = VALUES(pay_amount),
             external_max_amount = COALESCE(external_max_amount, VALUES(external_max_amount)),
-            cost_amount = VALUES(cost_amount),
+            cost_amount = COALESCE(VALUES(cost_amount), cost_amount),
             status = VALUES(status),
             delivery_status = VALUES(delivery_status),
             delivery_message = VALUES(delivery_message),
@@ -365,6 +365,17 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
             closed_at = VALUES(closed_at)
         """)
     int upsertByOrderNo(@Param("entity") OrderRecordEntity entity);
+
+    @Update("""
+        UPDATE orders
+        SET cost_amount = #{costAmount}
+        WHERE order_no = #{orderNo}
+          AND deleted_at IS NULL
+        """)
+    int saveCostAmount(
+        @Param("orderNo") String orderNo,
+        @Param("costAmount") java.math.BigDecimal costAmount
+    );
 
     /**
      * 写入上游订单号（缺陷 A4 对账依据）。
