@@ -1,7 +1,15 @@
 import { apiClient } from './client'
 import { cleanParams, numberValue, text } from './normalize'
 import { type ApiEnvelope, type PageResult, unwrapPage, unwrapValue } from './response'
-import type { GoodsChannel, Order, OrderQuery, OrderRefreshResult, OrderSummary } from '../types/operations'
+import type {
+  GoodsChannel,
+  Order,
+  OrderQuery,
+  OrderRefreshResult,
+  OrderSummary,
+  SupplierPriceTrend,
+  SupplierPriceTrendPoint
+} from '../types/operations'
 
 const ORDER_UPSTREAM_OPERATION_TIMEOUT_MS = 90_000
 export type OrderPageQuery = OrderQuery & { page?: number; pageSize?: number }
@@ -137,6 +145,21 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     || !Number.isFinite(Number(externalMaxAmount))
     ? undefined
     : numberValue(externalMaxAmount)
+  const averageRechargeDurationSeconds = item.averageRechargeDurationSeconds
+  const normalizedAverageRechargeDurationSeconds = averageRechargeDurationSeconds === undefined
+    || averageRechargeDurationSeconds === null
+    || (typeof averageRechargeDurationSeconds === 'string' && !averageRechargeDurationSeconds.trim())
+    || !Number.isFinite(Number(averageRechargeDurationSeconds))
+    ? undefined
+    : numberValue(averageRechargeDurationSeconds)
+  const todaySuccessRatePercentage = item.todaySuccessRatePercentage
+  const normalizedTodaySuccessRatePercentage = todaySuccessRatePercentage === undefined
+    || todaySuccessRatePercentage === null
+    || (typeof todaySuccessRatePercentage === 'string' && !todaySuccessRatePercentage.trim())
+    || !Number.isFinite(Number(todaySuccessRatePercentage))
+    ? undefined
+    : numberValue(todaySuccessRatePercentage)
+  const supplierPriceTrend = normalizeSupplierPriceTrend(item.supplierPriceTrend)
   const channelAttempts = Array.isArray(item.channelAttempts)
     ? item.channelAttempts.map((attempt) => {
         const record = typeof attempt === 'object' && attempt !== null ? (attempt as Record<string, unknown>) : {}
@@ -168,6 +191,9 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     goodsName: text(item.goodsName, '未知商品'),
     amount: numberValue(item.amount ?? item.payAmount ?? item.totalAmount),
     externalMaxAmount: normalizedExternalMaxAmount,
+    averageRechargeDurationSeconds: normalizedAverageRechargeDurationSeconds,
+    todaySuccessRatePercentage: normalizedTodaySuccessRatePercentage,
+    supplierPriceTrend,
     unitPrice: numberValue(item.unitPrice),
     quantity: numberValue(item.quantity, 1),
     status: text(item.status, 'UNKNOWN'),
@@ -194,5 +220,37 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     createdAt: text(item.createdAt),
     paidAt: text(item.paidAt),
     deliveredAt: text(item.deliveredAt)
+  }
+}
+
+function normalizeSupplierPriceTrend(value: unknown): SupplierPriceTrend | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const item = value as Record<string, unknown>
+  const points = Array.isArray(item.points)
+    ? item.points.flatMap((point) => {
+        if (!point || typeof point !== 'object') return []
+        const record = point as Record<string, unknown>
+        const direction = text(record.direction).toUpperCase()
+        const normalizedDirection: SupplierPriceTrendPoint['direction'] = direction === 'UP' || direction === 'DOWN'
+          ? direction
+          : 'INITIAL'
+        return [{
+          unitPrice: numberValue(record.unitPrice),
+          changeAmount: numberValue(record.changeAmount),
+          direction: normalizedDirection,
+          observedAt: text(record.observedAt)
+        }]
+      })
+    : []
+  if (!points.length) return undefined
+  const latestDirection = text(item.latestDirection).toUpperCase()
+  return {
+    channelId: text(item.channelId),
+    supplierId: text(item.supplierId),
+    supplierName: text(item.supplierName, '未知供应商'),
+    supplierGoodsId: text(item.supplierGoodsId),
+    latestUnitPrice: numberValue(item.latestUnitPrice),
+    latestDirection: latestDirection === 'UP' || latestDirection === 'DOWN' ? latestDirection : 'INITIAL',
+    points
   }
 }

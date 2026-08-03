@@ -10,11 +10,39 @@ import com.xiyiyun.shop.realtime.OrderRealtimeBroadcaster;
 import java.lang.reflect.Field;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class BackendCoreFixesTest {
+    @Test
+    void replacingChannelAttemptsPreservesOrderListEnrichment() {
+        OffsetDateTime now = OffsetDateTime.parse("2026-08-03T16:00:00+08:00");
+        SupplierPriceTrendItem trend = new SupplierPriceTrendItem(
+            30001L, 20001L, "供应商", "UP-1", new BigDecimal("9.3500"), "UP",
+            List.of(new SupplierPriceTrendPoint(
+                new BigDecimal("9.3500"), new BigDecimal("0.1500"), "UP", now
+            ))
+        );
+        OrderItem enriched = new OrderItem(
+            "ORDER-ENRICHED", 90001L, "buyer", 10003L, "goods", GoodsType.DIRECT,
+            "h5", "", "", 1, BigDecimal.ONE, BigDecimal.ONE, OrderStatus.DELIVERED,
+            "", Map.of(), "", "request", "", "", List.of(), List.of(), "", now, now, now,
+            "", null
+        ).withOrderPerformance(30L, 97).withSupplierPriceTrend(trend);
+        ChannelAttemptItem attempt = new ChannelAttemptItem(
+            30001L, 20001L, "最新供应商", "UP-1", 1, "SUCCESS", "ok", now
+        );
+
+        OrderItem result = enriched.withChannelAttempts(List.of(attempt));
+
+        assertThat(result.channelAttempts()).containsExactly(attempt);
+        assertThat(result.averageRechargeDurationSeconds()).isEqualTo(30L);
+        assertThat(result.todaySuccessRatePercentage()).isEqualTo(97);
+        assertThat(result.supplierPriceTrend()).isEqualTo(trend);
+    }
+
     @Test
     void inMemoryOrderPagingAppliesCreatedFromInclusively() {
         InMemoryShopRepository repository = newRepository();
@@ -33,6 +61,59 @@ class BackendCoreFixesTest {
 
         assertThat(slice.total()).isEqualTo(1L);
         assertThat(slice.items()).extracting(OrderItem::orderNo).containsExactly(boundaryOrder.orderNo());
+    }
+
+    @Test
+    void inMemoryOrderPagingUsesLatestHundredValidDeliveredOrdersPerGoods() {
+        InMemoryShopRepository repository = newRepository();
+        orders(repository).clear();
+        OffsetDateTime base = OffsetDateTime.parse("2026-08-01T00:00:00+08:00");
+
+        for (int index = 0; index <= 100; index++) {
+            OffsetDateTime createdAt = base.plusMinutes(index);
+            long durationSeconds = index == 0 ? 1_010L : 10L;
+            putDurationOrder(repository, "G1-" + index, 10003L, OrderStatus.DELIVERED,
+                createdAt, createdAt.plusSeconds(durationSeconds));
+        }
+        putDurationOrder(repository, "G1-FAILED", 10003L, OrderStatus.FAILED,
+            base.plusMinutes(200), base.plusMinutes(200).plusSeconds(9_000));
+        putDurationOrder(repository, "G1-BACKWARDS", 10003L, OrderStatus.DELIVERED,
+            base.plusMinutes(201), base.plusMinutes(200));
+        putDurationOrder(repository, "G1-NO-DELIVERY", 10003L, OrderStatus.DELIVERED,
+            base.plusMinutes(202), null);
+        putDurationOrder(repository, "G1-PROCURING", 10003L, OrderStatus.PROCURING,
+            base.plusMinutes(203), null);
+        putDurationOrder(repository, "G2-1", 10002L, OrderStatus.DELIVERED,
+            base.plusMinutes(204), base.plusMinutes(204).plusSeconds(40));
+        putDurationOrder(repository, "G2-2", 10002L, OrderStatus.DELIVERED,
+            base.plusMinutes(205), base.plusMinutes(205).plusSeconds(60));
+        OffsetDateTime today = OffsetDateTime.now(ZoneId.of("Asia/Shanghai"))
+            .toLocalDate()
+            .atStartOfDay(ZoneId.of("Asia/Shanghai"))
+            .toOffsetDateTime();
+        putDurationOrder(repository, "G1-TODAY-1", 10003L, OrderStatus.DELIVERED, today.plusMinutes(1), null);
+        putDurationOrder(repository, "G1-TODAY-2", 10003L, OrderStatus.DELIVERED, today.plusMinutes(2), null);
+        putDurationOrder(repository, "G1-TODAY-3", 10003L, OrderStatus.DELIVERED, today.plusMinutes(3), null);
+        putDurationOrder(repository, "G1-TODAY-FAILED", 10003L, OrderStatus.FAILED, today.plusMinutes(4), null);
+        putDurationOrder(repository, "G1-YESTERDAY-FAILED", 10003L, OrderStatus.FAILED, today.minusMinutes(1), null);
+        putDurationOrder(repository, "G1-TODAY-ACTIVE", 10003L, OrderStatus.PROCURING, today.plusMinutes(5), null);
+        putDurationOrder(repository, "G2-TODAY-1", 10002L, OrderStatus.DELIVERED, today.plusMinutes(1), null);
+        putDurationOrder(repository, "G2-TODAY-FAILED", 10002L, OrderStatus.FAILED, today.plusMinutes(2), null);
+
+        PageSlice<OrderItem> slice = repository.pageOrders(null, null, null, null, null, 200, 0L);
+
+        assertThat(slice.items()).filteredOn(item -> item.goodsId().equals(10003L))
+            .extracting(OrderItem::averageRechargeDurationSeconds)
+            .containsOnly(10L);
+        assertThat(slice.items()).filteredOn(item -> item.goodsId().equals(10002L))
+            .extracting(OrderItem::averageRechargeDurationSeconds)
+            .containsOnly(50L);
+        assertThat(slice.items()).filteredOn(item -> item.goodsId().equals(10003L))
+            .extracting(OrderItem::todaySuccessRatePercentage)
+            .containsOnly(75);
+        assertThat(slice.items()).filteredOn(item -> item.goodsId().equals(10002L))
+            .extracting(OrderItem::todaySuccessRatePercentage)
+            .containsOnly(50);
     }
 
     @Test
@@ -464,6 +545,22 @@ class BackendCoreFixesTest {
             item.paymentNo(), item.payMethod(), item.deliveryItems(), item.channelAttempts(), item.deliveryMessage(),
             createdAt, item.paidAt(), item.deliveredAt(), item.upstreamOrderNo(), externalMaxAmount
         );
+    }
+
+    private static void putDurationOrder(
+        InMemoryShopRepository repository,
+        String orderNo,
+        Long goodsId,
+        OrderStatus status,
+        OffsetDateTime createdAt,
+        OffsetDateTime deliveredAt
+    ) {
+        orders(repository).put(orderNo, new OrderItem(
+            orderNo, 90001L, "buyer", goodsId, "goods-" + goodsId, GoodsType.DIRECT,
+            "h5", "", "", 1, BigDecimal.ONE, BigDecimal.ONE, status, "", Map.of(),
+            "", orderNo, null, null, List.of(), List.of(), "", createdAt, null, deliveredAt,
+            "", null
+        ));
     }
 
     @SuppressWarnings("unchecked")

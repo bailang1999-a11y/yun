@@ -419,6 +419,9 @@ export interface Order {
   goods?: string | { name?: string }
   amount: number | string
   externalMaxAmount?: number | string
+  averageRechargeDurationSeconds?: number
+  todaySuccessRatePercentage?: number
+  supplierPriceTrend?: SupplierPriceTrend
   unitPrice?: number | string
   quantity?: number
   status: string
@@ -445,6 +448,23 @@ export interface Order {
   createdAt?: string
   paidAt?: string
   deliveredAt?: string
+}
+
+export interface SupplierPriceTrendPoint {
+  unitPrice: number
+  changeAmount: number
+  direction: 'INITIAL' | 'UP' | 'DOWN'
+  observedAt: string
+}
+
+export interface SupplierPriceTrend {
+  channelId: number | string
+  supplierId: number | string
+  supplierName: string
+  supplierGoodsId: string
+  latestUnitPrice: number
+  latestDirection: 'INITIAL' | 'UP' | 'DOWN'
+  points: SupplierPriceTrendPoint[]
 }
 
 export interface OrderQuery {

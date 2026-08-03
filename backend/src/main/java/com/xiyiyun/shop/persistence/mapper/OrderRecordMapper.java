@@ -1,6 +1,7 @@
 package com.xiyiyun.shop.persistence.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.xiyiyun.shop.persistence.GoodsOrderPerformanceProjection;
 import com.xiyiyun.shop.persistence.entity.OrderRecordEntity;
 import com.xiyiyun.shop.persistence.OrderSummaryProjection;
 import java.math.BigDecimal;
@@ -233,6 +234,54 @@ public interface OrderRecordMapper extends BaseMapper<OrderRecordEntity> {
         @Param("goodsType") String goodsType,
         @Param("createdFrom") java.time.OffsetDateTime createdFrom,
         @Param("userId") Long userId
+    );
+
+    @Select("""
+        <script>
+        SELECT goods_id AS goodsId,
+               ROUND(AVG(duration_seconds)) AS averageRechargeDurationSeconds
+        FROM (
+          SELECT goods_id,
+                 TIMESTAMPDIFF(SECOND, created_at, delivered_at) AS duration_seconds,
+                 ROW_NUMBER() OVER (PARTITION BY goods_id ORDER BY created_at DESC, id DESC) AS row_num
+          FROM orders
+          WHERE deleted_at IS NULL
+            AND status = 'DELIVERED'
+            AND delivered_at IS NOT NULL
+            AND delivered_at &gt;= created_at
+            AND goods_id IN
+            <foreach collection="goodsIds" item="goodsId" open="(" separator="," close=")">
+              #{goodsId}
+            </foreach>
+        ) recent
+        WHERE row_num &lt;= 100
+        GROUP BY goods_id
+        </script>
+        """)
+    List<GoodsOrderPerformanceProjection> selectRecentRechargeDurationAverages(
+        @Param("goodsIds") List<Long> goodsIds
+    );
+
+    @Select("""
+        <script>
+        SELECT goods_id AS goodsId,
+               ROUND(100 * SUM(status = 'DELIVERED') / COUNT(*)) AS todaySuccessRatePercentage
+        FROM orders
+        WHERE deleted_at IS NULL
+          AND status IN ('DELIVERED', 'FAILED', 'CANCELLED', 'REFUNDED', 'CLOSED')
+          AND created_at &gt;= #{todayStart}
+          AND created_at &lt; #{tomorrowStart}
+          AND goods_id IN
+          <foreach collection="goodsIds" item="goodsId" open="(" separator="," close=")">
+            #{goodsId}
+          </foreach>
+        GROUP BY goods_id
+        </script>
+        """)
+    List<GoodsOrderPerformanceProjection> selectTodaySuccessRatePercentages(
+        @Param("goodsIds") List<Long> goodsIds,
+        @Param("todayStart") java.time.OffsetDateTime todayStart,
+        @Param("tomorrowStart") java.time.OffsetDateTime tomorrowStart
     );
 
     @Select("""

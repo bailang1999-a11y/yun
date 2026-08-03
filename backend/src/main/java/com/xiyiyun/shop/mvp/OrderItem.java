@@ -34,11 +34,51 @@ public record OrderItem(
     OffsetDateTime paidAt,
     OffsetDateTime deliveredAt,
     String upstreamOrderNo,
-    BigDecimal externalMaxAmount
+    BigDecimal externalMaxAmount,
+    Long averageRechargeDurationSeconds,
+    Integer todaySuccessRatePercentage,
+    SupplierPriceTrendItem supplierPriceTrend
 ) {
     public OrderItem {
         rechargeFields = rechargeFields == null ? Map.of() : Map.copyOf(rechargeFields);
         upstreamOrderNo = upstreamOrderNo == null ? "" : upstreamOrderNo.trim();
+    }
+
+    public OrderItem(
+        String orderNo,
+        Long userId,
+        String buyerAccount,
+        Long goodsId,
+        String goodsName,
+        GoodsType goodsType,
+        String platform,
+        String orderIp,
+        String orderIpLocation,
+        Integer quantity,
+        BigDecimal unitPrice,
+        BigDecimal payAmount,
+        OrderStatus status,
+        String rechargeAccount,
+        Map<String, String> rechargeFields,
+        String buyerRemark,
+        String requestId,
+        String paymentNo,
+        String payMethod,
+        List<String> deliveryItems,
+        List<ChannelAttemptItem> channelAttempts,
+        String deliveryMessage,
+        OffsetDateTime createdAt,
+        OffsetDateTime paidAt,
+        OffsetDateTime deliveredAt,
+        String upstreamOrderNo,
+        BigDecimal externalMaxAmount
+    ) {
+        this(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            upstreamOrderNo, externalMaxAmount, null, null, null
+        );
     }
 
     public OrderItem(
@@ -122,7 +162,36 @@ public record OrderItem(
             orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
             quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
             paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
-            nextUpstreamOrderNo, externalMaxAmount
+            nextUpstreamOrderNo, externalMaxAmount, averageRechargeDurationSeconds, todaySuccessRatePercentage,
+            supplierPriceTrend
+        );
+    }
+
+    public OrderItem withOrderPerformance(Long averageSeconds, Integer successRatePercentage) {
+        return new OrderItem(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            upstreamOrderNo, externalMaxAmount, averageSeconds, successRatePercentage, supplierPriceTrend
+        );
+    }
+
+    public OrderItem withSupplierPriceTrend(SupplierPriceTrendItem trend) {
+        return new OrderItem(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, channelAttempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            upstreamOrderNo, externalMaxAmount, averageRechargeDurationSeconds, todaySuccessRatePercentage, trend
+        );
+    }
+
+    public OrderItem withChannelAttempts(List<ChannelAttemptItem> attempts) {
+        return new OrderItem(
+            orderNo, userId, buyerAccount, goodsId, goodsName, goodsType, platform, orderIp, orderIpLocation,
+            quantity, unitPrice, payAmount, status, rechargeAccount, rechargeFields, buyerRemark, requestId,
+            paymentNo, payMethod, deliveryItems, attempts, deliveryMessage, createdAt, paidAt, deliveredAt,
+            upstreamOrderNo, externalMaxAmount, averageRechargeDurationSeconds, todaySuccessRatePercentage,
+            supplierPriceTrend
         );
     }
 
@@ -241,7 +310,10 @@ public record OrderItem(
             paidAt,
             resolvedDeliveredAt,
             upstreamOrderNo,
-            externalMaxAmount
+            externalMaxAmount,
+            averageRechargeDurationSeconds,
+            todaySuccessRatePercentage,
+            supplierPriceTrend
         );
     }
 
@@ -281,7 +353,10 @@ public record OrderItem(
             nextPaidAt,
             resolvedDeliveredAt,
             upstreamOrderNo,
-            externalMaxAmount
+            externalMaxAmount,
+            averageRechargeDurationSeconds,
+            todaySuccessRatePercentage,
+            supplierPriceTrend
         );
     }
 
@@ -323,7 +398,10 @@ public record OrderItem(
             paidAt,
             deliveredAt,
             upstreamOrderNo,
-            externalMaxAmount
+            externalMaxAmount,
+            averageRechargeDurationSeconds,
+            todaySuccessRatePercentage,
+            supplierPriceTrend
         );
     }
 }

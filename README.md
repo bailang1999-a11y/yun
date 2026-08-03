@@ -48,7 +48,7 @@ npm run launch:verify -- --env-file .env
 `prod:preflight` 会在保留占位值、开发默认密码/密钥、非 HTTPS CORS、端口非法或端口冲突时失败；通过后再执行生产 Compose。
 生产 Compose 默认使用 `XIYIYUN_HTTP_BIND=127.0.0.1`，三端 HTTP 入口只给同机 HTTPS 反向代理访问，避免管理后台或明文 HTTP 直接暴露公网。
 
-已有数据库升级时，先备份并按顺序执行 `db/migrations/002_config_persistence.sql`、`003_category_icons.sql`、`004_security_and_order_consistency.sql`、`005_cards_kind_and_callback_logs.sql`、`006_money_integrity.sql`、`007_config_tables_extraction.sql`、`008_user_username.sql`，再启动新后端；全新数据卷会自动执行 `db/init/001_schema.sql`，不需要跑增量迁移。
+已有数据库升级时，先备份并按文件名顺序执行 `db/migrations/*.sql`，再启动新后端；迁移脚本可重复执行。全新数据卷会自动执行 `db/init/001_schema.sql`，不需要单独跑增量迁移。
 
 ## 飞牛 FnOS 部署
 

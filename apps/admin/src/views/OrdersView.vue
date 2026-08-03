@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Timer,
   Trash2,
   Truck,
   XCircle
@@ -27,6 +28,7 @@ import OrderPaymentBadge from '../components/OrderPaymentBadge.vue'
 import OrderSourceBadge from '../components/OrderSourceBadge.vue'
 import OrderStatusBadge from '../components/OrderStatusBadge.vue'
 import RechargeAccountTag from '../components/RechargeAccountTag.vue'
+import SupplierPriceTrendTag from '../components/SupplierPriceTrendTag.vue'
 import OrderDetailView from './OrderDetailView.vue'
 import {
   formatDateTime,
@@ -90,7 +92,22 @@ function hasExternalAmount(value?: number | string) {
 }
 
 function formatExternalAmount(value?: number | string) {
-  return hasExternalAmount(value) ? formatMoney(value) : '未提供'
+  return hasExternalAmount(value) ? formatMoney(value, { currency: false }) : '未提供'
+}
+
+function formatAverageRechargeDuration(value?: number) {
+  if (value === undefined || value === null || !Number.isFinite(value) || value < 0) return '暂无数据'
+  const seconds = Math.round(value)
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
+  const hours = Math.floor(minutes / 60)
+  return `${hours} 小时 ${minutes % 60} 分`
+}
+
+function formatSuccessRate(value?: number) {
+  if (value === undefined || value === null || !Number.isFinite(value)) return '暂无数据'
+  return `${Math.min(100, Math.max(0, Math.round(value)))}%`
 }
 
 function orderDurationTone(status?: string) {
@@ -530,33 +547,34 @@ onBeforeUnmount(() => {
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="金额" width="160">
+      <el-table-column label="金额" width="220" align="center" header-align="center">
         <template #default="{ row }">
-          <div class="amount-breakdown">
-            <div>
-              <small>实付金额</small>
-              <strong :class="{ missing: !hasExternalAmount(row.externalMaxAmount) }">
-                {{ formatExternalAmount(row.externalMaxAmount) }}
-              </strong>
-            </div>
-            <div>
-              <small>成本金额</small>
-              <span>{{ formatMoney(row.amount) }}</span>
-            </div>
+          <div class="amount-pills">
+            <SupplierPriceTrendTag :trend="row.supplierPriceTrend" />
+            <el-tooltip content="实付" placement="top" :show-after="150" popper-class="xiyiyun-order-tooltip">
+              <span
+                class="amount-pill amount-pill--paid"
+                :class="{ missing: !hasExternalAmount(row.externalMaxAmount) }"
+                :aria-label="`实付 ${formatExternalAmount(row.externalMaxAmount)}`"
+              >
+                <CircleDollarSign :size="13" aria-hidden="true" />
+                <strong>{{ formatExternalAmount(row.externalMaxAmount) }}</strong>
+              </span>
+            </el-tooltip>
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="支付方式" width="130">
+      <el-table-column label="支付方式" width="130" align="center" header-align="center">
         <template #default="{ row }">
           <OrderPaymentBadge :value="row.payMethod" />
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="130">
+      <el-table-column label="状态" width="130" align="center" header-align="center">
         <template #default="{ row }">
           <OrderStatusBadge :status="row.status" />
         </template>
       </el-table-column>
-      <el-table-column label="发货类型" width="120">
+      <el-table-column label="发货类型" width="120" align="center" header-align="center">
         <template #default="{ row }">
           <span class="delivery-pill" :class="deliveryClass(row.deliveryType)">
             <Truck :size="13" />
@@ -564,14 +582,68 @@ onBeforeUnmount(() => {
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="来源" width="132">
+      <el-table-column label="来源" width="132" align="center" header-align="center">
         <template #default="{ row }">
           <OrderSourceBadge :source="row.orderSource" :request-id="row.requestId" :platform="row.platform" :remark="row.buyerRemark" />
         </template>
       </el-table-column>
-      <el-table-column label="下单用户" min-width="160" show-overflow-tooltip>
+      <el-table-column label="近100单耗时 / 今日成功率" width="210" align="center" header-align="center">
         <template #default="{ row }">
-          <OrderBuyerCell :order="row" />
+          <el-popover
+            trigger="hover"
+            placement="top"
+            :width="248"
+            :show-after="120"
+            :hide-after="80"
+            popper-class="xiyiyun-order-performance-popper"
+          >
+            <template #reference>
+              <span
+                class="average-duration-pill"
+                :class="{
+                  empty: row.averageRechargeDurationSeconds === undefined
+                    && row.todaySuccessRatePercentage === undefined
+                }"
+                :aria-label="`近100单平均耗时 ${formatAverageRechargeDuration(row.averageRechargeDurationSeconds)}，今日成功率 ${formatSuccessRate(row.todaySuccessRatePercentage)}`"
+              >
+                <Timer :size="13" aria-hidden="true" />
+                <span>{{ formatAverageRechargeDuration(row.averageRechargeDurationSeconds) }}</span>
+                <CheckCircle2 :size="13" aria-hidden="true" />
+                <span>{{ formatSuccessRate(row.todaySuccessRatePercentage) }}</span>
+              </span>
+            </template>
+
+            <div class="order-performance-popover">
+              <div class="order-performance-row">
+                <span class="order-performance-icon is-duration" aria-hidden="true">
+                  <Timer :size="14" />
+                </span>
+                <span>近100单平均耗时</span>
+                <strong>{{ formatAverageRechargeDuration(row.averageRechargeDurationSeconds) }}</strong>
+              </div>
+              <div class="order-performance-row">
+                <span class="order-performance-icon is-success" aria-hidden="true">
+                  <CheckCircle2 :size="14" />
+                </span>
+                <span>今日成功率</span>
+                <strong>{{ formatSuccessRate(row.todaySuccessRatePercentage) }}</strong>
+              </div>
+            </div>
+          </el-popover>
+        </template>
+      </el-table-column>
+      <el-table-column
+        label="下单用户"
+        min-width="160"
+        align="center"
+        header-align="center"
+        class-name="order-buyer-column"
+        show-overflow-tooltip
+      >
+        <template #default="{ row }">
+          <div class="order-buyer-cell">
+            <OrderBuyerCell :order="row" />
+          </div>
         </template>
       </el-table-column>
       <el-table-column
@@ -1073,53 +1145,88 @@ onBeforeUnmount(() => {
   justify-content: center;
 }
 
-.amount-breakdown {
-  display: grid;
-  gap: 2px;
+.order-buyer-cell {
+  width: 100%;
   min-width: 0;
+  display: flex;
+  justify-content: center;
+  text-align: center;
 }
 
-.amount-breakdown > div {
+.order-buyer-cell :deep(.stack-cell) {
+  width: 100%;
+  justify-items: center;
+  text-align: center;
+}
+
+.average-duration-pill {
+  min-width: 150px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 0.5px solid rgba(34, 211, 238, 0.22);
+  border-radius: 8px;
+  color: rgba(207, 250, 254, 0.86);
+  background: rgba(6, 182, 212, 0.1);
+  font-size: var(--order-font-control);
+  font-weight: var(--order-weight-control);
+  line-height: var(--order-line-control);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.average-duration-pill.empty {
+  color: rgba(255, 255, 255, 0.34);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.amount-pills {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.amount-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 72px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.amount-pill--paid {
+  color: #a7f3d0;
+  border-color: rgba(20, 184, 166, 0.24);
+  background: rgba(20, 184, 166, 0.1);
+}
+
+.amount-pill strong {
   min-width: 0;
-}
-
-.amount-breakdown > div:first-child small,
-.amount-breakdown > div:first-child strong {
-  font-size: var(--order-row-primary-size);
+  overflow: hidden;
+  color: currentColor;
+  font-size: 12px;
   font-weight: var(--order-row-primary-weight);
-  line-height: var(--order-row-primary-line);
-}
-
-.amount-breakdown > div:last-child small,
-.amount-breakdown > div:last-child span {
-  font-size: var(--order-row-secondary-size);
-  font-weight: var(--order-row-secondary-weight);
-  line-height: var(--order-row-secondary-line);
-}
-
-.amount-breakdown small {
-  color: rgba(255, 255, 255, 0.42);
-  white-space: nowrap;
-}
-
-.amount-breakdown strong {
-  color: #fff3a3;
+  line-height: 17px;
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.amount-breakdown strong.missing {
+.amount-pill.missing {
   color: rgba(255, 255, 255, 0.38);
-}
-
-.amount-breakdown span {
-  color: rgba(255, 255, 255, 0.58);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .delivery-pill {
@@ -1218,9 +1325,13 @@ onBeforeUnmount(() => {
   line-height: var(--order-line-primary);
 }
 
+.orders-table :deep(td.el-table__cell.is-center .cell) {
+  justify-content: center;
+}
+
 .orders-table :deep(.el-table__cell:nth-child(2) .cell),
 .orders-table :deep(.el-table__cell:nth-child(3) .cell),
-.orders-table :deep(.el-table__cell:nth-child(9) .cell) {
+.orders-table :deep(.order-buyer-column .cell) {
   align-items: stretch;
 }
 

@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS orders (
   UNIQUE KEY uk_orders_user_request (user_id, request_id),
   KEY idx_orders_user_created (user_id, created_at),
   KEY idx_orders_goods_created (goods_id, created_at),
+  KEY idx_orders_goods_status_created (goods_id, status, created_at, id),
   KEY idx_orders_status_created (status, created_at),
   KEY idx_orders_delivery_status (delivery_status, created_at),
   KEY idx_orders_platform_created (source_platform_id, created_at)
@@ -678,6 +679,23 @@ CREATE TABLE IF NOT EXISTS product_monitor_states (
   change_count INT UNSIGNED NOT NULL DEFAULT 0,
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   KEY idx_product_monitor_next_scan (next_scan_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS supplier_price_history (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  goods_id BIGINT UNSIGNED NOT NULL,
+  channel_id BIGINT UNSIGNED NOT NULL,
+  supplier_id BIGINT UNSIGNED NOT NULL,
+  supplier_name VARCHAR(128) NOT NULL,
+  supplier_goods_id VARCHAR(128) NOT NULL,
+  unit_price DECIMAL(18,4) NOT NULL,
+  previous_unit_price DECIMAL(18,4) NULL,
+  change_amount DECIMAL(18,4) NOT NULL DEFAULT 0.0000,
+  direction VARCHAR(16) NOT NULL,
+  observed_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_supplier_price_history_channel_time (channel_id, observed_at, id),
+  KEY idx_supplier_price_history_goods_time (goods_id, observed_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 INSERT IGNORE INTO sales_platforms (id, platform_code, platform_name, platform_type, status, sort_no, config) VALUES

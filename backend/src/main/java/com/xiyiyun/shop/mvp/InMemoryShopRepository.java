@@ -13,6 +13,7 @@ import com.xiyiyun.shop.persistence.FundsLedgerStore;
 import com.xiyiyun.shop.persistence.MemberOrderCallbackTaskStore;
 import com.xiyiyun.shop.persistence.OrderCreationStore;
 import com.xiyiyun.shop.persistence.PersistentOrderStore;
+import com.xiyiyun.shop.persistence.SupplierPriceHistoryStore;
 import com.xiyiyun.shop.security.LoginAttemptGuard;
 import com.xiyiyun.shop.security.RedisSecurityStateStore;
 import java.math.BigDecimal;
@@ -275,7 +276,35 @@ public class InMemoryShopRepository implements TokenAuthPort {
             (AuditPersistenceStore) null,
             (ConfigPersistenceStore) null,
             (RedisSecurityStateStore) null,
+            (SupplierPriceHistoryStore) null,
             false,
+            adminUsername,
+            adminPasswordBcrypt,
+            adminNickname
+        );
+    }
+
+    public InMemoryShopRepository(
+        OrderEventPublisher realtimeBroadcaster,
+        ObjectProvider<PersistentOrderStore> persistentOrderStoreProvider,
+        ObjectProvider<CatalogPersistenceStore> catalogPersistenceStoreProvider,
+        ObjectProvider<AuditPersistenceStore> auditPersistenceStoreProvider,
+        ObjectProvider<ConfigPersistenceStore> configPersistenceStoreProvider,
+        ObjectProvider<RedisSecurityStateStore> securityStateStoreProvider,
+        Environment environment,
+        String adminUsername,
+        String adminPasswordBcrypt,
+        String adminNickname
+    ) {
+        this(
+            realtimeBroadcaster,
+            persistentOrderStoreProvider.getIfAvailable(),
+            catalogPersistenceStoreProvider.getIfAvailable(),
+            auditPersistenceStoreProvider.getIfAvailable(),
+            configPersistenceStoreProvider.getIfAvailable(),
+            securityStateStoreProvider.getIfAvailable(),
+            null,
+            isProdProfile(environment),
             adminUsername,
             adminPasswordBcrypt,
             adminNickname
@@ -290,6 +319,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
         ObjectProvider<AuditPersistenceStore> auditPersistenceStoreProvider,
         ObjectProvider<ConfigPersistenceStore> configPersistenceStoreProvider,
         ObjectProvider<RedisSecurityStateStore> securityStateStoreProvider,
+        ObjectProvider<SupplierPriceHistoryStore> supplierPriceHistoryStoreProvider,
         Environment environment,
         @Value("${xiyiyun.admin.username:admin}") String adminUsername,
         @Value("${xiyiyun.admin.password-bcrypt:" + DEFAULT_ADMIN_PASSWORD_BCRYPT + "}") String adminPasswordBcrypt,
@@ -302,6 +332,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
             auditPersistenceStoreProvider.getIfAvailable(),
             configPersistenceStoreProvider.getIfAvailable(),
             securityStateStoreProvider.getIfAvailable(),
+            supplierPriceHistoryStoreProvider.getIfAvailable(),
             isProdProfile(environment),
             adminUsername,
             adminPasswordBcrypt,
@@ -316,6 +347,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
         AuditPersistenceStore auditPersistenceStore,
         ConfigPersistenceStore configPersistenceStore,
         RedisSecurityStateStore securityStateStore,
+        SupplierPriceHistoryStore supplierPriceHistoryStore,
         boolean prodProfile,
         String adminUsername,
         String adminPasswordBcrypt,
@@ -338,7 +370,8 @@ public class InMemoryShopRepository implements TokenAuthPort {
         this.productMonitorService = new ProductMonitorService(
             new RepositoryMonitorGateway(),
             realtimeBroadcaster,
-            this.configService
+            this.configService,
+            supplierPriceHistoryStore
         );
         // 批次7B / 任务B：商品域。锁传的是仓储自己那两个监视器对象，两边继续互斥。
         this.catalogService = new CatalogService(
@@ -2073,7 +2106,61 @@ public class InMemoryShopRepository implements TokenAuthPort {
                 recordReadFallback("ORDER", "LIST", ex);
             }
         }
-        return PageSlice.of(filterMemoryOrders(search, status, goodsType, createdFrom, userId), limit, offset);
+        PageSlice<OrderItem> slice = PageSlice.of(
+            filterMemoryOrders(search, status, goodsType, createdFrom, userId), limit, offset
+        );
+        return new PageSlice<>(withOrderPerformance(slice.items()), slice.total());
+    }
+
+    private List<OrderItem> withOrderPerformance(List<OrderItem> items) {
+        Map<Long, Long> averages = new LinkedHashMap<>();
+        Map<Long, Integer> successRates = new LinkedHashMap<>();
+        return items.stream()
+            .map(item -> item.withOrderPerformance(
+                item.goodsId() == null ? null : averages.computeIfAbsent(
+                    item.goodsId(), this::recentRechargeDurationAverage
+                ),
+                item.goodsId() == null ? null : successRates.computeIfAbsent(
+                    item.goodsId(), this::todaySuccessRatePercentage
+                )
+            ))
+            .toList();
+    }
+
+    private Long recentRechargeDurationAverage(Long goodsId) {
+        var average = orders.values().stream()
+            .filter(item -> Objects.equals(item.goodsId(), goodsId))
+            .filter(item -> item.status() == OrderStatus.DELIVERED)
+            .filter(item -> item.createdAt() != null && item.deliveredAt() != null)
+            .filter(item -> !item.deliveredAt().isBefore(item.createdAt()))
+            .sorted(Comparator.comparing(OrderItem::createdAt).reversed())
+            .limit(100)
+            .mapToLong(item -> Duration.between(item.createdAt(), item.deliveredAt()).toSeconds())
+            .average();
+        return average.isPresent() ? Math.round(average.getAsDouble()) : null;
+    }
+
+    private Integer todaySuccessRatePercentage(Long goodsId) {
+        ZonedDateTime chinaNow = ZonedDateTime.now(CHINA_ZONE);
+        OffsetDateTime todayStart = chinaNow.toLocalDate().atStartOfDay(CHINA_ZONE).toOffsetDateTime();
+        OffsetDateTime tomorrowStart = todayStart.plusDays(1);
+        List<OrderItem> terminalOrders = orders.values().stream()
+            .filter(item -> Objects.equals(item.goodsId(), goodsId))
+            .filter(item -> item.createdAt() != null)
+            .filter(item -> !item.createdAt().isBefore(todayStart) && item.createdAt().isBefore(tomorrowStart))
+            .filter(item -> List.of(
+                OrderStatus.DELIVERED,
+                OrderStatus.FAILED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REFUNDED,
+                OrderStatus.CLOSED
+            ).contains(item.status()))
+            .toList();
+        if (terminalOrders.isEmpty()) return null;
+        long delivered = terminalOrders.stream()
+            .filter(item -> item.status() == OrderStatus.DELIVERED)
+            .count();
+        return (int) Math.round(delivered * 100.0 / terminalOrders.size());
     }
 
     public OrderSummaryItem summarizeOrders(
@@ -4214,35 +4301,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
         if (Objects.equals(order.channelAttempts(), nextAttempts)) {
             return order;
         }
-        return new OrderItem(
-            order.orderNo(),
-            order.userId(),
-            order.buyerAccount(),
-            order.goodsId(),
-            order.goodsName(),
-            order.goodsType(),
-            order.platform(),
-            order.orderIp(),
-            order.orderIpLocation(),
-            order.quantity(),
-            order.unitPrice(),
-            order.payAmount(),
-            order.status(),
-            order.rechargeAccount(),
-            order.rechargeFields(),
-            order.buyerRemark(),
-            order.requestId(),
-            order.paymentNo(),
-            order.payMethod(),
-            order.deliveryItems(),
-            nextAttempts,
-            order.deliveryMessage(),
-            order.createdAt(),
-            order.paidAt(),
-            order.deliveredAt(),
-            order.upstreamOrderNo(),
-            order.externalMaxAmount()
-        );
+        return order.withChannelAttempts(nextAttempts);
     }
 
     private ChannelAttemptItem withLatestSupplierName(ChannelAttemptItem attempt) {

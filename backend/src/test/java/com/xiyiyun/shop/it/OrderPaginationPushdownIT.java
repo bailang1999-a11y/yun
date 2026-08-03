@@ -8,6 +8,7 @@ import com.xiyiyun.shop.mvp.OrderSummaryItem;
 import com.xiyiyun.shop.mvp.PageSlice;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -369,6 +370,78 @@ class OrderPaginationPushdownIT extends AbstractIntegrationTest {
             .extracting(OrderItem::orderNo)
             .isEqualTo("IT8CQ02");
         assertThat(repository.findOrderByRequestId(ItFixtures.USER_ID, "no-such-req")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("平均充值耗时按商品取最近100笔有效完成单，且不受当前列表筛选影响")
+    void averageRechargeDurationMustUseLatestHundredValidDeliveredOrdersPerGoods() {
+        seedBaseData();
+        long otherGoodsId = 8102L;
+        fixtures.insertGoods(otherGoodsId, "IT另一商品", "DIRECT", 999, PRICE, null);
+        OffsetDateTime base = OffsetDateTime.parse("2026-08-01T00:00:00+08:00");
+
+        for (int index = 0; index <= 100; index++) {
+            String orderNo = String.format("IT8CA%03d", index);
+            fixtures.insertOrder(orderNo, ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "DELIVERED", 1, PRICE);
+            OffsetDateTime createdAt = base.plusMinutes(index);
+            long durationSeconds = index == 0 ? 1_010L : 10L;
+            jdbcTemplate.update(
+                "UPDATE orders SET created_at = ?, delivered_at = ? WHERE order_no = ?",
+                createdAt, createdAt.plusSeconds(durationSeconds), orderNo
+            );
+        }
+        fixtures.insertOrder("IT8CA-FAILED", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "FAILED", 1, PRICE);
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, delivered_at = ? WHERE order_no = ?",
+            base.plusMinutes(200), base.plusMinutes(300), "IT8CA-FAILED"
+        );
+        fixtures.insertOrder("IT8CA-BACKWARDS", ItFixtures.USER_ID, DIRECT_GOODS_ID, "DIRECT", "DELIVERED", 1, PRICE);
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, delivered_at = ? WHERE order_no = ?",
+            base.plusMinutes(202), base.plusMinutes(201), "IT8CA-BACKWARDS"
+        );
+        fixtures.insertOrder("IT8CA-OTHER", ItFixtures.USER_ID, otherGoodsId, "DIRECT", "DELIVERED", 1, PRICE);
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, delivered_at = ? WHERE order_no = ?",
+            base.plusMinutes(203), base.plusMinutes(204), "IT8CA-OTHER"
+        );
+        OffsetDateTime today = OffsetDateTime.now(ZoneId.of("Asia/Shanghai"))
+            .toLocalDate()
+            .atStartOfDay(ZoneId.of("Asia/Shanghai"))
+            .toOffsetDateTime();
+        insertOrderAt("IT8CA-TODAY-1", DIRECT_GOODS_ID, "DELIVERED", today.plusMinutes(1));
+        insertOrderAt("IT8CA-TODAY-2", DIRECT_GOODS_ID, "DELIVERED", today.plusMinutes(2));
+        insertOrderAt("IT8CA-TODAY-3", DIRECT_GOODS_ID, "DELIVERED", today.plusMinutes(3));
+        insertOrderAt("IT8CA-TODAY-FAILED", DIRECT_GOODS_ID, "FAILED", today.plusMinutes(4));
+        insertOrderAt("IT8CA-YESTERDAY-FAILED", DIRECT_GOODS_ID, "FAILED", today.minusMinutes(1));
+        insertOrderAt("IT8CA-TODAY-ACTIVE", DIRECT_GOODS_ID, "PROCURING", today.plusMinutes(5));
+        insertOrderAt("IT8CB-TODAY-1", otherGoodsId, "DELIVERED", today.plusMinutes(1));
+        insertOrderAt("IT8CB-TODAY-FAILED", otherGoodsId, "FAILED", today.plusMinutes(2));
+
+        PageSlice<OrderItem> firstGoods = repository.pageOrders("IT8CA100", null, null, null, 10, 0);
+        PageSlice<OrderItem> otherGoods = repository.pageOrders("IT8CA-OTHER", null, null, null, 10, 0);
+
+        assertThat(firstGoods.items()).singleElement()
+            .extracting(OrderItem::averageRechargeDurationSeconds)
+            .isEqualTo(10L);
+        assertThat(firstGoods.items()).singleElement()
+            .extracting(OrderItem::todaySuccessRatePercentage)
+            .isEqualTo(75);
+        assertThat(otherGoods.items()).singleElement()
+            .extracting(OrderItem::averageRechargeDurationSeconds)
+            .isEqualTo(60L);
+        assertThat(otherGoods.items()).singleElement()
+            .extracting(OrderItem::todaySuccessRatePercentage)
+            .isEqualTo(50);
+    }
+
+    private void insertOrderAt(String orderNo, long goodsId, String status, OffsetDateTime createdAt) {
+        fixtures.insertOrder(orderNo, ItFixtures.USER_ID, goodsId, "DIRECT", status, 1, PRICE);
+        jdbcTemplate.update(
+            "UPDATE orders SET created_at = ?, delivered_at = NULL WHERE order_no = ?",
+            createdAt,
+            orderNo
+        );
     }
 
     /**

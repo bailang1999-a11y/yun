@@ -20,9 +20,12 @@ import com.xiyiyun.shop.persistence.mapper.PaymentRecordMapper;
 import com.xiyiyun.shop.persistence.mapper.RefundRecordMapper;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DuplicateKeyException;
@@ -33,6 +36,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class PersistentOrderStore {
     private static final Logger log = LoggerFactory.getLogger(PersistentOrderStore.class);
+    private static final ZoneId CHINA_ZONE = ZoneId.of("Asia/Shanghai");
 
     private final OrderRecordMapper orderRecordMapper;
     private final PaymentRecordMapper paymentRecordMapper;
@@ -42,6 +46,7 @@ public class PersistentOrderStore {
     private final CardCipherService cardCipherService;
     private final MemberOrderCallbackTaskStore memberCallbackTaskStore;
     private final WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore;
+    private final SupplierPriceHistoryStore supplierPriceHistoryStore;
     private final OrderPersistenceMapper persistenceMapper = new OrderPersistenceMapper();
 
     public PersistentOrderStore(
@@ -60,6 +65,7 @@ public class PersistentOrderStore {
             cardRecordMapper,
             cardCipherService,
             null,
+            null,
             null
         );
     }
@@ -75,7 +81,23 @@ public class PersistentOrderStore {
     ) {
         this(
             orderRecordMapper, paymentRecordMapper, paymentCallbackLogMapper, refundRecordMapper,
-            cardRecordMapper, cardCipherService, memberCallbackTaskStore, null
+            cardRecordMapper, cardCipherService, memberCallbackTaskStore, null, null
+        );
+    }
+
+    public PersistentOrderStore(
+        OrderRecordMapper orderRecordMapper,
+        PaymentRecordMapper paymentRecordMapper,
+        PaymentCallbackLogMapper paymentCallbackLogMapper,
+        RefundRecordMapper refundRecordMapper,
+        CardRecordMapper cardRecordMapper,
+        CardCipherService cardCipherService,
+        MemberOrderCallbackTaskStore memberCallbackTaskStore,
+        WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore
+    ) {
+        this(
+            orderRecordMapper, paymentRecordMapper, paymentCallbackLogMapper, refundRecordMapper,
+            cardRecordMapper, cardCipherService, memberCallbackTaskStore, weComRobotDeliveryTaskStore, null
         );
     }
 
@@ -88,7 +110,8 @@ public class PersistentOrderStore {
         CardRecordMapper cardRecordMapper,
         CardCipherService cardCipherService,
         MemberOrderCallbackTaskStore memberCallbackTaskStore,
-        WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore
+        WeComRobotDeliveryTaskStore weComRobotDeliveryTaskStore,
+        SupplierPriceHistoryStore supplierPriceHistoryStore
     ) {
         this.orderRecordMapper = orderRecordMapper;
         this.paymentRecordMapper = paymentRecordMapper;
@@ -98,6 +121,7 @@ public class PersistentOrderStore {
         this.cardCipherService = cardCipherService;
         this.memberCallbackTaskStore = memberCallbackTaskStore;
         this.weComRobotDeliveryTaskStore = weComRobotDeliveryTaskStore;
+        this.supplierPriceHistoryStore = supplierPriceHistoryStore;
     }
 
     @Transactional
@@ -357,7 +381,46 @@ public class PersistentOrderStore {
             .stream()
             .map(this::toOrderItem)
             .toList();
-        return new PageSlice<>(items, total);
+        List<OrderItem> enrichedItems = withOrderPerformance(items);
+        if (supplierPriceHistoryStore != null) {
+            try {
+                enrichedItems = supplierPriceHistoryStore.attachRecentTrends(enrichedItems);
+            } catch (RuntimeException ex) {
+                log.warn("supplier price trends unavailable, returning orders without trends: {}", ex.toString());
+            }
+        }
+        return new PageSlice<>(enrichedItems, total);
+    }
+
+    private List<OrderItem> withOrderPerformance(List<OrderItem> items) {
+        List<Long> goodsIds = items.stream()
+            .map(OrderItem::goodsId)
+            .filter(java.util.Objects::nonNull)
+            .distinct()
+            .toList();
+        if (goodsIds.isEmpty()) return items;
+        Map<Long, Long> averages = orderRecordMapper.selectRecentRechargeDurationAverages(goodsIds).stream()
+            .collect(Collectors.toMap(
+                GoodsOrderPerformanceProjection::getGoodsId,
+                GoodsOrderPerformanceProjection::getAverageRechargeDurationSeconds
+            ));
+        OffsetDateTime todayStart = OffsetDateTime.now(CHINA_ZONE)
+            .toLocalDate()
+            .atStartOfDay(CHINA_ZONE)
+            .toOffsetDateTime();
+        OffsetDateTime tomorrowStart = todayStart.plusDays(1);
+        Map<Long, Integer> successRates = orderRecordMapper
+            .selectTodaySuccessRatePercentages(goodsIds, todayStart, tomorrowStart)
+            .stream()
+            .collect(Collectors.toMap(
+                GoodsOrderPerformanceProjection::getGoodsId,
+                GoodsOrderPerformanceProjection::getTodaySuccessRatePercentage
+            ));
+        return items.stream()
+            .map(item -> item.withOrderPerformance(
+                averages.get(item.goodsId()), successRates.get(item.goodsId())
+            ))
+            .toList();
     }
 
     @Transactional(readOnly = true)

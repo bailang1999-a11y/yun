@@ -26,20 +26,10 @@ docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --bui
 全新 Docker 数据卷会自动执行 `db/init/001_schema.sql`，可直接启动。已有数据库升级时，不要先启动新后端；先备份 MySQL，再在旧服务停止或维护窗口内执行增量迁移脚本，确认成功后再启动新版本：
 
 ```bash
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/002_config_persistence.sql
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/003_category_icons.sql
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/004_security_and_order_consistency.sql
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/005_cards_kind_and_callback_logs.sql
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/006_money_integrity.sql
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/007_config_tables_extraction.sql
-docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
-  sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < db/migrations/008_user_username.sql
+for migration in db/migrations/*.sql; do
+  docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env exec -T mysql \
+    sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' < "$migration" || exit 1
+done
 docker compose -p xiyiyun -f docker-compose.prod.yml --env-file .env up -d --build
 ```
 

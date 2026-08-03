@@ -17,6 +17,7 @@ import {
   ElLoading,
   ElOption,
   ElPagination,
+  ElPopover,
   ElRadio,
   ElRadioGroup,
   ElSegmented,
@@ -25,6 +26,7 @@ import {
   ElTable,
   ElTableColumn,
   ElTag,
+  ElTooltip,
   ElTreeSelect,
   ElUpload
 } from 'element-plus'
@@ -51,6 +53,7 @@ const app = createApp(App)
   ElLoading,
   ElOption,
   ElPagination,
+  ElPopover,
   ElRadio,
   ElRadioGroup,
   ElSegmented,
@@ -59,6 +62,7 @@ const app = createApp(App)
   ElTable,
   ElTableColumn,
   ElTag,
+  ElTooltip,
   ElTreeSelect,
   ElUpload
 ].forEach((component) => {

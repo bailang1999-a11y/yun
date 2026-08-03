@@ -1,5 +1,7 @@
 package com.xiyiyun.shop.mvp;
 
+import com.xiyiyun.shop.persistence.SupplierPriceHistoryStore;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
@@ -13,6 +15,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 批次6 / 任务A：商品监控（扫描调度 + 上游变动同步 + 监控日志）的唯一出口。
@@ -34,6 +38,7 @@ import java.util.stream.Collectors;
  * 不为了教条的包隔离去搬迁几十个 DTO。真正的解耦靠 {@link ProductMonitorGateway} 这道窄接缝。
  */
 public class ProductMonitorService {
+    private static final Logger log = LoggerFactory.getLogger(ProductMonitorService.class);
     private static final Duration SCAN_INTERVAL = Duration.ofSeconds(180);
     private static final int LOG_RETENTION = 300;
     private static final int LOG_PAGE_LIMIT = 200;
@@ -46,15 +51,26 @@ public class ProductMonitorService {
     private final ProductMonitorGateway gateway;
     private final OrderEventPublisher realtimeBroadcaster;
     private final ConfigService configService;
+    private final SupplierPriceHistoryStore supplierPriceHistoryStore;
 
     ProductMonitorService(
         ProductMonitorGateway gateway,
         OrderEventPublisher realtimeBroadcaster,
         ConfigService configService
     ) {
+        this(gateway, realtimeBroadcaster, configService, null);
+    }
+
+    ProductMonitorService(
+        ProductMonitorGateway gateway,
+        OrderEventPublisher realtimeBroadcaster,
+        ConfigService configService,
+        SupplierPriceHistoryStore supplierPriceHistoryStore
+    ) {
         this.gateway = gateway;
         this.realtimeBroadcaster = realtimeBroadcaster;
         this.configService = configService;
+        this.supplierPriceHistoryStore = supplierPriceHistoryStore;
     }
 
     /**
@@ -180,6 +196,7 @@ public class ProductMonitorService {
 
             boolean primaryChannel = isPrimaryChannel(channel);
             MonitoredRemoteGoods remote = gateway.monitoredRemoteGoods(current, channel, supplier);
+            recordSupplierPrice(channel, remote);
             GoodsItem next = gateway.applyMonitoredRemoteGoods(current, remote, changes);
             changed = !changes.isEmpty();
             if (changed && primaryChannel) {
@@ -224,6 +241,19 @@ public class ProductMonitorService {
         persistState(state);
         realtimeBroadcaster.publishProductMonitorLog(log);
         return new ProductMonitorScanResult(toItem(channel, state), log);
+    }
+
+    private void recordSupplierPrice(GoodsChannelItem channel, MonitoredRemoteGoods remote) {
+        if (supplierPriceHistoryStore == null || remote == null) return;
+        BigDecimal unitPrice = remote.integration() == null || remote.integration().supplierPrice() == null
+            ? remote.price()
+            : remote.integration().supplierPrice();
+        try {
+            supplierPriceHistoryStore.record(channel, unitPrice, OffsetDateTime.now());
+        } catch (RuntimeException ex) {
+            log.warn("supplier price history unavailable for channel {}, monitoring continues: {}",
+                channel.id(), ex.toString());
+        }
     }
 
     // ---------------------------------------------------------------- 生命周期

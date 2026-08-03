@@ -2,7 +2,9 @@ package com.xiyiyun.shop.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -118,6 +120,110 @@ class PersistentOrderStoreTest {
         assertThat(orders.get(0).buyerAccount()).isEqualTo("buyer");
         assertThat(orders.get(0).paymentNo()).isEqualTo("PAY-1");
         assertThat(orders.get(0).payMethod()).isEqualTo("balance");
+    }
+
+    @Test
+    void pageOrdersQueriesDistinctGoodsIdsOnceAndMapsDurationAverages() {
+        OrderRecordEntity first = orderRecord("ORD-1");
+        OrderRecordEntity second = orderRecord("ORD-2");
+        second.setGoodsId(22L);
+        OrderRecordEntity repeatedGoods = orderRecord("ORD-3");
+        OrderRecordEntity withoutGoods = orderRecord("ORD-4");
+        withoutGoods.setGoodsId(null);
+        when(orderRecordMapper.countSnapshots(null, null, null, null, null)).thenReturn(4L);
+        when(orderRecordMapper.selectSnapshotPage(null, null, null, null, null, 10, 0L))
+            .thenReturn(List.of(first, second, repeatedGoods, withoutGoods));
+        GoodsOrderPerformanceProjection firstProjection = new GoodsOrderPerformanceProjection();
+        firstProjection.setGoodsId(11L);
+        firstProjection.setAverageRechargeDurationSeconds(75L);
+        GoodsOrderPerformanceProjection secondProjection = new GoodsOrderPerformanceProjection();
+        secondProjection.setGoodsId(22L);
+        secondProjection.setAverageRechargeDurationSeconds(120L);
+        when(orderRecordMapper.selectRecentRechargeDurationAverages(List.of(11L, 22L)))
+            .thenReturn(List.of(firstProjection, secondProjection));
+        GoodsOrderPerformanceProjection firstSuccessRate = new GoodsOrderPerformanceProjection();
+        firstSuccessRate.setGoodsId(11L);
+        firstSuccessRate.setTodaySuccessRatePercentage(80);
+        GoodsOrderPerformanceProjection secondSuccessRate = new GoodsOrderPerformanceProjection();
+        secondSuccessRate.setGoodsId(22L);
+        secondSuccessRate.setTodaySuccessRatePercentage(50);
+        when(orderRecordMapper.selectTodaySuccessRatePercentages(
+            ArgumentMatchers.eq(List.of(11L, 22L)),
+            any(OffsetDateTime.class),
+            any(OffsetDateTime.class)
+        ))
+            .thenReturn(List.of(firstSuccessRate, secondSuccessRate));
+
+        var slice = store.pageOrders(null, null, null, null, null, 10, 0L);
+
+        assertThat(slice.total()).isEqualTo(4L);
+        assertThat(slice.items()).extracting(OrderItem::orderNo)
+            .containsExactly("ORD-1", "ORD-2", "ORD-3", "ORD-4");
+        assertThat(slice.items().get(0).averageRechargeDurationSeconds()).isEqualTo(75L);
+        assertThat(slice.items().get(1).averageRechargeDurationSeconds()).isEqualTo(120L);
+        assertThat(slice.items().get(2).averageRechargeDurationSeconds()).isEqualTo(75L);
+        assertThat(slice.items().get(3).averageRechargeDurationSeconds()).isNull();
+        assertThat(slice.items().get(0).todaySuccessRatePercentage()).isEqualTo(80);
+        assertThat(slice.items().get(1).todaySuccessRatePercentage()).isEqualTo(50);
+        assertThat(slice.items().get(2).todaySuccessRatePercentage()).isEqualTo(80);
+        assertThat(slice.items().get(3).todaySuccessRatePercentage()).isNull();
+        verify(orderRecordMapper).selectRecentRechargeDurationAverages(List.of(11L, 22L));
+        verify(orderRecordMapper).selectTodaySuccessRatePercentages(
+            ArgumentMatchers.eq(List.of(11L, 22L)),
+            any(OffsetDateTime.class),
+            any(OffsetDateTime.class)
+        );
+    }
+
+    @Test
+    void pageOrdersAttachesSupplierPriceTrendsAfterOrderPerformance() {
+        SupplierPriceHistoryStore priceHistoryStore = mock(SupplierPriceHistoryStore.class);
+        PersistentOrderStore trendStore = new PersistentOrderStore(
+            orderRecordMapper,
+            paymentRecordMapper,
+            paymentCallbackLogMapper,
+            refundRecordMapper,
+            cardRecordMapper,
+            cardCipherService,
+            null,
+            null,
+            priceHistoryStore
+        );
+        when(orderRecordMapper.countSnapshots(null, null, null, null, null)).thenReturn(1L);
+        when(orderRecordMapper.selectSnapshotPage(null, null, null, null, null, 10, 0L))
+            .thenReturn(List.of(orderRecord("ORD-TREND")));
+        when(priceHistoryStore.attachRecentTrends(anyList()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        trendStore.pageOrders(null, null, null, null, null, 10, 0L);
+
+        verify(priceHistoryStore).attachRecentTrends(anyList());
+    }
+
+    @Test
+    void pageOrdersStillReturnsOrdersWhenSupplierPriceTrendsAreUnavailable() {
+        SupplierPriceHistoryStore priceHistoryStore = mock(SupplierPriceHistoryStore.class);
+        PersistentOrderStore trendStore = new PersistentOrderStore(
+            orderRecordMapper,
+            paymentRecordMapper,
+            paymentCallbackLogMapper,
+            refundRecordMapper,
+            cardRecordMapper,
+            cardCipherService,
+            null,
+            null,
+            priceHistoryStore
+        );
+        when(orderRecordMapper.countSnapshots(null, null, null, null, null)).thenReturn(1L);
+        when(orderRecordMapper.selectSnapshotPage(null, null, null, null, null, 10, 0L))
+            .thenReturn(List.of(orderRecord("ORD-TREND-FALLBACK")));
+        doThrow(new IllegalStateException("history table unavailable"))
+            .when(priceHistoryStore).attachRecentTrends(anyList());
+
+        var slice = trendStore.pageOrders(null, null, null, null, null, 10, 0L);
+
+        assertThat(slice.items()).extracting(OrderItem::orderNo)
+            .containsExactly("ORD-TREND-FALLBACK");
     }
 
     @Test
