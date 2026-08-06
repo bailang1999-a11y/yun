@@ -7,15 +7,14 @@ import { fetchGoodsChannels } from '../api/goods'
 import { completeManualOrder, fetchOrderDetail, refreshOrderCallback, refundOrder, retryOrder, retryOrderWithChannel } from '../api/orders'
 import type { ChannelAttempt, GoodsChannel, Order } from '../types/operations'
 import OrderNumbersCell from '../components/OrderNumbersCell.vue'
+import OrderStatusBadge from '../components/OrderStatusBadge.vue'
 import {
   formatDateTime,
   formatDeliveryType,
   formatDurationFromOrder,
   formatMoney,
   formatOrderSource as formatOrderSourceLabel,
-  formatOrderStatus,
-  formatPaymentMethod,
-  orderStatusTagType
+  formatPaymentMethod
 } from '../utils/formatters'
 
 const route = useRoute()
@@ -44,7 +43,7 @@ let durationTimer: ReturnType<typeof setInterval> | undefined
 const orderNo = computed(() => props.orderNumber || String(route.params.orderNo || ''))
 const canCompleteManual = computed(() => order.value?.status === 'WAITING_MANUAL')
 const canRetry = computed(() => ['FAILED', 'PROCURING'].includes(order.value?.status || ''))
-const canRefund = computed(() => Boolean(order.value && !['REFUNDED', 'CANCELLED'].includes(order.value.status)))
+const canRefund = computed(() => Boolean(order.value && !['REJECTED', 'REFUNDED', 'CANCELLED'].includes(order.value.status)))
 const integrationAttempts = computed<ChannelAttempt[]>(() => {
   if (order.value?.channelAttempts?.length) return order.value.channelAttempts
   if (!order.value?.supplierName && !order.value?.supplierGoodsId && !order.value?.supplierGoodsName) return []
@@ -99,8 +98,10 @@ function formatOrderSource(value?: Order) {
 function formatDuration(value?: Order) {
   nowTick.value
   if (!value) return '-'
-  const terminalStatuses = ['DELIVERED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED']
-  const endAt = terminalStatuses.includes(value.status) ? value.deliveredAt : undefined
+  const terminalStatuses = ['DELIVERED', 'REJECTED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED']
+  const endAt = terminalStatuses.includes(value.status)
+    ? value.rejectedAt || value.deliveredAt || value.createdAt
+    : undefined
   return formatDurationFromOrder(value.createdAt, endAt)
 }
 
@@ -192,6 +193,7 @@ async function loadChannels() {
 }
 
 async function refreshCallbackInfo() {
+  if (order.value?.status === 'REJECTED') return
   if (callbackRefreshing.value) return
   callbackRefreshing.value = true
   try {
@@ -209,6 +211,7 @@ async function refreshCallbackInfo() {
 
 async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund') {
   if (!order.value) return
+  if (order.value.status === 'REJECTED') return
   if (type === 'retry-channel' && !selectedChannelId.value) {
     ElMessage.warning('请选择一个上游渠道')
     return
@@ -265,9 +268,13 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
             <p>{{ order.goodsName }}</p>
           </div>
           <div class="hero-actions">
-            <el-tag class="detail-status" :type="orderStatusTagType(order.status)" effect="dark">
-              {{ formatOrderStatus(order.status) }}
-            </el-tag>
+            <OrderStatusBadge
+              :status="order.status"
+              :rejection-reason="order.rejectionReason || order.deliveryMessage"
+              :request-id="order.requestId"
+              :external-max-amount="order.externalMaxAmount"
+              :expected-amount="order.expectedAmount"
+            />
             <el-button v-if="embedded" :icon="RefreshCw" :loading="loading" @click="loadOrder">刷新</el-button>
           </div>
         </div>
@@ -311,10 +318,19 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
           </section>
 
           <section class="embedded-delivery-info">
-            <h3>发货 / 采购</h3>
+            <h3>{{ order.status === 'REJECTED' ? '拒绝信息' : '发货 / 采购' }}</h3>
             <dl>
-              <dt>处理说明</dt>
-              <dd class="is-multiline">{{ order.deliveryMessage || '暂无发货说明。' }}</dd>
+              <template v-if="order.status === 'REJECTED'">
+                <dt>拒绝原因</dt><dd class="is-multiline rejection-reason">{{ order.rejectionReason || order.deliveryMessage || '未记录具体原因' }}</dd>
+                <dt>拒绝代码</dt><dd>{{ order.rejectionCode || '-' }}</dd>
+                <dt>外部订单号</dt><dd>{{ order.requestId || '未提供' }}</dd>
+                <dt>实际支付价格</dt><dd :class="{ amount: hasExternalAmount(order.externalMaxAmount) }">{{ formatExternalAmount(order.externalMaxAmount) }}</dd>
+                <dt>系统要求价格</dt><dd :class="{ amount: hasExternalAmount(order.expectedAmount) }">{{ formatExternalAmount(order.expectedAmount) }}</dd>
+              </template>
+              <template v-else>
+                <dt>处理说明</dt>
+                <dd class="is-multiline">{{ order.deliveryMessage || '暂无发货说明。' }}</dd>
+              </template>
               <template v-if="order.deliveryItems?.length">
                 <dt>交付内容</dt>
                 <dd class="is-multiline embedded-delivery-items">
@@ -332,6 +348,7 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
                 class="embedded-callback-refresh"
                 :icon="RefreshCw"
                 :loading="callbackRefreshing"
+                :disabled="order.status === 'REJECTED'"
                 title="刷新回调信息"
                 aria-label="刷新回调信息"
                 @click="refreshCallbackInfo"
@@ -444,8 +461,15 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
         </div>
 
         <section v-if="!embedded" class="timeline">
-          <h3>发货 / 采购信息</h3>
-          <p>{{ order.deliveryMessage || '暂无发货说明。' }}</p>
+          <h3>{{ order.status === 'REJECTED' ? '拒绝信息' : '发货 / 采购信息' }}</h3>
+          <dl v-if="order.status === 'REJECTED'" class="rejection-detail-grid">
+            <dt>拒绝原因</dt><dd class="rejection-reason">{{ order.rejectionReason || order.deliveryMessage || '未记录具体原因' }}</dd>
+            <dt>拒绝代码</dt><dd>{{ order.rejectionCode || '-' }}</dd>
+            <dt>外部订单号</dt><dd>{{ order.requestId || '未提供' }}</dd>
+            <dt>实际支付价格</dt><dd :class="{ amount: hasExternalAmount(order.externalMaxAmount) }">{{ formatExternalAmount(order.externalMaxAmount) }}</dd>
+            <dt>系统要求价格</dt><dd :class="{ amount: hasExternalAmount(order.expectedAmount) }">{{ formatExternalAmount(order.expectedAmount) }}</dd>
+          </dl>
+          <p v-else>{{ order.deliveryMessage || '暂无发货说明。' }}</p>
           <div v-if="order.deliveryItems?.length" class="secret-list">
             <span v-for="item in order.deliveryItems" :key="item">{{ item }}</span>
           </div>
@@ -454,7 +478,7 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
         <section v-if="!embedded" class="timeline integration-panel">
           <div class="integration-panel-head">
             <h3>对接详情</h3>
-            <el-button class="callback-refresh-button" :icon="RefreshCw" :loading="callbackRefreshing" @click="refreshCallbackInfo">
+            <el-button v-if="order.status !== 'REJECTED'" class="callback-refresh-button" :icon="RefreshCw" :loading="callbackRefreshing" @click="refreshCallbackInfo">
               刷新回调信息
             </el-button>
           </div>
@@ -546,7 +570,7 @@ async function runOperation(type: 'manual' | 'retry' | 'retry-channel' | 'refund
           </div>
         </section>
 
-        <div class="action-bar">
+        <div v-if="order.status !== 'REJECTED'" class="action-bar">
           <el-button
             type="success"
             :icon="CheckCircle2"
@@ -729,6 +753,14 @@ dd {
 .amount {
   color: #00ffc3;
   font-weight: 700;
+}
+
+.rejection-reason {
+  color: #fecaca;
+}
+
+.rejection-detail-grid {
+  grid-template-columns: 108px minmax(0, 1fr);
 }
 
 .timeline {

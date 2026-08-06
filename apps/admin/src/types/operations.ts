@@ -419,6 +419,10 @@ export interface Order {
   goods?: string | { name?: string }
   amount: number | string
   externalMaxAmount?: number | string
+  expectedAmount?: number | string
+  rejectionCode?: string
+  rejectionReason?: string
+  rejectedAt?: string
   averageRechargeDurationSeconds?: number
   todaySuccessRatePercentage?: number
   supplierPriceTrend?: SupplierPriceTrend

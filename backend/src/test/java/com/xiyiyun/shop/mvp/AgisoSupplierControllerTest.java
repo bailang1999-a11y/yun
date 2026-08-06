@@ -11,6 +11,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -19,6 +20,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiyiyun.shop.GoodsType;
 import com.xiyiyun.shop.OrderStatus;
+import com.xiyiyun.shop.persistence.AgisoRejectedOrderStore;
 import com.xiyiyun.shop.realtime.OrderRealtimeBroadcaster;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -33,6 +35,7 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class AgisoSupplierControllerTest {
     private static final String APP_ID = "2026073033612141753";
@@ -473,6 +476,35 @@ class AgisoSupplierControllerTest {
             .contains("productNo=" + directGoodsId)
             .contains("orderNo=" + externalOrderNo)
             .contains("reason="));
+    }
+
+    @Test
+    void authenticatedBusinessRejectionIsRecordedButInvalidSignatureIsNot() {
+        AgisoRejectedOrderStore rejectedStore = mock(AgisoRejectedOrderStore.class);
+        ReflectionTestUtils.setField(controller, "rejectedOrderStore", rejectedStore);
+        String externalOrderNo = "rejected-" + UUID.randomUUID();
+        Map<String, Object> rejectedPayload = orderPayload(
+            directGoodsId, "0", CALLBACK_URL, externalOrderNo
+        );
+
+        Map<String, Object> response = controller.createRecharge(
+            signed(rejectedPayload), request("/agisoAcprSupplierApi/order/createRecharge")
+        );
+
+        assertThat(response).containsEntry("code", 1220);
+        verify(rejectedStore).record(
+            eq(90001L), any(String.class), anyMap(), eq(directGoods), eq(GoodsType.DIRECT), any(BigDecimal.class),
+            any(String.class), anyMap(), eq("1220"), eq("实际支付价格低于系统要求价格")
+        );
+
+        Map<String, Object> tampered = signed(orderPayload(
+            directGoodsId, "0", CALLBACK_URL, "tampered-" + UUID.randomUUID()
+        ));
+        tampered.put("maxAmount", "999");
+        assertThat(controller.createRecharge(
+            tampered, request("/agisoAcprSupplierApi/order/createRecharge")
+        )).containsEntry("code", 401);
+        verifyNoMoreInteractions(rejectedStore);
     }
 
     @Test

@@ -145,6 +145,13 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     || !Number.isFinite(Number(externalMaxAmount))
     ? undefined
     : numberValue(externalMaxAmount)
+  const expectedAmount = item.expectedAmount
+  const normalizedExpectedAmount = expectedAmount === undefined
+    || expectedAmount === null
+    || (typeof expectedAmount === 'string' && !expectedAmount.trim())
+    || !Number.isFinite(Number(expectedAmount))
+    ? undefined
+    : numberValue(expectedAmount)
   const averageRechargeDurationSeconds = item.averageRechargeDurationSeconds
   const normalizedAverageRechargeDurationSeconds = averageRechargeDurationSeconds === undefined
     || averageRechargeDurationSeconds === null
@@ -191,6 +198,10 @@ function normalizeOrder(item: Record<string, unknown>): Order {
     goodsName: text(item.goodsName, '未知商品'),
     amount: numberValue(item.amount ?? item.payAmount ?? item.totalAmount),
     externalMaxAmount: normalizedExternalMaxAmount,
+    expectedAmount: normalizedExpectedAmount,
+    rejectionCode: text(item.rejectionCode),
+    rejectionReason: text(item.rejectionReason ?? (text(item.status) === 'REJECTED' ? item.deliveryMessage : '')),
+    rejectedAt: text(item.rejectedAt),
     averageRechargeDurationSeconds: normalizedAverageRechargeDurationSeconds,
     todaySuccessRatePercentage: normalizedTodaySuccessRatePercentage,
     supplierPriceTrend,

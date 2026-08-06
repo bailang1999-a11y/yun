@@ -375,6 +375,11 @@ body::after {
   background: rgba(8, 17, 31, 0.98) !important;
 }
 
+.xiyiyun-rejection-popper.el-popper {
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 12px 14px !important;
+}
+
 .xiyiyun-price-trend-popper.el-popper {
   padding: 10px 12px !important;
   border: 0.5px solid rgba(103, 232, 249, 0.2) !important;

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiyiyun.shop.GoodsType;
+import com.xiyiyun.shop.persistence.AgisoRejectedOrderStore;
 import jakarta.servlet.http.HttpServletRequest;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +44,8 @@ public class AgisoSupplierController {
     private final String appSecret;
     private final long syncOrderTimeoutMillis;
     private final long syncOrderPollIntervalMillis;
+    @Autowired(required = false)
+    private AgisoRejectedOrderStore rejectedOrderStore;
 
     @Autowired
     public AgisoSupplierController(
@@ -194,23 +197,36 @@ public class AgisoSupplierController {
     }
 
     private Map<String, Object> createOrder(Map<String, Object> payload, HttpServletRequest request, GoodsType expectedType) {
-        return execute(payload, request, principal -> {
-            GoodsItem goods = service.goods(principal, longValue(payload, "productNo"));
+        return execute(payload, request, principal -> createVerifiedOrder(payload, request, expectedType, principal));
+    }
+
+    private Map<String, Object> createVerifiedOrder(
+        Map<String, Object> payload,
+        HttpServletRequest request,
+        GoodsType expectedType,
+        OutboundApiPrincipal principal
+    ) {
+        GoodsItem goods = null;
+        BigDecimal expectedCost = null;
+        String rechargeAccount = "";
+        Map<String, String> rechargeFields = Map.of();
+        OrderItem createdOrder = null;
+        try {
+            Map<String, Object> attach = parseJsonMap(text(payload, "attach"));
+            rechargeAccount = firstValue(attach, "account", "rechargeAccount", "recharge_account");
+            if (!StringUtils.hasText(rechargeAccount)) {
+                rechargeAccount = firstValue(payload, "account", "rechargeAccount", "recharge_account");
+            }
+            goods = service.goods(principal, longValue(payload, "productNo"));
             if (goods.type() != expectedType) {
                 throw new IllegalArgumentException(expectedType == GoodsType.CARD
                     ? "product is not a card product"
                     : "product is not a recharge product");
             }
             int quantity = intValue(payload, "buyNum", 1);
-            BigDecimal expectedCost = money(goods.price()).multiply(BigDecimal.valueOf(quantity));
+            rechargeFields = rechargeFields(goods, attach);
+            expectedCost = money(goods.price()).multiply(BigDecimal.valueOf(quantity));
             BigDecimal externalMaxAmount = validateMaxAmount(payload, expectedCost);
-
-            Map<String, Object> attach = parseJsonMap(text(payload, "attach"));
-            String rechargeAccount = firstValue(attach, "account", "rechargeAccount", "recharge_account");
-            if (!StringUtils.hasText(rechargeAccount)) {
-                rechargeAccount = firstValue(payload, "account", "rechargeAccount", "recharge_account");
-            }
-            Map<String, String> rechargeFields = rechargeFields(goods, attach);
             String externalOrderNo = requiredText(payload, "orderNo");
             String callbackUrl = text(payload, "callbackUrl");
             boolean async = apiType(goods) == API_TYPE_ASYNC;
@@ -220,9 +236,8 @@ public class AgisoSupplierController {
             if (async) {
                 callbackService.prepare(principal.user().id(), externalOrderNo, callbackUrl, expectedType);
             }
-            OrderItem order;
             try {
-                order = service.createOrder(
+                createdOrder = service.createOrder(
                     principal,
                     goods.id(),
                     quantity,
@@ -239,6 +254,7 @@ public class AgisoSupplierController {
                 }
                 throw ex;
             }
+            OrderItem order = createdOrder;
             if (!async) {
                 order = awaitSynchronousResult(principal, order);
             }
@@ -247,8 +263,87 @@ public class AgisoSupplierController {
                 data.put("orderStatus", 10);
                 callbackService.bind(principal.user().id(), externalOrderNo, order);
             }
+            if (rejectedOrderStore != null) {
+                resolveRejectedOrder(principal.user().id(), externalOrderNo, order.orderNo());
+            }
             return success(data);
-        });
+        } catch (RuntimeException ex) {
+            if (rejectedOrderStore != null && createdOrder == null && isBusinessRejection(ex)) {
+                Map<String, Object> response = errorCode(ex);
+                recordRejectedOrder(
+                    principal, payload, goods, expectedType, expectedCost, rechargeAccount, rechargeFields,
+                    String.valueOf(response.get("code")), rejectReason(ex)
+                );
+            }
+            throw ex;
+        }
+    }
+
+    private static String buyerAccount(UserItem user) {
+        if (user == null) return "";
+        if (StringUtils.hasText(user.username())) return user.username();
+        if (StringUtils.hasText(user.mobile())) return user.mobile();
+        return clean(user.nickname());
+    }
+
+    private static String rejectReason(RuntimeException ex) {
+        if (ex instanceof AgisoMaxAmountException) return "实际支付价格低于系统要求价格";
+        if (ex instanceof AgisoAsyncCallbackRequiredException) return "异步商品未提供回调地址";
+        String message = clean(ex.getMessage());
+        if ("goods not found".equals(message) || "goods unavailable".equals(message)) return "商品不存在或不可售";
+        if (message.contains("not a card product")) return "商品不是卡密商品";
+        if (message.contains("not a recharge product")) return "商品不是直充商品";
+        if (message.contains("stock")) return "商品库存不足";
+        return message.isEmpty() ? "下单请求未通过业务校验" : message;
+    }
+
+    private static boolean isBusinessRejection(RuntimeException ex) {
+        if (ex instanceof IllegalArgumentException) return true;
+        String message = clean(ex.getMessage()).toLowerCase(Locale.ROOT);
+        return message.contains("stock")
+            || message.contains("库存")
+            || message.contains("balance")
+            || message.contains("余额")
+            || message.contains("unavailable")
+            || message.contains("disabled")
+            || message.contains("forbidden")
+            || message.contains("不允许")
+            || message.contains("不可售");
+    }
+
+    private void recordRejectedOrder(
+        OutboundApiPrincipal principal,
+        Map<String, Object> payload,
+        GoodsItem goods,
+        GoodsType requestedType,
+        BigDecimal expectedCost,
+        String rechargeAccount,
+        Map<String, String> rechargeFields,
+        String rejectCode,
+        String rejectReason
+    ) {
+        try {
+            rejectedOrderStore.record(
+                principal.user().id(), buyerAccount(principal.user()), payload, goods, requestedType, expectedCost,
+                rechargeAccount, rechargeFields, rejectCode, rejectReason
+            );
+        } catch (RuntimeException storeFailure) {
+            LOGGER.error(
+                "Failed to persist authenticated Agiso rejection userId={} orderNo={}",
+                principal.user().id(), text(payload, "orderNo"), storeFailure
+            );
+        }
+    }
+
+    private void resolveRejectedOrder(Long userId, String externalOrderNo, String orderNo) {
+        try {
+            rejectedOrderStore.resolve(userId, externalOrderNo, orderNo);
+        } catch (RuntimeException storeFailure) {
+            LOGGER.error(
+                "Failed to resolve prior Agiso rejection userId={} orderNo={}",
+                userId, externalOrderNo, storeFailure
+            );
+        }
     }
 
     private OrderItem awaitSynchronousResult(OutboundApiPrincipal principal, OrderItem created) {

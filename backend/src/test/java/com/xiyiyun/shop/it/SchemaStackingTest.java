@@ -66,6 +66,20 @@ class SchemaStackingTest extends AbstractIntegrationTest {
     }
 
     @Test
+    @DisplayName("阿奇索业务拒绝记录具有幂等键和管理查询字段")
+    void agisoRejectedOrderStructureExists() {
+        assertTableExists("agiso_rejected_orders");
+        assertColumn("agiso_rejected_orders", "external_max_amount", "decimal(18,4)", true);
+        assertColumn("agiso_rejected_orders", "expected_amount", "decimal(18,4)", true);
+        assertColumn("agiso_rejected_orders", "reject_reason", "varchar(1000)", false);
+        assertUniqueIndexColumns(
+            "uk_agiso_rejected_order",
+            "agiso_rejected_orders",
+            List.of("protocol", "user_id", "external_order_no")
+        );
+    }
+
+    @Test
     @DisplayName("企业微信群机器人可靠通知任务结构存在")
     void weComRobotDeliveryTaskStructureExists() {
         assertTableExists("wecom_robot_delivery_tasks");
@@ -152,7 +166,8 @@ class SchemaStackingTest extends AbstractIntegrationTest {
         assertThat(tables).contains(
             "categories", "user_groups", "users", "goods", "cards", "card_kinds", "orders",
             "payment_records", "payment_callback_logs", "refund_records", "user_balance_transactions",
-            "system_settings", "delivery_tasks", "admin_operation_logs", "agiso_price_subscriptions");
+            "system_settings", "delivery_tasks", "admin_operation_logs", "agiso_price_subscriptions",
+            "agiso_rejected_orders");
 
         List<String> routines = jdbcTemplate.queryForList(
             "SELECT ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = ?",

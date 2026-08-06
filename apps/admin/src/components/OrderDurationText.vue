@@ -10,8 +10,10 @@ const props = defineProps<{
 
 const duration = computed(() => {
   props.now
-  const terminalStatuses = ['DELIVERED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED']
-  const endAt = terminalStatuses.includes(props.order.status) ? props.order.deliveredAt : undefined
+  const terminalStatuses = ['DELIVERED', 'REJECTED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED']
+  const endAt = terminalStatuses.includes(props.order.status)
+    ? props.order.rejectedAt || props.order.deliveredAt || props.order.createdAt
+    : undefined
   return formatDurationFromOrder(props.order.createdAt, endAt)
 })
 </script>

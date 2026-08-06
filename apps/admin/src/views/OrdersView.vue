@@ -112,7 +112,7 @@ function formatSuccessRate(value?: number) {
 
 function orderDurationTone(status?: string) {
   if (status === 'DELIVERED') return 'success'
-  if (['FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED'].includes(status || '')) return 'danger'
+  if (['REJECTED', 'FAILED', 'REFUNDED', 'CANCELLED', 'CLOSED'].includes(status || '')) return 'danger'
   return 'processing'
 }
 
@@ -348,6 +348,7 @@ function handlePageChange(page: number) {
 }
 
 async function handleManualCommand(command: unknown, row: Order) {
+  if (row.status === 'REJECTED') return
   const action = String(command)
   const copy: Record<string, { title: string; message: string; type: 'success' | 'warning' | 'error' }> = {
     success: { title: '手动标记成功', message: `确认将订单「${row.orderNo}」标记为成功？`, type: 'success' },
@@ -571,7 +572,13 @@ onBeforeUnmount(() => {
       </el-table-column>
       <el-table-column label="状态" width="130" align="center" header-align="center">
         <template #default="{ row }">
-          <OrderStatusBadge :status="row.status" />
+          <OrderStatusBadge
+            :status="row.status"
+            :rejection-reason="row.rejectionReason || row.deliveryMessage"
+            :request-id="row.requestId"
+            :external-max-amount="row.externalMaxAmount"
+            :expected-amount="row.expectedAmount"
+          />
         </template>
       </el-table-column>
       <el-table-column label="发货类型" width="120" align="center" header-align="center">
@@ -678,6 +685,7 @@ onBeforeUnmount(() => {
               <ChevronDown :size="17" />
             </button>
             <el-dropdown
+              v-if="row.status !== 'REJECTED'"
               trigger="click"
               :disabled="Boolean(operatingOrder)"
               @command="handleManualCommand($event, row)"

@@ -5,6 +5,7 @@ export const orderStatusOptions = [
   { label: '采购中', value: 'PROCURING' },
   { label: '待人工', value: 'WAITING_MANUAL' },
   { label: '已发货', value: 'DELIVERED' },
+  { label: '拒绝充值', value: 'REJECTED' },
   { label: '失败', value: 'FAILED' },
   { label: '已退款', value: 'REFUNDED' },
   { label: '已取消', value: 'CANCELLED' }
@@ -15,6 +16,7 @@ const orderStatusLabels: Record<string, string> = {
   PROCURING: '采购中',
   WAITING_MANUAL: '待人工处理',
   DELIVERED: '已发货',
+  REJECTED: '拒绝充值',
   FAILED: '处理失败',
   REFUNDED: '已退款',
   CANCELLED: '已取消'
@@ -25,6 +27,7 @@ const orderStatusTypes: Record<string, TagType> = {
   PROCURING: 'primary',
   WAITING_MANUAL: 'warning',
   DELIVERED: 'success',
+  REJECTED: 'danger',
   FAILED: 'danger',
   REFUNDED: 'info',
   CANCELLED: 'info'

@@ -55,7 +55,8 @@ public final class ItDatabase {
         "db/migrations/013_order_buyer_account.sql",
         "db/migrations/014_order_external_max_amount.sql",
         "db/migrations/015_wecom_robot_delivery_tasks.sql",
-        "db/migrations/016_supplier_price_history.sql");
+        "db/migrations/016_supplier_price_history.sql",
+        "db/migrations/017_agiso_rejected_orders.sql");
 
     private ItDatabase() {
     }

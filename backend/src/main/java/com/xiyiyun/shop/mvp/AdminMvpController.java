@@ -4,6 +4,7 @@ import com.alibaba.excel.EasyExcel;
 import com.alibaba.excel.ExcelWriter;
 import com.alibaba.excel.write.metadata.WriteSheet;
 import com.xiyiyun.shop.ApiResponse;
+import com.xiyiyun.shop.persistence.AgisoRejectedOrderStore;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -20,6 +21,9 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.Comparator;
+import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -49,6 +53,8 @@ public class AdminMvpController {
     private final InMemoryShopRepository repository;
     private final WeComRobotNotificationService weComRobotNotificationService;
     private final Path uploadDir;
+    @Autowired(required = false)
+    private AgisoRejectedOrderStore rejectedOrderStore;
 
     public AdminMvpController(
         InMemoryShopRepository repository,
@@ -578,7 +584,7 @@ public class AdminMvpController {
     }
 
     @GetMapping("/orders")
-    public ApiResponse<PageResult<OrderItem>> orders(
+    public ApiResponse<PageResult<Object>> orders(
         @RequestParam(required = false) String search,
         @RequestParam(required = false) String status,
         @RequestParam(required = false) String goodsType,
@@ -586,14 +592,10 @@ public class AdminMvpController {
         @RequestParam(required = false) Integer page,
         @RequestParam(required = false) Integer pageSize
     ) {
-        return page(
-            repository.pageOrders(
-                search, status, goodsType, parseOrderCreatedFrom(createdFrom), null,
-                normalizePageSize(pageSize), pageOffset(page, pageSize)
-            ),
-            page,
-            pageSize
-        );
+        int limit = normalizePageSize(pageSize);
+        long offset = pageOffset(page, pageSize);
+        OffsetDateTime parsedCreatedFrom = parseOrderCreatedFrom(createdFrom);
+        return page(adminOrders(search, status, goodsType, parsedCreatedFrom, limit, offset), page, pageSize);
     }
 
     @GetMapping("/orders/summary")
@@ -603,8 +605,20 @@ public class AdminMvpController {
         @RequestParam(required = false) String goodsType,
         @RequestParam(required = false) String createdFrom
     ) {
-        return ApiResponse.ok(repository.summarizeOrders(
-            search, status, goodsType, parseOrderCreatedFrom(createdFrom), null
+        OffsetDateTime parsedCreatedFrom = parseOrderCreatedFrom(createdFrom);
+        if ("REJECTED".equalsIgnoreCase(text(status))) {
+            return ApiResponse.ok(rejectedSummary(search, goodsType, parsedCreatedFrom));
+        }
+        OrderSummaryItem normal = repository.summarizeOrders(
+            search, status, goodsType, parsedCreatedFrom, null
+        );
+        if (rejectedOrderStore == null || !text(status).isEmpty()) return ApiResponse.ok(normal);
+        AgisoRejectedOrderStore.RejectedSummary rejected = rejectedOrderStore.summary(search, goodsType, parsedCreatedFrom);
+        return ApiResponse.ok(new OrderSummaryItem(
+            normal.total() + rejected.total(),
+            normal.externalAmount().add(rejected.externalAmount() == null ? BigDecimal.ZERO : rejected.externalAmount()),
+            normal.missingExternalAmountCount() + rejected.missingExternalAmountCount(),
+            normal.activeCount(), normal.deliveredCount(), normal.failedCount() + rejected.total()
         ));
     }
 
@@ -648,10 +662,14 @@ public class AdminMvpController {
     }
 
     @GetMapping("/orders/{orderNo}")
-    public ApiResponse<OrderItem> orderDetail(@PathVariable String orderNo) {
-        return repository.findOrder(orderNo)
-            .map(ApiResponse::ok)
-            .orElseGet(() -> ApiResponse.fail("order not found"));
+    public ApiResponse<Object> orderDetail(@PathVariable String orderNo) {
+        Optional<? extends Object> normal = repository.findOrder(orderNo);
+        if (normal.isPresent()) return ApiResponse.ok(normal.get());
+        if (rejectedOrderStore != null) {
+            Optional<RejectedOrderItem> rejected = rejectedOrderStore.find(orderNo);
+            if (rejected.isPresent()) return ApiResponse.ok(rejected.get());
+        }
+        return ApiResponse.fail("order not found");
     }
 
     @PostMapping("/orders/{orderNo}/refresh-callback")
@@ -789,6 +807,53 @@ public class AdminMvpController {
 
     private int normalizePageSize(Integer pageSize) {
         return pageSize == null ? 10 : Math.max(1, Math.min(pageSize, 100));
+    }
+
+    private PageSlice<Object> adminOrders(
+        String search,
+        String status,
+        String goodsType,
+        OffsetDateTime createdFrom,
+        int limit,
+        long offset
+    ) {
+        if ("REJECTED".equalsIgnoreCase(text(status))) {
+            if (rejectedOrderStore == null) return PageSlice.empty();
+            PageSlice<RejectedOrderItem> rejected = rejectedOrderStore.page(search, goodsType, createdFrom, limit, offset);
+            return new PageSlice<>(new ArrayList<>(rejected.items()), rejected.total());
+        }
+        if (rejectedOrderStore == null || !text(status).isEmpty()) {
+            PageSlice<OrderItem> normal = repository.pageOrders(
+                search, status, goodsType, createdFrom, null, limit, offset
+            );
+            return new PageSlice<>(new ArrayList<>(normal.items()), normal.total());
+        }
+
+        int prefixLimit = (int) Math.min(Integer.MAX_VALUE, offset + limit);
+        PageSlice<OrderItem> normal = repository.pageOrders(search, "", goodsType, createdFrom, null, prefixLimit, 0);
+        PageSlice<RejectedOrderItem> rejected = rejectedOrderStore.page(search, goodsType, createdFrom, prefixLimit, 0);
+        List<Object> merged = new ArrayList<>(normal.items().size() + rejected.items().size());
+        merged.addAll(normal.items());
+        merged.addAll(rejected.items());
+        merged.sort(Comparator.comparing(this::adminOrderCreatedAt, Comparator.nullsLast(Comparator.naturalOrder())).reversed());
+        int from = (int) Math.min(offset, merged.size());
+        int to = Math.min(from + limit, merged.size());
+        return new PageSlice<>(merged.subList(from, to), normal.total() + rejected.total());
+    }
+
+    private OffsetDateTime adminOrderCreatedAt(Object item) {
+        if (item instanceof OrderItem order) return order.createdAt();
+        if (item instanceof RejectedOrderItem rejected) return rejected.createdAt();
+        return null;
+    }
+
+    private OrderSummaryItem rejectedSummary(String search, String goodsType, OffsetDateTime createdFrom) {
+        if (rejectedOrderStore == null) return OrderSummaryItem.empty();
+        AgisoRejectedOrderStore.RejectedSummary rejected = rejectedOrderStore.summary(search, goodsType, createdFrom);
+        return new OrderSummaryItem(
+            rejected.total(), rejected.externalAmount(), rejected.missingExternalAmountCount(),
+            0, 0, rejected.total()
+        );
     }
 
     /** 分页偏移量。用 long 承接，避免 page 传入极大值时 {@code (page-1)*pageSize} 溢出成负数。 */
