@@ -4,10 +4,15 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.UnknownHostException;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.channels.UnresolvedAddressException;
 import java.nio.charset.Charset;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -23,8 +28,8 @@ import org.springframework.stereotype.Component;
  *   <li><b>连接池</b>：全进程共享单个 {@link HttpClient} 实例（JDK HttpClient 内部自带连接复用）。
  *       原代码每次调用都新建实例，连接无法复用。</li>
  *   <li><b>超时</b>：连接超时与读取超时都取供应商配置的 {@code timeoutSeconds}，语义与原代码一致。</li>
- *   <li><b>重试</b>：仅对 {@link SupplierHttpRequest#idempotent()} 为 true 的请求做一次退避重试，
- *       且只在「连接/读取异常与 5xx」时重试；下单类请求永不重试。</li>
+ *   <li><b>重试</b>：查询请求保持原有一次退避重试；下单请求仅在连接尚未建立时失败才重试，
+ *       总共最多三次。下单读取超时、HTTP 错误和业务错误不重试，避免重复充值。</li>
  * </ul>
  *
  * <p>本类<b>不</b>包含任何供应商名字的条件分支：编码、Content-Type、自定义头
@@ -33,7 +38,8 @@ import org.springframework.stereotype.Component;
 @Component
 public class SupplierHttpClient {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    private static final int MAX_ATTEMPTS = 2;
+    private static final int QUERY_MAX_ATTEMPTS = 2;
+    private static final int MUTATION_MAX_ATTEMPTS = 3;
     private static final Duration RETRY_BACKOFF = Duration.ofMillis(200);
 
     private final HttpClient sharedClient;
@@ -80,7 +86,7 @@ public class SupplierHttpClient {
         profile.mergedHeaders(request.extraHeaders()).forEach(builder::header);
         HttpRequest httpRequest = builder.build();
 
-        int maxAttempts = request.idempotent() ? MAX_ATTEMPTS : 1;
+        int maxAttempts = request.idempotent() ? QUERY_MAX_ATTEMPTS : MUTATION_MAX_ATTEMPTS;
         SupplierTransportException lastFailure = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
@@ -101,7 +107,7 @@ public class SupplierHttpClient {
                         status,
                         null
                     );
-                    if (attempt < maxAttempts) {
+                    if (request.idempotent() && attempt < maxAttempts) {
                         backoff();
                         continue;
                     }
@@ -132,6 +138,19 @@ public class SupplierHttpClient {
                     null,
                     ex
                 );
+                if (attempt < maxAttempts && (request.idempotent() || isConnectionFailure(ex))) {
+                    backoff();
+                    continue;
+                }
+                throw lastFailure;
+            } catch (UnresolvedAddressException ex) {
+                lastFailure = new SupplierTransportException(
+                    profile.supplierCode(),
+                    request.action(),
+                    profile.supplierCode() + " " + request.action() + " failed: " + ex.getMessage(),
+                    null,
+                    ex
+                );
                 if (attempt < maxAttempts) {
                     backoff();
                     continue;
@@ -142,6 +161,21 @@ public class SupplierHttpClient {
         throw lastFailure == null
             ? new SupplierTransportException(profile.supplierCode(), request.action(), "request failed")
             : lastFailure;
+    }
+
+    private static boolean isConnectionFailure(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof HttpConnectTimeoutException
+                || current instanceof ConnectException
+                || current instanceof UnknownHostException
+                || current instanceof NoRouteToHostException
+                || current instanceof UnresolvedAddressException) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private void backoff() {

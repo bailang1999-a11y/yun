@@ -1,7 +1,7 @@
 {
   "name": "xiyiyun-platform",
   "private": true,
-  "version": "1.58",
+  "version": "1.59",
   "workspaces": [
     "apps/h5",
     "apps/admin",

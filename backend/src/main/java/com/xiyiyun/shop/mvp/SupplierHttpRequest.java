@@ -7,8 +7,8 @@ import java.util.Map;
 /**
  * 一次上游 HTTP 调用的声明。
  *
- * <p>{@link #idempotent()} 决定是否允许重试：查询类（余额/测连通/订单状态/商品列表）为 true，
- * <b>下单类必须为 false</b>——重试下单会造成上游重复受理与重复扣款。</p>
+ * <p>{@link #idempotent()} 标记查询/写操作语义。查询类（余额/测连通/订单状态/商品列表）
+ * 保持原有重试策略；下单等写操作只在尚未建立连接时失败才重试，且总共最多三次。</p>
  */
 public record SupplierHttpRequest(
     URI uri,
@@ -30,7 +30,7 @@ public record SupplierHttpRequest(
         return new SupplierHttpRequest(uri, body, headers, timeout, action, true);
     }
 
-    /** 下单等写操作：禁止重试。 */
+    /** 下单等写操作：仅连接建立失败时由客户端安全重试。 */
     public static SupplierHttpRequest mutation(URI uri, String body, Duration timeout, String action) {
         return new SupplierHttpRequest(uri, body, Map.of(), timeout, action, false);
     }
