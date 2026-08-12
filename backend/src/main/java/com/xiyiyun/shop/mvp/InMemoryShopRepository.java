@@ -3052,6 +3052,40 @@ public class InMemoryShopRepository implements TokenAuthPort {
         }
 
         @Override
+        public Optional<OrderItem> recoverUnsubmittedProcurement(OrderItem candidate) {
+            if (candidate == null) {
+                return Optional.empty();
+            }
+            OrderItem current = persistentOrder(candidate.orderNo()).orElse(candidate);
+            if (current.goodsType() != GoodsType.DIRECT
+                || current.status() != OrderStatus.PROCURING
+                || (current.upstreamOrderNo() != null && !current.upstreamOrderNo().isBlank())
+                || (current.channelAttempts() != null && !current.channelAttempts().isEmpty())) {
+                return Optional.empty();
+            }
+            if (fundsLedgerEnabled() && !fundsLedgerStore.compareAndSetStatus(
+                current.orderNo(), OrderStatus.PROCURING.name(), OrderStatus.DELIVERING.name())) {
+                return Optional.empty();
+            }
+            OrderItem claimed = current.withProcurementResult(
+                OrderStatus.DELIVERING,
+                current.deliveryItems() == null ? List.of() : current.deliveryItems(),
+                List.of(),
+                "系统补偿采购：正在提交上游",
+                current.paidAt(),
+                null
+            );
+            saveOrder(claimed);
+            publishOrder(claimed);
+            OrderItem recovered = procureWithFallback(claimed, "系统补偿采购");
+            saveOrder(recovered);
+            publishOrder(recovered);
+            appendOperation("ORDER_COMPENSATION_SUBMIT", "ORDER", current.orderNo(),
+                "支付后未发起采购，已执行安全补发");
+            return Optional.of(recovered);
+        }
+
+        @Override
         public boolean fundsLedgerEnabled() {
             return InMemoryShopRepository.this.fundsLedgerEnabled();
         }
@@ -3739,7 +3773,7 @@ public class InMemoryShopRepository implements TokenAuthPort {
                 OrderStatus.PROCURING,
                 List.of(),
                 List.of(),
-                "支付成功，直充订单进入采购流程",
+                OrderCompensationService.UNSUBMITTED_PROCUREMENT_MESSAGE,
                 paidAt,
                 null
             );
@@ -4324,7 +4358,11 @@ public class InMemoryShopRepository implements TokenAuthPort {
 
     private void publishOrder(OrderItem order) {
         appendSmsLogIfNeeded(order);
-        realtimeBroadcaster.publish(withLatestSupplierNames(order));
+        try {
+            realtimeBroadcaster.publish(withLatestSupplierNames(order));
+        } catch (RuntimeException ex) {
+            LOG.warn("order realtime publish failed: orderNo={}", order == null ? "" : order.orderNo(), ex);
+        }
     }
 
     private OrderItem withLatestSupplierNames(OrderItem order) {

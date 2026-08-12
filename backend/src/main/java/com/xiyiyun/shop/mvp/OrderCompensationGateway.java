@@ -31,6 +31,9 @@ public interface OrderCompensationGateway {
      */
     List<OrderItem> unsettledOrderCandidates(OffsetDateTime deadline, int limit, boolean withoutCallback);
 
+    /** 补发支付成功但尚未真正提交采购的直充订单。 */
+    Optional<OrderItem> recoverUnsubmittedProcurement(OrderItem order);
+
     /** 是否已启用资金/库存持久化能力（无 DB 的纯内存单测里为 false，补偿任务直接不动手）。 */
     boolean fundsLedgerEnabled();
 

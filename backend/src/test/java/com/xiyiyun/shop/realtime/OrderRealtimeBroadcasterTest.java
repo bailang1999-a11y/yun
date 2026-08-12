@@ -1,6 +1,7 @@
 package com.xiyiyun.shop.realtime;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xiyiyun.shop.GoodsType;
@@ -48,6 +49,23 @@ class OrderRealtimeBroadcasterTest {
         assertThat(ownerMessages.get(0)).contains("\"type\":\"ORDER_UPDATED\"", "\"userId\":90001");
     }
 
+    @Test
+    void brokenSessionNeverInterruptsRealtimeBroadcasting() {
+        OrderRealtimeBroadcaster broadcaster = new OrderRealtimeBroadcaster(new ObjectMapper().findAndRegisterModules());
+        List<String> healthyMessages = new ArrayList<>();
+        WebSocketSession broken = new BrokenWebSocketSession(Map.of("role", "admin"));
+        WebSocketSession healthy = session(Map.of("role", "admin"), healthyMessages);
+
+        broadcaster.addSession(broken);
+        broadcaster.addSession(healthy);
+
+        assertThatCode(() -> broadcaster.publish(orderForUser(90001L))).doesNotThrowAnyException();
+        assertThat(healthyMessages).hasSize(1);
+
+        assertThatCode(() -> broadcaster.publish(orderForUser(90001L))).doesNotThrowAnyException();
+        assertThat(healthyMessages).hasSize(2);
+    }
+
     private static WebSocketSession session(Map<String, Object> attributes, List<String> sentPayloads) {
         return new RecordingWebSocketSession(attributes, sentPayloads);
     }
@@ -79,7 +97,7 @@ class OrderRealtimeBroadcasterTest {
         );
     }
 
-    private static final class RecordingWebSocketSession implements WebSocketSession {
+    private static class RecordingWebSocketSession implements WebSocketSession {
         private final Map<String, Object> attributes;
         private final List<String> sentPayloads;
         private boolean open = true;
@@ -170,6 +188,17 @@ class OrderRealtimeBroadcasterTest {
         @Override
         public void close(CloseStatus status) {
             open = false;
+        }
+    }
+
+    private static final class BrokenWebSocketSession extends RecordingWebSocketSession {
+        private BrokenWebSocketSession(Map<String, Object> attributes) {
+            super(attributes, new ArrayList<>());
+        }
+
+        @Override
+        public void sendMessage(WebSocketMessage<?> message) {
+            throw new IllegalStateException("TEXT_PARTIAL_WRITING");
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.xiyiyun.shop.mvp;
 
 import com.xiyiyun.shop.OrderStatus;
+import com.xiyiyun.shop.GoodsType;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
 import java.util.Comparator;
@@ -51,6 +52,7 @@ import org.slf4j.LoggerFactory;
 public class OrderCompensationService {
     private static final Logger log = LoggerFactory.getLogger(OrderCompensationService.class);
     private static final java.time.Duration FAST_POLL_MIN_AGE = java.time.Duration.ofSeconds(10);
+    static final String UNSUBMITTED_PROCUREMENT_MESSAGE = "支付成功，直充订单待提交上游";
 
     /** 支付超时可关的状态，与 {@link OrderStateMachine#canExpirePayment} 一致。 */
     private static final Set<OrderStatus> CLOSEABLE = Set.of(OrderStatus.CREATED, OrderStatus.UNPAID);
@@ -175,6 +177,15 @@ public class OrderCompensationService {
         for (OrderItem order : limited(candidates, properties.pollBatchLimit())) {
             processed++;
             try {
+                if (hasNoUpstreamSubmission(order)) {
+                    Optional<OrderItem> recovered = gateway.recoverUnsubmittedProcurement(order);
+                    if (recovered.isPresent()) {
+                        changed++;
+                    } else {
+                        skipped++;
+                    }
+                    continue;
+                }
                 // HTTP 在这里发生，本方法不持有任何 JVM 锁
                 Optional<UpstreamOrderSnapshot> fetched = gateway.fetchUpstreamOrderStatus(order);
                 if (fetched.isEmpty()) {
@@ -342,6 +353,15 @@ public class OrderCompensationService {
     ) {
         OffsetDateTime deadline = OffsetDateTime.now().minus(minAge);
         return gateway.unsettledOrderCandidates(deadline, limit, withoutCallback);
+    }
+
+    private static boolean hasNoUpstreamSubmission(OrderItem order) {
+        return order != null
+            && order.goodsType() == GoodsType.DIRECT
+            && order.status() == OrderStatus.PROCURING
+            && UNSUBMITTED_PROCUREMENT_MESSAGE.equals(order.deliveryMessage())
+            && (order.upstreamOrderNo() == null || order.upstreamOrderNo().isBlank())
+            && (order.channelAttempts() == null || order.channelAttempts().isEmpty());
     }
 
     private static <T> List<T> limited(List<T> source, int limit) {

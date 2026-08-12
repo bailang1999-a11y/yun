@@ -78,6 +78,11 @@ class OrderCompensationIT extends AbstractIntegrationTest {
             }
 
             @Override
+            public Optional<OrderItem> recoverUnsubmittedProcurement(OrderItem order) {
+                return real.recoverUnsubmittedProcurement(order);
+            }
+
+            @Override
             public boolean fundsLedgerEnabled() {
                 return real.fundsLedgerEnabled();
             }
