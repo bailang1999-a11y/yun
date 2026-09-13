@@ -11,8 +11,8 @@
 
       <p v-if="error" class="alert-line">{{ error }}</p>
       <p v-if="copyMessage" class="copy-feedback" role="status">{{ copyMessage }}</p>
-      <div class="table-panel">
-        <table v-if="orders.length">
+      <div class="table-panel orders-table-panel">
+        <table v-if="orders.length" class="orders-table">
           <thead>
             <tr>
               <th>订单号</th>

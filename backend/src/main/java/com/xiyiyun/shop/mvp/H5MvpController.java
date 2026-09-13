@@ -57,7 +57,7 @@ public class H5MvpController {
     public ApiResponse<AuthSession<UserItem>> login(@RequestBody LoginRequest request, HttpServletRequest servletRequest) {
         try {
             return ApiResponse.ok(repository.loginUser(request, clientIp(servletRequest)));
-        } catch (IllegalArgumentException ex) {
+        } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
     }
@@ -66,7 +66,7 @@ public class H5MvpController {
     public ApiResponse<AuthSession<UserItem>> smsLogin(@RequestBody LoginRequest request, HttpServletRequest servletRequest) {
         try {
             return ApiResponse.ok(repository.loginUser(request, clientIp(servletRequest)));
-        } catch (IllegalArgumentException ex) {
+        } catch (IllegalArgumentException | IllegalStateException ex) {
             return ApiResponse.fail(ex.getMessage());
         }
     }

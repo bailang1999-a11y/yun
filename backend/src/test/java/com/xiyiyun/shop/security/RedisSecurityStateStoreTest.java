@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -128,5 +130,32 @@ class RedisSecurityStateStoreTest {
 
         assertThat(store.markMemberApiNonceReplay("app:nonce", Duration.ofMinutes(5))).isEmpty();
         assertThat(store.consumeSliderToken("slider_1")).isEmpty();
+    }
+
+    /**
+     * IP 计数键必须始终带 TTL：历史上出现过 EXPIRE 失败或键被重建后永久驻留（TTL=-1），
+     * 计数只增不减，超过阈值后把整站登录全部拒绝。
+     */
+    @Test
+    void loginIpCounterSelfHealsMissingTtl() {
+        Duration window = Duration.ofMinutes(5);
+        when(valueOperations.increment("xiyiyun:login:ip:203.0.113.9")).thenReturn(1L, 2L);
+        when(redisTemplate.getExpire("xiyiyun:login:ip:203.0.113.9")).thenReturn(-1L);
+
+        assertThat(store.incrementLoginIpAttempt("203.0.113.9", window)).contains(1L);
+        assertThat(store.incrementLoginIpAttempt("203.0.113.9", window)).contains(2L);
+
+        verify(redisTemplate, times(2)).expire("xiyiyun:login:ip:203.0.113.9", window);
+    }
+
+    @Test
+    void loginIpCounterKeepsExistingWindowWithoutExtendingIt() {
+        Duration window = Duration.ofMinutes(5);
+        when(valueOperations.increment("xiyiyun:login:ip:203.0.113.10")).thenReturn(7L);
+        when(redisTemplate.getExpire("xiyiyun:login:ip:203.0.113.10")).thenReturn(120L);
+
+        assertThat(store.incrementLoginIpAttempt("203.0.113.10", window)).contains(7L);
+
+        verify(redisTemplate, never()).expire("xiyiyun:login:ip:203.0.113.10", window);
     }
 }

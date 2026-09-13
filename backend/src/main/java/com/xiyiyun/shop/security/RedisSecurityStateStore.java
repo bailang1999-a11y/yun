@@ -135,9 +135,14 @@ public class RedisSecurityStateStore {
         try {
             String key = LOGIN_IP_PREFIX + ip;
             Long count = redisTemplate.opsForValue().increment(key);
-            if (count != null && count == 1L) {
-                // 只在窗口起点设置 TTL：固定窗口，避免攻击者靠持续请求把窗口无限推后
-                redisTemplate.expire(key, window);
+            if (count != null) {
+                // 只在窗口起点设置 TTL：固定窗口，避免攻击者靠持续请求把窗口无限推后。
+                // 另外对已存在但无 TTL 的键（-1，历史遗留或在 EXPIRE 失败后重建）补设 TTL，
+                // 否则计数永不过期，会一直高于阈值把整站登录锁死。
+                Long ttl = redisTemplate.getExpire(key);
+                if (count == 1L || ttl == null || ttl < 0) {
+                    redisTemplate.expire(key, window);
+                }
             }
             return count == null ? Optional.empty() : Optional.of(count);
         } catch (RuntimeException ex) {
